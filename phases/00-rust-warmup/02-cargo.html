@@ -29,15 +29,18 @@
 
 rustc --version    # e.g. rustc 1.x.y
 cargo --version</code></pre>
-  <p><span class="verify-tag">⚠️VERIFY</span> the install command against
-  <a href="https://www.rust-lang.org/tools/install">rust-lang.org/tools/install</a> — it occasionally
-  changes. Everything else here is stable.</p>
+  <p>The Rust project publishes this command as the supported <code>rustup</code> installer for
+  macOS, Linux, and other Unix-like systems.
+  <span class="src">[src: <a href="https://www.rust-lang.org/tools/install">Install Rust</a>]</span></p>
 
   <h2>What Cargo is</h2>
   <p>Coming from Flutter, the mental model is easy: <strong>Cargo is to Rust what
   <code>pub</code>/<code>flutter</code> + <code>pubspec.yaml</code> are to Dart.</strong> It creates
-  projects, downloads dependencies ("crates"), builds, tests, and runs. A "crate" is Rust's unit of
-  a package/library, the equivalent of a Dart package.</p>
+  projects, downloads dependencies, builds, tests, and runs. A <strong>package</strong> is the
+  directory described by one <code>Cargo.toml</code>. A <strong>crate</strong> is a compilation unit
+  rooted at a file such as <code>src/lib.rs</code> or <code>src/main.rs</code>; one package can contain
+  at most one library crate and multiple binary crates.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch07-01-packages-and-crates.html">Rust Book: packages and crates</a>]</span></p>
 
   <div class="tablewrap">
   <table>
@@ -92,7 +95,7 @@ cargo run                # builds + runs; prints "Hello, world!"</code></pre>
 [package]
 name = <span class="tok-s">"kvstore"</span>
 version = <span class="tok-s">"0.1.0"</span>
-edition = <span class="tok-s">"2021"</span>   <span class="tok-c"># the Rust "edition" — language epoch; 2021 is a safe default ⚠️VERIFY latest</span>
+edition = <span class="tok-s">"2024"</span>   <span class="tok-c"># current edition used by `cargo new`</span>
 
 <span class="tok-c"># dependencies (crates from crates.io)</span>
 [dependencies]
@@ -184,7 +187,9 @@ assertion `left == right` failed
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Book:</strong> Ch.1 (Getting Started), Ch.7 (packages/crates/modules), Ch.11 (writing tests).</li>
-      <li><strong>Doc:</strong> The Cargo Book — <a href="https://doc.rust-lang.org/cargo/">doc.rust-lang.org/cargo</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
+      <li><strong>Doc:</strong> <a href="https://doc.rust-lang.org/cargo/">The Cargo Book</a>;
+      <a href="https://doc.rust-lang.org/cargo/commands/cargo-new.html"><code>cargo new</code></a>
+      documents current project creation and edition selection.</li>
       <li><strong>Hands-on:</strong> Rustlings <code>intro</code> exercises to get the loop in your fingers.</li>
     </ul>
   </div>

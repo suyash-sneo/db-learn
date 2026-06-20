@@ -27,11 +27,11 @@ const PHASES = [
   { id: "p1", num: "1", title: "FFI spike — de-risk the scary part", dir: "phases/01-ffi-spike",
     lessons: [
       ["1.1", "What a C ABI is; ABI vs API",            "01-c-abi.html", "done"],
-      ["1.2", "extern \"C\", no_mangle, repr(C)",       "02-extern-c.html", "done"],
+      ["1.2", "extern \"C\", unsafe(no_mangle), repr(C)", "02-extern-c.html", "done"],
       ["1.3", "Passing primitives & pointers",          "03-primitives-pointers.html", "done"],
       ["1.4", "The opaque-handle pattern",              "04-opaque-handle.html", "done"],
       ["1.5", "Byte buffers & memory ownership",        "05-byte-buffers.html", "done"],
-      ["1.6", "Panics across FFI = UB",                 "06-panics.html", "done"],
+      ["1.6", "Panics at an FFI boundary",              "06-panics.html", "done"],
       ["1.7", "Errors: codes + out-params",             "07-error-codes.html", "done"],
       ["1.8", "Generating the header with cbindgen",    "08-cbindgen.html", "done"],
       ["1.9", "dart:ffi basics",                        "09-dart-ffi.html", "done"],
@@ -122,9 +122,12 @@ const PHASES = [
 
 /* flat list for prev/next */
 const FLAT = [];
-PHASES.forEach(p => p.lessons.forEach(l =>
-  FLAT.push({ pid: p.id, phaseNum: p.num, num: l[0], title: l[1],
-              url: p.dir + "/" + l[2], status: l[3] })));
+PHASES.forEach(p => p.lessons.forEach(l => {
+  if (l[3] === "done") {
+    FLAT.push({ pid: p.id, phaseNum: p.num, num: l[0], title: l[1],
+                url: p.dir + "/" + l[2], status: l[3] });
+  }
+}));
 
 /* ---- Theme ------------------------------------------------------------ */
 (function initTheme() {
@@ -175,14 +178,19 @@ function buildChrome() {
   let html = '<div class="drawer-head">Curriculum map</div>';
   PHASES.forEach(p => {
     html += '<div class="phase">';
-    html += '<a class="phase-link" href="' + root + p.dir + '/index.html">' +
-            'Phase ' + p.num + ' — ' + p.title + '</a><ul>';
+    const phaseDone = p.lessons.some(l => l[3] === "done");
+    html += phaseDone
+      ? '<a class="phase-link" href="' + root + p.dir + '/index.html">Phase ' +
+        p.num + ' — ' + p.title + '</a><ul>'
+      : '<span class="phase-link soon-link">Phase ' + p.num + ' — ' + p.title +
+        ' <span class="muted">·soon</span></span><ul>';
     p.lessons.forEach(l => {
       const lid = p.id + ":" + l[0];
       const cls = (lid === curId) ? ' class="current"' : '';
-      const tag = l[3] === "soon" ? ' <span class="muted">·soon</span>' : '';
-      html += '<li><a' + cls + ' href="' + root + p.dir + '/' + l[2] + '">' +
-              (l[0] === "build" ? "▸ Build" : l[0]) + ' — ' + l[1] + tag + '</a></li>';
+      const label = (l[0] === "build" ? "▸ Build" : l[0]) + ' — ' + l[1];
+      html += l[3] === "done"
+        ? '<li><a' + cls + ' href="' + root + p.dir + '/' + l[2] + '">' + label + '</a></li>'
+        : '<li><span class="soon-link">' + label + ' <span class="muted">·soon</span></span></li>';
     });
     html += '</ul></div>';
   });

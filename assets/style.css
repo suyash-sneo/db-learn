@@ -135,11 +135,14 @@ nav#drawer .drawer-head {
   background: var(--bg-soft);
 }
 nav#drawer .phase { padding: .35rem 0; }
-nav#drawer .phase > a.phase-link {
+nav#drawer .phase > .phase-link {
   display: block; padding: .55rem 1rem; font-weight: 600; color: var(--heading);
   text-decoration: none; font-size: .92rem;
 }
 nav#drawer .phase > a.phase-link:hover { background: var(--bg-raise); }
+nav#drawer .soon-link { display: block; padding: .42rem 1rem .42rem 1.6rem;
+  color: var(--text-faint); font-size: .88rem; }
+nav#drawer .phase > .soon-link { padding: .55rem 1rem; font-weight: 600; font-size: .92rem; }
 nav#drawer ul { list-style: none; margin: 0 0 .3rem; padding: 0; }
 nav#drawer li a {
   display: block; padding: .42rem 1rem .42rem 1.6rem;
@@ -354,6 +357,7 @@ figcaption { font-size: .82rem; color: var(--text-faint); margin-top: .5rem; }
 .omap .phase-block > .ph-head .ph-num { color: var(--accent); }
 .omap ol { margin: .6rem 0; }
 .omap .lesson-row a { display: block; padding: .15rem 0; }
+.omap .lesson-row .soon-link { display: block; padding: .15rem 0; color: var(--text-faint); }
 .omap .build-row { font-weight: 600; color: var(--accent-2); }
 
 /* status note (e.g. "authored" vs "coming soon") */

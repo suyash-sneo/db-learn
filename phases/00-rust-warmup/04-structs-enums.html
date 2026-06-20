@@ -74,7 +74,8 @@ p.<span class="tok-f">mark_dirty</span>();
   <p><code>match</code> branches on a value and <em>destructures</em> it — pulls the inner data out —
   in one step. Critically, it must be <strong>exhaustive</strong>: you handle every variant or the
   code won't compile. Add a new node type later and the compiler points you at every
-  <code>match</code> you forgot to update.</p>
+  <code>match</code> you forgot to update.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch06-02-match.html">Rust Book: <code>match</code></a>]</span></p>
   <span class="code-label">rust</span>
 <pre><code><span class="tok-k">fn</span> <span class="tok-f">key_count</span>(node: &amp;<span class="tok-f">Node</span>) -&gt; <span class="tok-f">usize</span> {
     <span class="tok-k">match</span> node {

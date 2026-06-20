@@ -118,17 +118,21 @@ cache.<span class="tok-f">insert</span>(1, <span class="tok-f">vec!</span>[0u8; 
 <span class="tok-k">for</span> (i, b) <span class="tok-k">in</span> buf.<span class="tok-f">iter</span>().<span class="tok-f">enumerate</span>() { <span class="tok-c">/* i: index, b: &amp;u8 */</span> }
 <span class="tok-k">let</span> total: <span class="tok-f">u64</span> = nums.<span class="tok-f">iter</span>().<span class="tok-f">map</span>(|&amp;x| x <span class="tok-k">as</span> <span class="tok-f">u64</span>).<span class="tok-f">sum</span>();</code></pre>
   <p><code>|x| …</code> is a <strong>closure</strong> (an anonymous function). Iterator chains
-  (<code>.iter().map().filter().collect()</code>) are idiomatic and compile down to tight loops.</p>
+  (<code>.iter().map().filter().collect()</code>) are idiomatic; iterator adapters are lazy until a
+  consuming operation drives them.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch13-02-iterators.html">Rust Book: iterators</a>]</span></p>
 
   <div class="box rust">
     <div class="box-title">🦀 Rust just-in-time</div>
     <ul>
-      <li>Fixed-size array vs <code>Vec</code>: <code>[u8; 4096]</code> is a stack array with a
-      compile-time length; <code>Vec&lt;u8&gt;</code> is heap-allocated and growable. Pages can be
-      either; a fixed array makes "this is exactly 4096 bytes" a type-level guarantee.</li>
+      <li>Fixed-size array vs <code>Vec</code>: <code>[u8; 4096]</code> has a compile-time length and
+      stores its elements inline wherever the array value itself is placed; <code>Vec&lt;u8&gt;</code>
+      owns a growable heap allocation. A fixed array makes “exactly 4096 elements” a type-level
+      guarantee.</li>
       <li><code>&amp;str</code> (borrowed string slice) is to <code>String</code> as <code>&amp;[u8]</code>
-      is to <code>Vec&lt;u8&gt;</code>. A <code>String</code> is just a <code>Vec&lt;u8&gt;</code> known to be
-      valid UTF-8.</li>
+      is to <code>Vec&lt;u8&gt;</code>. <code>String</code> is an owned UTF-8 string backed by a byte
+      vector.
+      <span class="src">[src: <a href="https://doc.rust-lang.org/std/string/struct.String.html"><code>String</code> docs</a>]</span></li>
       <li>Convert text↔bytes: <code>s.as_bytes()</code> (&amp;str → &amp;[u8]) and
       <code>String::from_utf8(vec)</code> (bytes → Result&lt;String&gt;).</li>
       <li>Read more: <a href="https://doc.rust-lang.org/book/ch08-00-common-collections.html">Book Ch.8</a>
@@ -166,9 +170,10 @@ cache.<span class="tok-f">insert</span>(1, <span class="tok-f">vec!</span>[0u8; 
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Book:</strong> Ch.8 (collections), Ch.4.3 (slices), Ch.13 (iterators &amp; closures).</li>
-      <li><strong>Doc:</strong> <code>std::primitive::u32</code> for <code>to_le_bytes</code>/
-      <code>from_le_bytes</code>, and <code>slice</code> methods. <span class="verify-tag">⚠️VERIFY</span>
-      exact method names if you quote them in code comments.</li>
+      <li><strong>Doc:</strong>
+      <a href="https://doc.rust-lang.org/std/primitive.u32.html#method.to_le_bytes"><code>u32::to_le_bytes</code></a>,
+      <a href="https://doc.rust-lang.org/std/primitive.u32.html#method.from_le_bytes"><code>u32::from_le_bytes</code></a>,
+      and <a href="https://doc.rust-lang.org/std/primitive.slice.html">slice methods</a>.</li>
       <li><strong>Hands-on:</strong> Rustlings <code>vecs</code>, <code>hashmaps</code>, <code>slices</code>.</li>
     </ul>
   </div>

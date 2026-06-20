@@ -16,9 +16,9 @@
   stable error-code scheme now so the whole engine speaks it.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>C has no <code>Result</code>, no exceptions, no <code>Option</code>. The universal C convention is:
-  <strong>the function returns an integer status code; any real output is written to caller-provided
-  pointers (out-params).</strong> Every public engine function will follow this, so the caller can write
+  <p>C has no built-in equivalent of Rust's <code>Result</code> or <code>Option</code>. A common,
+  portable C API convention is: <strong>the function returns an integer status code; output values are
+  written to caller-provided pointers (out-params).</strong> This engine will follow that convention, so the caller can write
   <code>if (rc != 0) handle_error();</code> in any language. Lesson 0.5 built your Rust error enum; this
   lesson maps it to the wire.</p>
 
@@ -28,8 +28,9 @@
   adopt the same shape:</p>
   <span class="code-label">rust</span>
 <pre><code><span class="tok-c">// Real return = status. Real output (a found document's length) via *out_len.</span>
-<span class="tok-m">#[no_mangle]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_find_len</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, id: <span class="tok-f">i64</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> {
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-c">/// # Safety: db must be live and exclusive; out_len must be null or writable.</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_find_len</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, id: <span class="tok-f">i64</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> {
     <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() || out_len.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span> <span class="tok-f">ERR_NULL</span>; }
     <span class="tok-c">// … look up; on success write the length and return OK …</span>
     <span class="tok-k">unsafe</span> { *out_len = 42; }
@@ -77,11 +78,14 @@
   </div>
 
   <h2>Richer error detail (optional, SQLite-style)</h2>
-  <p>A bare code can't carry a message. SQLite adds <code>sqlite3_errmsg()</code> — a function returning
-  the last error's text. <span class="verify-tag">⚠️VERIFY</span> exact name/semantics. You can do the
-  same: store the last error string on the <code>Db</code> handle and expose
+  <p>A bare code can't carry a message. SQLite's <code>sqlite3_errmsg()</code> returns UTF-8 text
+  describing the most recent failed API call associated with a database connection; later calls may
+  invalidate or replace that text. You can use the same general shape: store error text on the
+  <code>Db</code> handle and expose
   <code>db_last_error(db) -&gt; *const c_char</code> (whose buffer the handle owns). Adds richness without
-  bloating every function's signature. This is a Phase 8 refinement; for the spike, codes suffice.</p>
+  bloating every function's signature. Its lifetime and thread-safety contract must be explicit. This
+  is a Phase 8 refinement; for the spike, codes suffice.
+  <span class="src">[src: <a href="https://www.sqlite.org/c3ref/errcode.html">SQLite error APIs</a>]</span></p>
 
   <h2>Out-params: the rules</h2>
   <ul>
@@ -93,6 +97,19 @@
     needed length, the caller allocates, a second call fills it — or use the buffer-descriptor approach
     from Lesson 1.5. Pick one and be consistent.</li>
   </ul>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>Keep the mapping from <code>DbError</code> to ABI integers in one exhaustive
+      <code>match</code>; adding an engine error then forces an explicit ABI decision.</li>
+      <li>Do not export a Rust enum directly as the long-term error contract unless its representation
+      and numeric values are fixed deliberately. Named <code>i32</code> constants are simpler here.</li>
+      <li>Initialize or leave out-parameters untouched according to one documented rule. This
+      curriculum initializes buffer outputs to null/zero before work begins.</li>
+      <li>An error message pointer needs an ownership and lifetime rule just like any other buffer.</li>
+    </ul>
+  </div>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
@@ -123,11 +140,10 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Source:</strong> SQLite result codes — <a href="https://www.sqlite.org/rescode.html">sqlite.org/rescode.html</a>
-      <span class="verify-tag">⚠️VERIFY</span> — a masterclass in a stable, layered code scheme (primary +
-      extended codes).</li>
-      <li><strong>Doc:</strong> Rustonomicon FFI on returning data/errors. <span class="verify-tag">⚠️VERIFY</span></li>
+      — a real stable, layered scheme with primary and extended codes.</li>
+      <li><strong>Doc:</strong> <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon FFI</a>.</li>
       <li><strong>Forward link:</strong> Phase 8.1/8.4 (full public API, versioning, ABI stability), and
-      1.6 which this pairs with (panic net + error codes = total boundary safety).</li>
+      1.6, which pairs panic containment with ordinary error reporting.</li>
     </ul>
   </div>
 

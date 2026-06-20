@@ -16,8 +16,8 @@
   choice about whether to adopt it, instead of cargo-culting it.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>frb is the most popular way to connect Rust and Flutter, and you may well use it for the production
-  binding. But it's a code generator that hides exactly the machinery you just learned — pointers,
+  <p>frb is a feature-rich Rust↔Dart/Flutter binding generator and may be useful for the production
+  binding. It automates exactly the machinery you just learned — pointers,
   ownership, free functions, the two-signature dance. If you adopt it without understanding what it
   generates, the day it breaks you'll be helpless. So: learn the manual path (1.1–1.9), then understand
   what frb is doing <em>for</em> you here.</p>
@@ -37,9 +37,11 @@
     <li>The Dart-side bindings — idiomatic Dart functions you just call, no <code>Pointer</code> in sight.</li>
     <li>Automatic conversion of rich types across the boundary (it serializes/marshals them for you).</li>
     <li>Memory management for the buffers it creates (the free-function discipline, handled).</li>
-    <li>Async support: Rust work can run off Dart's UI isolate and return a <code>Future</code>
-      <span class="verify-tag">⚠️VERIFY</span> current model.</li>
+    <li>Sync and async calling modes, async Rust functions, streams, and Rust-to-Dart calls.</li>
   </ul>
+  <p>The current documentation labels this generation as v2 and describes ordinary Rust types,
+  <code>Result</code>, async Rust, streams, and two-way calls.
+  <span class="src">[src: <a href="https://cjycode.com/flutter_rust_bridge/">flutter_rust_bridge v2 docs</a>]</span></p>
 
   <figure>
   <svg viewBox="0 0 560 210" role="img" aria-label="frb generates both the Rust glue and the Dart bindings from your plain Rust">
@@ -77,11 +79,11 @@
   <div class="box deeper">
     <div class="box-title">A design tension worth naming</div>
     <p>Your stated goal is a <strong>tiny, stable C ABI that <em>any</em> language can consume</strong>
-    (Dart first, but not only). frb optimizes for the Dart-specific case and shapes the boundary its own
-    way. So a reasonable architecture is: keep a clean hand-designed C ABI as the canonical, language-
-    agnostic surface (Phase 8), and <em>optionally</em> use frb to generate a nicer Dart layer on top — or
-    use frb directly if Dart is truly the only consumer you care about. Either is valid; the point is you
-    now know enough to choose, not guess.</p>
+    (Dart first, but not only). frb generates its own Rust/Dart bridge and codecs; it does not
+    automatically turn your separately designed canonical C API into an idiomatic Dart wrapper.
+    Therefore choose deliberately: make the hand-designed C ABI the product and bind it with
+    <code>ffigen</code>, or make frb's generated bridge the Flutter-facing product. You can maintain
+    both, but then both surfaces need compatibility, packaging, and test coverage.</p>
   </div>
 
   <h2>Why the curriculum still teaches the manual path</h2>
@@ -94,6 +96,18 @@
     <li><strong>It generalizes.</strong> The manual knowledge transfers to Python/Swift/Kotlin bindings;
     frb knowledge is Flutter-only.</li>
   </ul>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Generator discipline</div>
+    <ul>
+      <li>Pin the generator and runtime crate versions together; generated code and runtime support
+      are a compatibility unit.</li>
+      <li>Commit the generator configuration and make regeneration reproducible in CI.</li>
+      <li>Test the generated bridge on every target you ship; successful desktop generation does not
+      prove Android or iOS packaging.</li>
+      <li>Keep domain logic in ordinary Rust functions so it remains testable without Flutter.</li>
+    </ul>
+  </div>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
@@ -111,7 +125,8 @@
       <p class="q">3. How does frb sit in tension with your "any language can use it" goal?</p>
       <details><summary>Show answer</summary><div class="answer">frb optimizes the boundary for Dart/Flutter
       specifically, whereas your goal is a tiny, neutral C ABI consumable by any language. You can keep a
-      hand-designed C ABI as canonical and use frb only as an optional Dart convenience.</div></details>
+      hand-designed C ABI can remain canonical, but frb is a separate generated bridge rather than an
+      automatic wrapper over that API.</div></details>
 
       <p class="q">4. What capability does frb add that's painful to hand-roll?</p>
       <details><summary>Show answer</summary><div class="answer">Automatic marshalling of rich types
@@ -122,9 +137,9 @@
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Doc:</strong> flutter_rust_bridge — <a href="https://cjycode.com/flutter_rust_bridge/">cjycode.com/flutter_rust_bridge</a>
-      (concepts, what's generated, async model). <span class="verify-tag">⚠️VERIFY</span> URL and current
-      major version behavior (the API changed significantly across versions).</li>
+      <li><strong>Doc:</strong> <a href="https://cjycode.com/flutter_rust_bridge/">flutter_rust_bridge
+      v2 documentation</a> and its <a href="https://github.com/fzyzcjy/flutter_rust_bridge">source repository</a>.
+      Pin a major/minor version because generated interfaces can change across releases.</li>
       <li><strong>Forward link:</strong> the Phase 1 Build uses the <em>manual</em> path on purpose; Phase 8
       designs the canonical C ABI and you decide there whether frb layers on top.</li>
     </ul>

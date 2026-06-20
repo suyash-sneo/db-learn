@@ -27,7 +27,8 @@
   <p>A crate <code>kvstore</code> exposing a <code>Store</code> type that persists a map of
   <code>String → String</code> to a single file, plus a CLI binary that drives it. Concretely:</p>
   <ul>
-    <li><code>Store::open(path)</code> — open an existing store file or create an empty one.</li>
+    <li><code>Store::open(path)</code> — load an existing store, or start with an empty map when the
+    path does not exist. The file may be created on the first successful mutation.</li>
     <li><code>store.set(key, value)</code> — insert or overwrite, and persist.</li>
     <li><code>store.get(key)</code> — return <code>Option&lt;String&gt;</code>.</li>
     <li><code>store.delete(key)</code> — remove a key (return whether it existed), and persist.</li>
@@ -41,9 +42,10 @@
     <div class="box-title">Allowed tools</div>
     <p>Use <code>std::collections::HashMap</code> for the in-memory map,
     <code>serde</code> + <code>serde_json</code> for persistence (serialize the whole map to the file
-    on each change — simple and correct for this size), and <code>std::fs</code> for the file. This
-    is deliberately the "load whole file" approach; the <em>real</em> engine won't do this, which is
-    exactly the point you'll feel in Phase 2.</p>
+    on each change), and <code>std::fs</code> for the file. This is deliberately the “load and rewrite
+    the whole file” approach. It proves ordinary persistence across clean process restarts, but it is
+    not atomic or crash-safe: interruption during a rewrite may leave partial JSON. The real engine
+    replaces it with paged storage and a commit protocol.</p>
   </div>
 
   <h2>Ordered milestones</h2>
@@ -79,11 +81,15 @@
 <span class="tok-m">#[derive(Debug)]</span>
 <span class="tok-k">pub enum</span> <span class="tok-f">StoreError</span> {
     <span class="tok-f">Io</span>(std::io::Error),
-    <span class="tok-f">Corrupt</span>(<span class="tok-f">String</span>),
+    <span class="tok-f">Json</span>(serde_json::Error),
 }
 
 <span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;std::io::Error&gt; <span class="tok-k">for</span> <span class="tok-f">StoreError</span> {
     <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: std::io::Error) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">StoreError</span>::<span class="tok-f">Io</span>(e) }
+}
+
+<span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;serde_json::Error&gt; <span class="tok-k">for</span> <span class="tok-f">StoreError</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: serde_json::Error) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">StoreError</span>::<span class="tok-f">Json</span>(e) }
 }
 
 <span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">StoreError</span>&gt;;
@@ -122,8 +128,9 @@
 }</code></pre>
 
   <h2>Failing test suite</h2>
-  <p>Drop this into <code>src/lib.rs</code> (or <code>tests/store.rs</code>). It will not compile until
-  the signatures exist, then it will fail until you implement them. Green = done.</p>
+  <p>Append this module to <code>src/lib.rs</code>, where <code>use super::*</code> imports the
+  definitions above. If you move it to <code>tests/store.rs</code>, replace that import with
+  <code>use kvstore::*;</code>. It fails until you implement the stubs.</p>
   <span class="code-label">tests</span>
 <pre><code><span class="tok-m">#[cfg(test)]</span>
 <span class="tok-k">mod</span> tests {
@@ -183,6 +190,13 @@
         <span class="tok-k">let</span> s = <span class="tok-f">Store</span>::<span class="tok-f">open</span>(&amp;path).<span class="tok-f">unwrap</span>();
         <span class="tok-m">assert!</span>(s.<span class="tok-f">keys</span>().<span class="tok-f">is_empty</span>());
     }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">corrupt_file_is_an_error</span>() {
+        <span class="tok-k">let</span> path = <span class="tok-f">tmp</span>(<span class="tok-s">"corrupt"</span>);
+        std::fs::<span class="tok-f">write</span>(&amp;path, b<span class="tok-s">"{ definitely not valid json"</span>).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert!</span>(<span class="tok-f">Store</span>::<span class="tok-f">open</span>(&amp;path).<span class="tok-f">is_err</span>());
+    }
 }</code></pre>
 
   <h2>Stuck? — graduated hints</h2>
@@ -202,8 +216,9 @@
     <br><strong>Bigger:</strong> Check existence (e.g. <code>path.exists()</code>) before reading, or
     match on the read result and treat a not-found error as "empty map."
     <br><strong>Technique:</strong> read bytes with <code>std::fs::read</code>, then
-    <code>serde_json::from_slice</code> into a <code>HashMap&lt;String,String&gt;</code>. Map any JSON
-    parse failure to <code>StoreError::Corrupt</code>.</div></details>
+    <code>serde_json::from_slice</code> into a <code>HashMap&lt;String,String&gt;</code>. The supplied
+    <code>From&lt;serde_json::Error&gt;</code> conversion lets <code>?</code> return
+    <code>StoreError::Json</code>.</div></details>
 
   <details><summary>Stuck on M2 (persisting)</summary>
     <div class="answer"><strong>Nudge:</strong> Simplest correct approach: after every mutation, write

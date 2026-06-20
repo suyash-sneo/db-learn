@@ -47,7 +47,8 @@
     <dt data-term="bson binary json">BSON</dt>
     <dd>Binary JSON — MongoDB's document serialization format. Length-prefixed, typed, supports
     more types than JSON (dates, binary, ObjectId). A candidate for documents crossing your FFI
-    boundary as byte buffers.</dd>
+    boundary as byte buffers.
+    <span class="src">[src: <a href="https://bsonspec.org/">BSON specification</a>]</span></dd>
 
     <dt data-term="btree b-tree balanced tree">B-tree</dt>
     <dd>A balanced, high-fan-out search tree designed for block storage: each node fills a page,
@@ -63,33 +64,40 @@
     <em>pinned</em> (in use, must not be evicted).</dd>
 
     <dt data-term="catch_unwind panic ffi">catch_unwind</dt>
-    <dd>Rust's <code>std::panic::catch_unwind</code> — catches a panic at a boundary so it does
-    not unwind across the FFI line (which would be undefined behavior). Wraps every C-ABI
-    function body.</dd>
+    <dd>Rust's <code>std::panic::catch_unwind</code> catches an <em>unwinding</em> Rust panic.
+    At a normal <code>extern "C"</code> boundary, an escaping panic aborts the process; catching it
+    first lets an embedded library return an error code instead. It cannot catch
+    <code>panic="abort"</code> or arbitrary crashes.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/std/panic/fn.catch_unwind.html">std docs</a>]</span></dd>
 
     <dt data-term="cbindgen header generation">cbindgen</dt>
-    <dd>A tool that reads your Rust <code>extern "C"</code> declarations and generates a matching
-    C header (<code>.h</code>) so other languages can call your library.</dd>
+    <dd>A tool that reads public Rust declarations and generates a C or C++ header. Its CLI defaults
+    to C++, so this project explicitly selects C with <code>--lang c</code> or
+    <code>language = "C"</code>.</dd>
 
     <dt data-term="cell record slot">Cell</dt>
     <dd>SQLite's term for a single record stored on a B-tree page (key + payload, possibly with
-    an overflow pointer). Located via the page's slot/pointer array.</dd>
+    an overflow pointer). Located via the page's cell-pointer array.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html#b_tree_pages">SQLite file format: B-tree pages</a>]</span></dd>
 
     <dt data-term="checkpoint wal merge">Checkpoint</dt>
     <dd>Moving committed changes from the WAL back into the main database file, then (eventually)
-    resetting the WAL. Balances read speed against WAL growth.</dd>
+    resetting or reusing the WAL. Balances read speed against WAL growth.
+    <span class="src">[src: <a href="https://www.sqlite.org/wal.html#ckpt">SQLite WAL checkpointing</a>]</span></dd>
 
     <dt data-term="cow copy-on-write">Copy-on-write (CoW)</dt>
     <dd>Instead of overwriting a page in place, write a modified copy to a new location and
-    re-point references. Gives crash safety and MVCC for free; the LMDB/MDBX (and thus Isar) design.</dd>
+    re-point references. CoW can support snapshots and crash-safe commit protocols, but neither
+    property is automatic: the engine still needs ordering, atomic root publication, synchronization,
+    and reclamation rules.</dd>
 
     <dt data-term="dirty page">Dirty page</dt>
     <dd>A cached page whose in-memory copy differs from disk because it was modified. Must be
     flushed before it can be safely evicted or before commit.</dd>
 
-    <dt data-term="extern c no_mangle repr">extern "C" / #[no_mangle] / #[repr(C)]</dt>
+    <dt data-term="extern c no_mangle repr">extern "C" / #[unsafe(no_mangle)] / #[repr(C)]</dt>
     <dd>The three Rust attributes that produce C-compatible output:
-    <code>extern "C"</code> selects the C calling convention, <code>#[no_mangle]</code> keeps the
+    <code>extern "C"</code> selects the C calling convention, <code>#[unsafe(no_mangle)]</code> keeps the
     symbol name unmangled, <code>#[repr(C)]</code> lays out a struct the way C expects.</dd>
 
     <dt data-term="ffi foreign function interface">FFI (Foreign Function Interface)</dt>
@@ -98,11 +106,14 @@
 
     <dt data-term="freelist free page trunk">Freelist</dt>
     <dd>The list of pages inside the file that are currently unused and available for reuse, so
-    the file doesn't grow forever. SQLite uses freelist "trunk" pages that point to free "leaf" pages.</dd>
+    the file doesn't grow forever. SQLite's file format uses freelist trunk pages that contain
+    references to freelist leaf pages.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html#freelist">SQLite freelist format</a>]</span></dd>
 
     <dt data-term="fsync flush durability">fsync</dt>
-    <dd>A system call that forces buffered file writes all the way down to stable storage. Without
-    it the OS may still hold your data in a cache that a power loss would erase. The hinge of durability.</dd>
+    <dd>An operating-system request to synchronize file data with its backing storage. It is necessary
+    in many durability protocols, but the actual guarantee depends on the OS, filesystem, device, and
+    whether related directory metadata also needs synchronization.</dd>
 
     <dt data-term="opaque handle pointer">Opaque handle</dt>
     <dd>A pointer the other language holds but cannot inspect — it only passes it back to your
@@ -128,13 +139,15 @@
     sits on.</dd>
 
     <dt data-term="panic abort unwind rust">panic</dt>
-    <dd>Rust's mechanism for unrecoverable errors; by default it <em>unwinds</em> the stack. Across
-    an FFI boundary that is undefined behavior, so you contain it (<code>catch_unwind</code> or
-    <code>panic = "abort"</code>).</dd>
+    <dd>Rust's mechanism for failures that code does not return normally. Depending on the profile it
+    unwinds or aborts. If an unwinding panic reaches <code>extern "C"</code>, Rust aborts the process;
+    <code>extern "C-unwind"</code> is the explicit unwind-permitting ABI. An embedded library may use
+    <code>catch_unwind</code> to map unwinding panics to an error code, provided state remains valid.</dd>
 
     <dt data-term="repr c layout">repr(C)</dt>
-    <dd>An attribute forcing a struct/enum to use C's field order and alignment, so a value can be
-    safely shared across the FFI boundary.</dd>
+    <dd>An attribute selecting Rust's C-compatible representation rules for a type. It is necessary
+    when sharing concrete layout, but safety also requires matching field declarations, target ABI,
+    valid values, alignment, lifetime, and ownership.</dd>
 
     <dt data-term="result option question mark error">Result / Option / ?</dt>
     <dd>Rust's error types: <code>Result&lt;T, E&gt;</code> is success-or-error,
@@ -144,7 +157,8 @@
     <dt data-term="rollback journal">Rollback journal</dt>
     <dd>SQLite's original atomic-commit scheme: before modifying a page, copy its <em>old</em>
     contents to a journal file; on crash, restore from the journal. Contrast with WAL, which logs
-    <em>new</em> contents.</dd>
+    <em>new</em> page images.
+    <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite atomic commit</a>]</span></dd>
 
     <dt data-term="serde serialize deserialize">serde</dt>
     <dd>Rust's standard serialization framework. <code>#[derive(Serialize, Deserialize)]</code>
@@ -157,12 +171,14 @@
 
     <dt data-term="vfs os interface">VFS (OS interface)</dt>
     <dd>An abstraction over the operating system's file operations (open, read, write, sync, lock)
-    so the engine doesn't bake in OS-specific calls. SQLite's <code>os_unix.c</code> is one implementation.</dd>
+    so the engine doesn't bake in OS-specific calls. SQLite provides multiple VFS implementations.
+    <span class="src">[src: <a href="https://www.sqlite.org/arch.html">SQLite architecture</a>]</span></dd>
 
     <dt data-term="wal write-ahead log frame">WAL (Write-Ahead Log)</dt>
     <dd>A durability scheme: append every change to a log file and <code>fsync</code> that, before
-    touching the main file. Commit = a special frame in the log. Enables fast commits and concurrent
-    readers; later checkpointed back into the main file.</dd>
+    updating the main file. In SQLite WAL mode, a transaction commits when a frame carrying a commit
+    marker is written; later checkpointing copies pages back to the database.
+    <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL</a>]</span></dd>
   </dl>
 
   <p class="muted small" id="nohits" hidden>No terms match that filter.</p>

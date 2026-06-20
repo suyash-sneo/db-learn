@@ -3,190 +3,197 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>1.9 dart:ffi basics</title>
+<title>1.9 Dart FFI byte-buffer round trip</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p1:1.9", root: "../../" };</script>
 </head>
 <body>
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.9</div>
-  <h1>1.9 — <code>dart:ffi</code> basics: DynamicLibrary, lookups, Pointer, malloc/free, Uint8List</h1>
-  <div class="goal"><b>Goal:</b> From the Dart side, load your Rust library, find a function, call it
-  with pointers and lengths, and move bytes in and out as <code>Uint8List</code> — closing the loop you
-  opened in Lessons 1.1–1.8. You know Flutter; this is the FFI-specific part.</div>
+  <h1>1.9 — <code>dart:ffi</code>: bind, call, copy, and free</h1>
+  <div class="goal"><b>Goal:</b> Load the Rust library on desktop, bind the pointer-and-length API,
+  round-trip a <code>Uint8List</code>, and release every native allocation on success and failure.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>This is Layer 3 — the consumer. Everything you designed in Rust only matters if Dart can actually
-  call it. <code>dart:ffi</code> is Dart's built-in mechanism to call C ABIs, so it calls your Rust
-  exactly as if it were a C library. Getting a real <code>Uint8List</code> across is the literal goal of
-  the Phase 1 Build.</p>
+  <p>This is the first consumer of the stable C surface. Dart never needs to understand Rust
+  <code>Vec</code>, <code>Box</code>, or database internals; it only sees symbols, C-compatible
+  integers, pointers, and documented ownership rules.</p>
 
-  <h2>Step 1: load the dynamic library</h2>
-  <p><code>DynamicLibrary</code> opens your compiled <code>.so</code>/<code>.dylib</code>/<code>.dll</code>
-  at runtime. The path differs per platform; for desktop dev you point at the build output.</p>
+  <h2>1. Dependencies and imports</h2>
+  <span class="code-label">pubspec.yaml</span>
+<pre><code>dependencies:
+  ffi: ^2.1.0</code></pre>
   <span class="code-label">dart</span>
 <pre><code><span class="tok-k">import</span> <span class="tok-s">'dart:ffi'</span>;
 <span class="tok-k">import</span> <span class="tok-s">'dart:io'</span> <span class="tok-k">show</span> Platform;
-<span class="tok-k">import</span> <span class="tok-s">'package:ffi/ffi.dart'</span>;   <span class="tok-c">// for malloc/free, Utf8 helpers ⚠️VERIFY</span>
+<span class="tok-k">import</span> <span class="tok-s">'dart:typed_data'</span>;
+<span class="tok-k">import</span> <span class="tok-s">'package:ffi/ffi.dart'</span>;</code></pre>
+  <p><code>dart:ffi</code> supplies native types and dynamic-library calls.
+  <code>package:ffi</code> supplies allocators such as <code>calloc</code>. Pin the actual dependency
+  version selected by your project rather than copying a floating “latest” number.</p>
 
-DynamicLibrary <span class="tok-f">openLib</span>() {
-  <span class="tok-k">if</span> (Platform.isMacOS) <span class="tok-k">return</span> DynamicLibrary.<span class="tok-f">open</span>(<span class="tok-s">'libmydb.dylib'</span>);
-  <span class="tok-k">if</span> (Platform.isLinux) <span class="tok-k">return</span> DynamicLibrary.<span class="tok-f">open</span>(<span class="tok-s">'libmydb.so'</span>);
-  <span class="tok-k">if</span> (Platform.isWindows) <span class="tok-k">return</span> DynamicLibrary.<span class="tok-f">open</span>(<span class="tok-s">'mydb.dll'</span>);
-  <span class="tok-c">// iOS/Android static-link differently — DynamicLibrary.process()/executable() ⚠️VERIFY</span>
-  <span class="tok-k">throw</span> UnsupportedError(<span class="tok-s">'platform'</span>);
-}</code></pre>
-
-  <h2>Step 2: describe the function in two type systems</h2>
-  <p>This is the part unique to FFI. Each foreign function needs <em>two</em> signatures: the
-  <strong>native</strong> (C) signature using <code>dart:ffi</code> types, and the <strong>Dart</strong>
-  signature using Dart types. <code>lookupFunction</code> ties them together.</p>
+  <h2>2. Load the desktop development library</h2>
   <span class="code-label">dart</span>
-<pre><code><span class="tok-c">// Rust:  int32_t echo(const uint8_t* ptr, size_t len, uint8_t** out, size_t* out_len)</span>
+<pre><code>DynamicLibrary <span class="tok-f">openMyDb</span>() {
+  <span class="tok-k">if</span> (Platform.isMacOS) {
+    <span class="tok-k">return</span> DynamicLibrary.<span class="tok-f">open</span>(<span class="tok-s">'target/debug/libmydb.dylib'</span>);
+  }
+  <span class="tok-k">if</span> (Platform.isLinux) {
+    <span class="tok-k">return</span> DynamicLibrary.<span class="tok-f">open</span>(<span class="tok-s">'target/debug/libmydb.so'</span>);
+  }
+  <span class="tok-k">if</span> (Platform.isWindows) {
+    <span class="tok-k">return</span> DynamicLibrary.<span class="tok-f">open</span>(<span class="tok-s">r'target\debug\mydb.dll'</span>);
+  }
+  <span class="tok-k">throw</span> UnsupportedError(<span class="tok-s">'Desktop spike only'</span>);
+}</code></pre>
+  <p>Those paths are development examples relative to the process working directory. Production
+  Flutter packaging is platform-specific: modern Flutter native assets use build hooks; Android
+  commonly packages a dynamic <code>.so</code>, while Apple platforms may expose statically linked
+  symbols through the process/executable or package a dynamic framework. Do not guess one loading
+  expression for every mobile platform.
+  <span class="src">[src: <a href="https://docs.flutter.dev/platform-integration/legacy-ffi-plugin">Flutter native-library linking</a>]</span></p>
 
-<span class="tok-c">// Native (C) signature — uses ffi types like Int32, Pointer, Size:</span>
-<span class="tok-k">typedef</span> EchoNative = Int32 <span class="tok-f">Function</span>(
-    Pointer&lt;Uint8&gt; ptr, Size len, Pointer&lt;Pointer&lt;Uint8&gt;&gt; out, Pointer&lt;Size&gt; outLen);
+  <h2>3. Bind the exact C signatures</h2>
+  <p>Assume the generated header declares:</p>
+  <span class="code-label">C</span>
+<pre><code>int32_t echo_transform(
+    <span class="tok-k">const</span> uint8_t *input,
+    size_t input_len,
+    uint8_t **out_ptr,
+    size_t *out_len);
 
-<span class="tok-c">// Dart signature — uses Dart types like int:</span>
+<span class="tok-k">void</span> echo_free(uint8_t *ptr, size_t len);</code></pre>
+  <p>Dart needs a native signature and a callable Dart signature. <code>Size</code> maps C
+  <code>size_t</code> and becomes Dart <code>int</code> in the callable form.
+  <span class="src">[src: <a href="https://api.dart.dev/dart-ffi/Size-class.html"><code>dart:ffi Size</code></a>]</span></p>
+  <span class="code-label">dart</span>
+<pre><code><span class="tok-k">typedef</span> EchoNative = Int32 <span class="tok-f">Function</span>(
+  Pointer&lt;Uint8&gt;,
+  Size,
+  Pointer&lt;Pointer&lt;Uint8&gt;&gt;,
+  Pointer&lt;Size&gt;,
+);
 <span class="tok-k">typedef</span> EchoDart = <span class="tok-k">int</span> <span class="tok-f">Function</span>(
-    Pointer&lt;Uint8&gt; ptr, <span class="tok-k">int</span> len, Pointer&lt;Pointer&lt;Uint8&gt;&gt; out, Pointer&lt;Size&gt; outLen);
+  Pointer&lt;Uint8&gt;,
+  <span class="tok-k">int</span>,
+  Pointer&lt;Pointer&lt;Uint8&gt;&gt;,
+  Pointer&lt;Size&gt;,
+);
 
-<span class="tok-k">final</span> lib = <span class="tok-f">openLib</span>();
-<span class="tok-k">final</span> echo = lib.<span class="tok-f">lookupFunction</span>&lt;EchoNative, EchoDart&gt;(<span class="tok-s">'echo'</span>);</code></pre>
-  <div class="box rust">
-    <div class="box-title">🦀 The two-signature rule (the #1 dart:ffi confusion)</div>
-    <p>The <em>native</em> typedef must match the C ABI exactly (<code>Int32</code>, <code>Size</code>,
-    <code>Pointer&lt;Uint8&gt;</code>). The <em>Dart</em> typedef is how <em>you</em> call it
-    (<code>int</code> instead of <code>Int32</code>/<code>Size</code>). Pointers stay
-    <code>Pointer&lt;…&gt;</code> in both. Mismatch the native side and you get crashes or garbage, not
-    compile errors — so cross-check it against the cbindgen header.</p>
+<span class="tok-k">typedef</span> FreeNative = Void <span class="tok-f">Function</span>(Pointer&lt;Uint8&gt;, Size);
+<span class="tok-k">typedef</span> FreeDart = <span class="tok-k">void</span> <span class="tok-f">Function</span>(Pointer&lt;Uint8&gt;, <span class="tok-k">int</span>);
+
+<span class="tok-k">final</span> lib = <span class="tok-f">openMyDb</span>();
+<span class="tok-k">final</span> echo = lib.<span class="tok-f">lookupFunction</span>&lt;EchoNative, EchoDart&gt;(
+  <span class="tok-s">'echo_transform'</span>,
+);
+<span class="tok-k">final</span> freeEcho = lib.<span class="tok-f">lookupFunction</span>&lt;FreeNative, FreeDart&gt;(
+  <span class="tok-s">'echo_free'</span>,
+);</code></pre>
+  <div class="box warn">
+    <div class="box-title">The generated C header is the signature authority</div>
+    <p>Do not infer widths from Rust source or from memory. Compare every Dart native typedef with the
+    generated C declaration. A mismatch can compile and then corrupt registers, stack state, or memory.
+    <code>package:ffigen</code> can generate these bindings from the header once you understand the
+    manual form.
+    <span class="src">[src: <a href="https://dart.dev/interop/c-interop">Dart C interop and ffigen</a>]</span></p>
   </div>
 
-  <h2>Step 3: allocate, fill, call, read, free</h2>
-  <p>Dart objects don't live in C-accessible memory, so you allocate a native buffer, copy your bytes in,
-  pass the pointer, then free it. <code>malloc</code>/<code>free</code> come from
-  <code>package:ffi</code>.</p>
+  <h2>4. Complete ownership-safe round trip</h2>
   <span class="code-label">dart</span>
 <pre><code>Uint8List <span class="tok-f">echoBytes</span>(Uint8List input) {
-  <span class="tok-c">// 1. allocate native input buffer and copy Dart bytes into it</span>
-  <span class="tok-k">final</span> inPtr = malloc&lt;Uint8&gt;(input.length);
-  inPtr.<span class="tok-f">asTypedList</span>(input.length).<span class="tok-f">setAll</span>(0, input);
+  <span class="tok-c">// Represent empty input as the ABI's allowed (nullptr, 0) pair.</span>
+  <span class="tok-k">final</span> Pointer&lt;Uint8&gt; inPtr =
+      input.isEmpty ? nullptr : calloc&lt;Uint8&gt;(input.length);
+  <span class="tok-k">if</span> (input.isNotEmpty) {
+    inPtr.<span class="tok-f">asTypedList</span>(input.length).<span class="tok-f">setAll</span>(0, input);
+  }
 
-  <span class="tok-c">// 2. out-params: a place for Rust to write the result ptr + len</span>
-  <span class="tok-k">final</span> outPtr = malloc&lt;Pointer&lt;Uint8&gt;&gt;();
-  <span class="tok-k">final</span> outLen = malloc&lt;Size&gt;();
+  <span class="tok-k">final</span> outPtr = calloc&lt;Pointer&lt;Uint8&gt;&gt;();
+  <span class="tok-k">final</span> outLen = calloc&lt;Size&gt;();
 
   <span class="tok-k">try</span> {
     <span class="tok-k">final</span> rc = <span class="tok-f">echo</span>(inPtr, input.length, outPtr, outLen);
-    <span class="tok-k">if</span> (rc != 0) <span class="tok-k">throw</span> StateError(<span class="tok-s">'echo failed: rc=$rc'</span>);
+    <span class="tok-k">if</span> (rc != 0) {
+      <span class="tok-k">throw</span> StateError(<span class="tok-s">'echo_transform failed: $rc'</span>);
+    }
 
-    <span class="tok-c">// 3. read Rust's buffer into a Dart-owned Uint8List (a COPY)</span>
-    <span class="tok-k">final</span> len = outLen.value;
-    <span class="tok-k">final</span> resultPtr = outPtr.value;
-    <span class="tok-k">final</span> result = Uint8List.<span class="tok-f">fromList</span>(resultPtr.<span class="tok-f">asTypedList</span>(len));
+    <span class="tok-k">final</span> rustPtr = outPtr.value;
+    <span class="tok-k">final</span> length = outLen.value;
+    <span class="tok-k">if</span> (rustPtr == nullptr &amp;&amp; length != 0) {
+      <span class="tok-k">throw</span> StateError(<span class="tok-s">'library returned null with nonzero length'</span>);
+    }
 
-    <span class="tok-c">// 4. give Rust's buffer BACK to Rust to free (Lesson 1.5!)</span>
-    <span class="tok-f">freeBuf</span>(resultPtr, len);   <span class="tok-c">// a second bound Rust fn, e.g. db_free_buf</span>
-
-    <span class="tok-k">return</span> result;
+    <span class="tok-k">try</span> {
+      <span class="tok-k">if</span> (length == 0) <span class="tok-k">return</span> Uint8List(0);
+      <span class="tok-c">// asTypedList is a view; fromList makes the Dart-owned copy.</span>
+      <span class="tok-k">return</span> Uint8List.<span class="tok-f">fromList</span>(
+        rustPtr.<span class="tok-f">asTypedList</span>(length),
+      );
+    } <span class="tok-k">finally</span> {
+      <span class="tok-c">// Return Rust's allocation even if the Dart copy throws.</span>
+      <span class="tok-k">if</span> (rustPtr != nullptr) <span class="tok-f">freeEcho</span>(rustPtr, length);
+    }
   } <span class="tok-k">finally</span> {
-    <span class="tok-c">// 5. free the buffers DART allocated</span>
-    malloc.<span class="tok-f">free</span>(inPtr);
-    malloc.<span class="tok-f">free</span>(outPtr);
-    malloc.<span class="tok-f">free</span>(outLen);
+    <span class="tok-c">// Dart frees only allocations made by calloc.</span>
+    <span class="tok-k">if</span> (inPtr != nullptr) calloc.<span class="tok-f">free</span>(inPtr);
+    calloc.<span class="tok-f">free</span>(outPtr);
+    calloc.<span class="tok-f">free</span>(outLen);
   }
 }</code></pre>
 
-  <figure>
-  <svg viewBox="0 0 560 200" role="img" aria-label="Dart allocates input, Rust returns a buffer, Dart copies it then asks Rust to free it">
-    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
-    <text class="dg-txt-s" x="20" y="30">1. Dart malloc + copy bytes →</text>
-    <rect class="dg-box-a" x="20" y="40" width="150" height="34" rx="7"/><text class="dg-txt-s" x="95" y="62" text-anchor="middle">inPtr (Dart owns)</text>
-    <path class="dg-arrow" d="M172,57 L250,57" marker-end="url(#a19)"/>
-    <rect class="dg-box" x="254" y="40" width="150" height="34" rx="7"/><text class="dg-txt-s" x="329" y="62" text-anchor="middle">echo() reads it</text>
-    <text class="dg-txt-s" x="20" y="110">2. Rust returns out ptr+len; 3. Dart copies to Uint8List</text>
-    <rect class="dg-box" x="254" y="120" width="150" height="34" rx="7"/><text class="dg-txt-s" x="329" y="142" text-anchor="middle">Rust buffer (Rust owns)</text>
-    <path class="dg-arrow" d="M252,137 L172,137" marker-end="url(#a19)"/>
-    <rect class="dg-box-a" x="20" y="120" width="150" height="34" rx="7"/><text class="dg-txt-s" x="95" y="142" text-anchor="middle">Uint8List copy</text>
-    <text class="dg-txt-s" x="20" y="184">4. Dart calls freeBuf() → Rust frees its buffer · 5. Dart frees its own</text>
-    <defs><marker id="a19" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
-  </svg>
-  <figcaption>The complete round-trip, with each side freeing only what it allocated.</figcaption>
-  </figure>
-
-  <h2>Key dart:ffi pieces, summarized</h2>
-  <div class="tablewrap">
-  <table>
-    <thead><tr><th>Piece</th><th>Role</th></tr></thead>
-    <tbody>
-      <tr><td><code>DynamicLibrary.open(path)</code></td><td>load the compiled Rust library</td></tr>
-      <tr><td><code>lib.lookupFunction&lt;Native, Dart&gt;('name')</code></td><td>bind an exported function (two-signature)</td></tr>
-      <tr><td><code>Pointer&lt;T&gt;</code></td><td>a native pointer; <code>.value</code> deref, <code>.asTypedList(n)</code> view as a typed list</td></tr>
-      <tr><td><code>malloc&lt;T&gt;(n)</code> / <code>malloc.free(p)</code></td><td>allocate/free native (C) memory (from package:ffi)</td></tr>
-      <tr><td><code>Uint8List</code></td><td>Dart's byte buffer; <code>fromList</code> copies, <code>asTypedList</code> views</td></tr>
-    </tbody>
-  </table>
-  </div>
-
-  <div class="box warn">
-    <div class="box-title">⚠️ Two ownership pitfalls to internalize</div>
-    <ul>
-      <li><code>asTypedList</code> gives a <em>view</em> over native memory — it becomes invalid once that
-      memory is freed. To keep the data, <code>Uint8List.fromList(...)</code> to copy first (as above).</li>
-      <li>Free with the matching allocator: Dart frees what <code>malloc</code> made; Rust frees what Rust
-      made (call the exported free fn). Mixing them corrupts the heap — the exact rule from Lesson 1.5,
-      now from the Dart side.</li>
-    </ul>
-  </div>
+  <h2>Trace the lifetimes</h2>
+  <ol>
+    <li>Dart allocates input and out-parameter slots.</li>
+    <li>Rust borrows input only for the call.</li>
+    <li>On success, Rust transfers a boxed-slice allocation as <code>outPtr/outLen</code>.</li>
+    <li>Dart copies the Rust bytes into a new <code>Uint8List</code>.</li>
+    <li>Dart calls <code>echo_free</code> exactly once for the Rust pair.</li>
+    <li>The outer <code>finally</code> frees Dart's three native allocations.</li>
+  </ol>
+  <p><code>Pointer.asTypedList</code> creates a view over native memory; that view must not survive
+  the matching free. The explicit <code>Uint8List.fromList</code> copy is what makes the return value
+  independently Dart-owned.</p>
 
   <div class="box rust">
-    <div class="box-title">🦀 Notes</div>
+    <div class="box-title">🦀 Dart FFI just-in-time</div>
     <ul>
-      <li><code>package:ffi</code> (separate from the built-in <code>dart:ffi</code>) provides
-      <code>malloc</code>/<code>calloc</code>/<code>free</code> and string helpers. Add it to
-      <code>pubspec.yaml</code>. <span class="verify-tag">⚠️VERIFY</span> current API (e.g. <code>Size</code>
-      vs <code>IntPtr</code>, allocator names).</li>
-      <li>On iOS/Android you usually static-link the Rust and use
-      <code>DynamicLibrary.process()</code>/<code>executable()</code> rather than a file path — covered in
-      Phase 8.7 (packaging). <span class="verify-tag">⚠️VERIFY</span></li>
-      <li>Long-running calls should run off the UI isolate (Phase 7.5); for the spike, a synchronous call is fine.</li>
+      <li><code>calloc&lt;T&gt;()</code> allocates one zero-initialized <code>T</code>; passing a count
+      allocates an array.</li>
+      <li><code>Pointer&lt;Pointer&lt;Uint8&gt;&gt;</code> represents C's <code>uint8_t **</code>.</li>
+      <li><code>outPtr.value</code> reads the pointer Rust wrote; <code>outLen.value</code> reads the
+      length.</li>
+      <li>Keep long database calls off the UI isolate. This tiny synchronous spike is only proving the
+      ABI path.</li>
     </ul>
   </div>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
-      <p class="q">1. Why does each FFI function need two typedefs in Dart?</p>
-      <details><summary>Show answer</summary><div class="answer">One native typedef matching the C ABI
-      exactly (<code>Int32</code>, <code>Size</code>, <code>Pointer</code>), and one Dart typedef with Dart
-      types (<code>int</code>) for how you call it. <code>lookupFunction</code> bridges them.</div></details>
-
-      <p class="q">2. After <code>asTypedList(len)</code> on a Rust pointer, why copy with
-      <code>Uint8List.fromList</code> before freeing the Rust buffer?</p>
-      <details><summary>Show answer</summary><div class="answer"><code>asTypedList</code> is a view into the
-      native memory; once Rust frees it, the view dangles. Copying gives you Dart-owned bytes that survive.</div></details>
-
-      <p class="q">3. Who frees the Rust-allocated result buffer, and how?</p>
-      <details><summary>Show answer</summary><div class="answer">Rust does — Dart calls the exported Rust
-      free function (e.g. <code>db_free_buf</code>) and passes the pointer back. Dart must not
-      <code>malloc.free</code> a Rust allocation.</div></details>
-
-      <p class="q">4. Which buffers in <code>echoBytes</code> does Dart free itself?</p>
-      <details><summary>Show answer</summary><div class="answer">The ones Dart allocated: <code>inPtr</code>,
-      <code>outPtr</code>, <code>outLen</code> — freed in the <code>finally</code> block with
-      <code>malloc.free</code>.</div></details>
+      <p class="q">1. Why are there two Dart typedefs per native function?</p>
+      <details><summary>Show answer</summary><div class="answer">One describes the exact native C ABI
+      types; the other describes the Dart-callable representation.</div></details>
+      <p class="q">2. Why is output freeing in an inner <code>finally</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">Once Rust returns a live allocation,
+      Dart must return it even if copying or later validation throws.</div></details>
+      <p class="q">3. How is empty input represented?</p>
+      <details><summary>Show answer</summary><div class="answer">As <code>(nullptr, 0)</code>, matching
+      the Rust boundary's explicit empty-buffer branch.</div></details>
+      <p class="q">4. Why not return <code>rustPtr.asTypedList(length)</code> directly?</p>
+      <details><summary>Show answer</summary><div class="answer">It is only a view into Rust-owned
+      memory and becomes invalid after <code>echo_free</code>. Return a Dart-owned copy.</div></details>
     </div>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Doc:</strong> dart:ffi — <a href="https://dart.dev/interop/c-interop">dart.dev/interop/c-interop</a>
-      and the <code>dart:ffi</code> API reference; <code>package:ffi</code> on pub.dev.
-      <span class="verify-tag">⚠️VERIFY</span> URLs and current type names.</li>
-      <li><strong>Forward link:</strong> 1.10 (frb automates all this boilerplate), the Phase 1 Build (do it
-      by hand once), Phase 8.5 (the polished production binding).</li>
+      <li><strong>Primary docs:</strong> <a href="https://dart.dev/interop/c-interop">Dart C interop</a>,
+      <a href="https://api.dart.dev/dart-ffi/">dart:ffi API</a>, and
+      <a href="https://pub.dev/packages/ffi">package:ffi</a>.</li>
+      <li><strong>Next:</strong> Lesson 1.10 explains what a bridge generator can automate after this
+      ownership model is understood.</li>
     </ul>
   </div>
 

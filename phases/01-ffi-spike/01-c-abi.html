@@ -56,9 +56,13 @@
   </ul>
 
   <h2>Why "C" specifically is the lingua franca</h2>
-  <p>There's no universal ABI across languages — but the <strong>C ABI</strong> of a given platform
-  (e.g. the System V AMD64 ABI on Linux/macOS x86-64 <span class="verify-tag">⚠️VERIFY</span> name) is
-  the closest thing. It's simple, stable, well-documented, and <em>every</em> serious language ships a
+  <p>There's no one C ABI shared by every machine. There is a <strong>platform C ABI</strong> for each
+  target combination of architecture, operating system, object format, and toolchain. For example,
+  x86-64 Linux generally follows the System V AMD64 ABI; macOS also uses an x86-64 C calling convention
+  but has Mach-O-specific symbol and object-file rules. Rust's <code>"C"</code> ABI selects the target's
+  dominant C compiler convention.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/reference/items/external-blocks.html#abi">Rust Reference: ABI strings</a>]</span>
+  It is the closest thing to a language-interop baseline, and serious languages ship a
   way to call into it (Dart's <code>dart:ffi</code>, Python's <code>ctypes</code>/CFFI, Java's JNI/Panama,
   Swift's C interop, Go's cgo). So "expose a C ABI" = "present your library as if it were a plain C
   library," and instantly the whole ecosystem can call it.</p>
@@ -85,12 +89,12 @@
   </figure>
 
   <h2>Why Rust can expose a C ABI cleanly</h2>
-  <p>Rust normally mangles names and lays out structs however the compiler likes (it doesn't promise a
-  stable Rust ABI). But it gives you opt-in switches to produce <em>C-compatible</em> output for
+  <p>Rust's native ABI has no stability guarantee. But Rust gives you opt-in switches to produce
+  <em>C-compatible</em> output for
   specific items:</p>
   <ul>
     <li><code>extern "C"</code> on a function → use the C calling convention.</li>
-    <li><code>#[no_mangle]</code> → keep the symbol name exactly as written.</li>
+    <li><code>#[unsafe(no_mangle)]</code> → keep the symbol name exactly as written.</li>
     <li><code>#[repr(C)]</code> on a struct/enum → lay it out the way C would.</li>
   </ul>
   <p>You'll meet all three in detail next lesson. The point here: Rust deliberately separates "fast,
@@ -104,6 +108,20 @@
     <code>extern "C"</code> functions over opaque handles — the only thing the outside world sees.
     <strong>Layer 3 (bindings):</strong> Dart code that calls Layer 2 through <code>dart:ffi</code>.
     Keeping Layer 2 tiny is the whole strategy; the rest of Phase 1 is how to build it safely.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>A normal <code>fn</code> uses Rust's native ABI, which deliberately has no cross-version
+      stability guarantee.</li>
+      <li><code>extern "C" fn</code> changes the calling convention; it does not automatically make
+      every Rust parameter type valid for C.</li>
+      <li>The boundary should expose C-compatible scalars, raw pointers, and explicitly represented
+      types while the core keeps ordinary Rust types.</li>
+      <li>Symbol naming, data layout, ownership, and unwind policy are separate parts of the contract;
+      later lessons handle each one.</li>
+    </ul>
   </div>
 
   <div class="box check">
@@ -136,12 +154,11 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Doc:</strong> The Rustonomicon — FFI chapter,
-      <a href="https://doc.rust-lang.org/nomicon/ffi.html">doc.rust-lang.org/nomicon/ffi.html</a>
-      <span class="verify-tag">⚠️VERIFY</span> (the authoritative Rust FFI reference).</li>
+      <a href="https://doc.rust-lang.org/nomicon/ffi.html">doc.rust-lang.org/nomicon/ffi.html</a>.</li>
       <li><strong>Doc:</strong> SQLite C-interface intro — <a href="https://www.sqlite.org/cintro.html">sqlite.org/cintro.html</a>
-      <span class="verify-tag">⚠️VERIFY</span> — the gold-standard example of a clean, stable C API you'll study in Phase 8.</li>
-      <li><strong>Reference:</strong> the platform C ABI spec (System V AMD64 ABI) if you want the gory
-      register-level detail. <span class="verify-tag">⚠️VERIFY</span> exact name/version.</li>
+      — a mature handle-based C API you'll study in Phase 8.</li>
+      <li><strong>Reference:</strong> consult the ABI and object-format documentation for the exact
+      deployment target when register- or symbol-level details matter.</li>
     </ul>
   </div>
 

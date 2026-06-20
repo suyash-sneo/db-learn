@@ -39,9 +39,11 @@
     <span class="tok-k">fn</span> <span class="tok-f">summarize</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">String</span> { <span class="tok-k">self</span>.title.<span class="tok-f">clone</span>() }
     <span class="tok-c">// preview() comes free from the default</span>
 }</code></pre>
-  <p>Note the shape: <code>impl TraitName for TypeName</code>. You can implement a trait for a type
-  even if you didn't define the type (with some rules), which is how the standard library can make
-  <em>your</em> types printable, comparable, hashable.</p>
+  <p>Note the shape: <code>impl TraitName for TypeName</code>. You may implement a trait for a type
+  when either the trait or the type is local to your crate. This coherence restriction is often
+  called the <strong>orphan rule</strong>; it prevents conflicting implementations from separate
+  crates.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch10-02-traits.html#implementing-a-trait-on-a-type">Rust Book: implementing a trait</a>]</span></p>
 
   <h3>Derivable traits — the ones you'll use daily</h3>
   <p>Many common traits can be auto-implemented with <code>#[derive(...)]</code>, saving you the
@@ -51,7 +53,7 @@
     <thead><tr><th>Trait</th><th>Gives you</th></tr></thead>
     <tbody>
       <tr><td><code>Debug</code></td><td><code>{:?}</code> formatting for printing/inspecting</td></tr>
-      <tr><td><code>Clone</code></td><td>a <code>.clone()</code> method (deep copy)</td></tr>
+      <tr><td><code>Clone</code></td><td>an explicit <code>.clone()</code>; the type defines whether that is deep, shallow, or shared</td></tr>
       <tr><td><code>Copy</code></td><td>implicit bitwise copy (only for simple types)</td></tr>
       <tr><td><code>PartialEq</code>, <code>Eq</code></td><td><code>==</code> comparison</td></tr>
       <tr><td><code>PartialOrd</code>, <code>Ord</code></td><td><code>&lt; &gt; sort()</code> — <em>vital for B+tree keys</em></td></tr>
@@ -66,8 +68,10 @@
 
   <h2>Generics — write once, work for many types</h2>
   <p>A generic function/struct has a type <em>parameter</em> (usually <code>T</code>) filled in at
-  each call site. The compiler generates a specialized version per concrete type
-  ("monomorphization") — so generics are zero runtime cost.</p>
+  each call site. Rust commonly compiles generic code by <strong>monomorphization</strong>: it emits
+  code specialized for the concrete types used. That avoids dynamic-dispatch overhead, although it
+  can increase compilation time and binary size.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch10-01-syntax.html#performance-of-code-using-generics">Rust Book: generic-code performance</a>]</span></p>
   <span class="code-label">rust</span>
 <pre><code><span class="tok-c">// works for any T, returns the first element if present</span>
 <span class="tok-k">fn</span> <span class="tok-f">first</span>&lt;<span class="tok-f">T</span>: <span class="tok-f">Clone</span>&gt;(items: &amp;[<span class="tok-f">T</span>]) -&gt; <span class="tok-f">Option</span>&lt;<span class="tok-f">T</span>&gt; {
@@ -137,10 +141,10 @@
       <code>.clone()</code>) on values of type <code>T</code>. Without the bound, the compiler can't
       assume <code>T</code> is cloneable.</div></details>
 
-      <p class="q">4. Static dispatch (generics) vs dynamic dispatch (<code>dyn</code>): which has zero
-      runtime cost, and which should you default to?</p>
+      <p class="q">4. Static dispatch (generics) vs dynamic dispatch (<code>dyn</code>): which avoids
+      vtable dispatch, and which should you default to here?</p>
       <details><summary>Show answer</summary><div class="answer">Generics/<code>impl Trait</code> are
-      monomorphized at compile time — zero runtime cost — and are the default. <code>dyn</code> uses a
+      monomorphized at compile time, avoid vtable dispatch, and are the default here. <code>dyn</code> uses a
       runtime vtable; use it only when you need mixed types behind one pointer.</div></details>
     </div>
   </div>

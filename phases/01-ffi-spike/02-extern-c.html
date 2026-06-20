@@ -3,20 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>1.2 extern "C", no_mangle, repr(C)</title>
+<title>1.2 extern "C", unsafe(no_mangle), repr(C)</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p1:1.2", root: "../../" };</script>
 </head>
 <body>
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.2</div>
-  <h1>1.2 — <code>extern "C"</code>, <code>#[no_mangle]</code>, <code>#[repr(C)]</code></h1>
+  <h1>1.2 — <code>extern "C"</code>, <code>#[unsafe(no_mangle)]</code>, <code>#[repr(C)]</code></h1>
   <div class="goal"><b>Goal:</b> Learn the three Rust switches that turn a normal Rust function or
   struct into something C — and Dart — can call, and how to configure Cargo to emit a loadable library.</div>
 
   <h2>Why this matters to your DB</h2>
   <p>These are the literal building blocks of Layer 2. Every function the outside world calls on your
-  engine will carry <code>extern "C"</code> and <code>#[no_mangle]</code>; every struct that crosses
+  engine will carry <code>extern "C"</code> and <code>#[unsafe(no_mangle)]</code>; every struct that crosses
   the boundary will carry <code>#[repr(C)]</code>. Misuse any of them and you get linker errors or,
   worse, silent memory corruption. This lesson makes them routine.</p>
 
@@ -29,34 +29,39 @@
     a + b   <span class="tok-c">// ordinary Rust inside</span>
 }</code></pre>
 
-  <h2>2. <code>#[no_mangle]</code> — keep the symbol name</h2>
+  <h2>2. <code>#[unsafe(no_mangle)]</code> — keep the symbol name</h2>
   <p>By default Rust <em>mangles</em> symbol names (encodes module + type info), so the compiled symbol
   isn't simply <code>add</code>. A C/Dart caller looks the function up <em>by name</em>, so it needs the
-  predictable name. <code>#[no_mangle]</code> says "export this symbol exactly as written."</p>
+  predictable name. <code>#[unsafe(no_mangle)]</code> says "export this symbol exactly as written."
+  Rust 2024 requires the <code>unsafe(...)</code> wrapper because choosing a global symbol name has
+  safety obligations: it must not collide with another symbol.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-attributes.html">Rust 2024: unsafe attributes</a>]</span></p>
   <span class="code-label">rust</span>
-<pre><code><span class="tok-m">#[no_mangle]</span>
+<pre><code><span class="tok-m">#[unsafe(no_mangle)]</span>
 <span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">add</span>(a: <span class="tok-f">i32</span>, b: <span class="tok-f">i32</span>) -&gt; <span class="tok-f">i32</span> {
     a + b
 }
 <span class="tok-c">// Now the binary contains a symbol literally named "add" that Dart can find.</span></code></pre>
   <div class="box warn">
     <div class="box-title">⚠️ No overloading, unique names</div>
-    <p>Because <code>#[no_mangle]</code> uses the raw name, every exported function needs a
+    <p>Because <code>#[unsafe(no_mangle)]</code> uses the raw name, every exported function needs a
     <em>globally unique</em> name (no two <code>add</code>s, no overloads). Real C libraries solve this
     by prefixing: <code>sqlite3_open</code>, <code>sqlite3_close</code>. You'll do the same —
     <code>mydb_open</code>, <code>mydb_insert</code> — both to avoid clashes and to namespace your API.</p>
   </div>
 
   <h2>3. <code>#[repr(C)]</code> — C-compatible data layout</h2>
-  <p>Rust reserves the right to reorder struct fields and choose padding for efficiency. C does not —
-  it lays fields out in declaration order with defined alignment. If you pass a struct by value across
-  the boundary, both sides must agree, so you force C layout with <code>#[repr(C)]</code>:</p>
+  <p>Rust's default representation does not promise a stable field layout. If you pass a struct by
+  value across the boundary, both sides must agree, so you request the platform's C-compatible layout
+  with <code>#[repr(C)]</code>. This controls Rust's layout rules; the generated C declaration still
+  needs matching field types and the same target platform.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/reference/type-layout.html#the-c-representation"><code>repr(C)</code> layout</a>]</span></p>
   <span class="code-label">rust</span>
 <pre><code><span class="tok-m">#[repr(C)]</span>
 <span class="tok-k">pub struct</span> <span class="tok-f">Point</span> {
     x: <span class="tok-f">f64</span>,
     y: <span class="tok-f">f64</span>,
-}   <span class="tok-c">// guaranteed: x then y, C alignment — safe to share with C/Dart</span></code></pre>
+}   <span class="tok-c">// C-compatible field order/alignment; the foreign declaration must still match</span></code></pre>
   <div class="box deeper">
     <div class="box-title">You'll mostly avoid passing structs by value</div>
     <p>Your design keeps the C surface tiny: documents cross as <em>byte buffers</em> (pointer + length),
@@ -73,16 +78,16 @@
 <pre><code>[package]
 name = <span class="tok-s">"mydb"</span>
 version = <span class="tok-s">"0.1.0"</span>
-edition = <span class="tok-s">"2021"</span>
+edition = <span class="tok-s">"2024"</span>
 
 [lib]
 <span class="tok-c"># cdylib = a C-compatible dynamic library (what Dart loads at runtime)</span>
 <span class="tok-c"># staticlib is for static linking; you'll want cdylib for Flutter desktop/dev</span>
 crate-type = [<span class="tok-s">"cdylib"</span>, <span class="tok-s">"staticlib"</span>, <span class="tok-s">"rlib"</span>]</code></pre>
   <p>Including <code>"rlib"</code> too lets your own Rust tests still link the crate normally. After
-  <code>cargo build</code>, look in <code>target/debug/</code> for <code>libmydb.dylib</code> /
-  <code>.so</code> / <code>mydb.dll</code> <span class="verify-tag">⚠️VERIFY</span> exact file naming per
-  platform.</p>
+  <code>cargo build</code>, inspect <code>target/debug/</code>. Cargo chooses target-specific names,
+  commonly <code>libmydb.so</code> on Linux, <code>libmydb.dylib</code> on macOS, and
+  <code>mydb.dll</code> on Windows.</p>
 
   <h2>Inspecting the exported symbol</h2>
   <p>Confirm your function is actually exported with the right name — a great sanity check before you
@@ -93,35 +98,34 @@ crate-type = [<span class="tok-s">"cdylib"</span>, <span class="tok-s">"staticli
 nm -D target/debug/libmydb.so | grep add
 <span class="tok-c"># macOS:</span>
 nm -gU target/debug/libmydb.dylib | grep add
-<span class="tok-c"># expect to see a symbol named "add" (or "_add" with a leading underscore on macOS) ⚠️VERIFY</span></code></pre>
+<span class="tok-c"># look for the exported add symbol; display conventions vary by object format/tool</span></code></pre>
 
   <div class="box rust">
     <div class="box-title">🦀 Rust just-in-time</div>
     <ul>
       <li>The same three switches in concert is the canonical exported-function pattern:
-      <code>#[no_mangle] pub extern "C" fn …</code>.</li>
-      <li>Newer Rust may nudge you toward <code>#[unsafe(no_mangle)]</code> spelling
-      <span class="verify-tag">⚠️VERIFY</span> — check your compiler's warnings and the edition you chose.</li>
+      <code>#[unsafe(no_mangle)] pub extern "C" fn …</code>.</li>
+      <li>This curriculum uses Rust edition 2024, where <code>no_mangle</code> must be written as
+      <code>#[unsafe(no_mangle)]</code>.</li>
       <li>Only C-compatible parameter/return types may appear in an <code>extern "C"</code> signature:
       integers, floats, raw pointers (<code>*const T</code>/<code>*mut T</code>), and
       <code>#[repr(C)]</code> types. <em>No</em> <code>String</code>, <code>Vec</code>, <code>&amp;str</code>,
       or generics in the signature — you'll learn the buffer/pointer translations in 1.3 and 1.5.</li>
-      <li>Read more: Rustonomicon FFI chapter; the Rust Reference on
-      <a href="https://doc.rust-lang.org/reference/type-layout.html">type layout</a> and <code>repr</code>
-      <span class="verify-tag">⚠️VERIFY</span>.</li>
+      <li>Read more: <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon FFI</a> and the
+      Rust Reference on <a href="https://doc.rust-lang.org/reference/type-layout.html">type layout</a>.</li>
     </ul>
   </div>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
-      <p class="q">1. What does each of the three do: <code>extern "C"</code>, <code>#[no_mangle]</code>,
+      <p class="q">1. What does each of the three do: <code>extern "C"</code>, <code>#[unsafe(no_mangle)]</code>,
       <code>#[repr(C)]</code>?</p>
       <details><summary>Show answer</summary><div class="answer"><code>extern "C"</code> = C calling
-      convention; <code>#[no_mangle]</code> = keep the symbol name unmangled so callers can find it;
+      convention; <code>#[unsafe(no_mangle)]</code> = keep the symbol name unmangled so callers can find it;
       <code>#[repr(C)]</code> = lay out a struct/enum the C way so both sides agree on its bytes.</div></details>
 
-      <p class="q">2. Why can't you have two <code>#[no_mangle]</code> functions named <code>open</code>?</p>
+      <p class="q">2. Why can't you have two <code>#[unsafe(no_mangle)]</code> functions named <code>open</code>?</p>
       <details><summary>Show answer</summary><div class="answer">Unmangled symbols must be unique in the
       binary — there's no type info to disambiguate. Hence prefixing (<code>mydb_open</code>).</div></details>
 
@@ -140,8 +144,9 @@ nm -gU target/debug/libmydb.dylib | grep add
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Doc:</strong> Rustonomicon FFI chapter (calling convention, <code>repr(C)</code>);
-      The Cargo Book on <code>crate-type</code>. <span class="verify-tag">⚠️VERIFY</span> URLs/section names.</li>
+      <li><strong>Doc:</strong> <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon FFI</a>;
+      <a href="https://doc.rust-lang.org/reference/items/external-blocks.html">Rust Reference: external ABIs</a>;
+      <a href="https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-crate-type-field">Cargo crate types</a>.</li>
       <li><strong>Forward link:</strong> 1.3 (pointers), 1.4 (opaque handle), 1.8 (cbindgen turns these
       declarations into a C header automatically).</li>
     </ul>

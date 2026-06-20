@@ -60,9 +60,11 @@
 <span class="tok-c">// doc is gone now — you gave it away</span></code></pre>
 
   <h3>Copy types are the exception</h3>
-  <p>Small, stack-only types (integers, floats, <code>bool</code>, <code>char</code>) implement the
-  <code>Copy</code> trait — they're <em>copied</em>, not moved, because copying a few bytes is trivial
-  and there's no heap allocation to double-free:</p>
+  <p>Primitive numeric types, <code>bool</code>, and <code>char</code> implement <code>Copy</code>.
+  Assignment duplicates their value instead of invalidating the source. <code>Copy</code> is a trait
+  decision, not a promise that a value happens to live on the stack; types with destructors cannot
+  implement it.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/std/marker/trait.Copy.html"><code>Copy</code> trait</a>]</span></p>
   <span class="code-label">rust</span>
 <pre><code><span class="tok-k">let</span> x = 5;
 <span class="tok-k">let</span> y = x;          <span class="tok-c">// x is COPIED, not moved</span>
@@ -95,7 +97,8 @@
   </div>
   <p>This is "no shared mutation." It's exactly the discipline that prevents data races, and it's why
   Rust can be safely concurrent. It also catches single-threaded bugs like mutating a collection
-  while iterating it.</p>
+  while iterating it.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html">Rust Book: references and borrowing</a>]</span></p>
 
   <figure>
   <svg viewBox="0 0 560 260" role="img" aria-label="Move transfers ownership; shared borrows allow many readers; mutable borrow allows one writer">

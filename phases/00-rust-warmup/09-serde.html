@@ -13,7 +13,8 @@
   <h1>0.9 — Serialization with <code>serde</code> (JSON to start)</h1>
   <div class="goal"><b>Goal:</b> Turn Rust values into bytes and back with <code>serde</code>. Start
   with JSON because it's human-readable while you learn; later (Phase 6) you'll swap the format to a
-  compact binary one (BSON/MessagePack) without changing your data types.</div>
+  compact binary one (BSON/MessagePack). Many data types can stay the same, but format differences
+  still require compatibility tests and sometimes custom serialization.</div>
 
   <h2>Why this matters to your DB</h2>
   <p>Two reasons. (1) In the warm-up build you'll persist key-value pairs to a file — serde is the
@@ -27,7 +28,9 @@
   splits the job in two: a <em>data model</em> (your types implement <code>Serialize</code> /
   <code>Deserialize</code>) and a <em>format</em> (a separate crate like <code>serde_json</code>,
   <code>rmp-serde</code> for MessagePack, or a BSON crate). The same annotated type can be written to
-  <em>any</em> supported format — that's the decoupling that makes Phase 6's format swap painless.</p>
+  many supported formats. The abstraction removes most format-specific code from your types; it does
+  not guarantee that every format represents every Rust value identically.
+  <span class="src">[src: <a href="https://serde.rs/">Serde framework</a>]</span></p>
 
   <figure>
   <svg viewBox="0 0 560 180" role="img" aria-label="serde decouples your types from the wire format">
@@ -123,9 +126,9 @@ serde_json = <span class="tok-s">"1"</span></code></pre>
       <li><code>"Ada".into()</code> and <code>"Ada".to_string()</code> both make an owned
       <code>String</code> from a <code>&amp;str</code>; <code>.into()</code> uses the <code>From</code>
       trait you met in Lesson 0.5.</li>
-      <li>Same types, different formats later: MessagePack via the <code>rmp-serde</code> crate, BSON
-      via a <code>bson</code> crate. <span class="verify-tag">⚠️VERIFY</span> current crate names/APIs in Phase 6.</li>
-      <li>Read more: serde book — <a href="https://serde.rs/">serde.rs</a> <span class="verify-tag">⚠️VERIFY</span>;
+      <li>Same serde traits, different formats later: MessagePack and BSON both have serde-compatible
+      Rust crates. Phase 6 will choose and pin the concrete crate after comparing their data models.</li>
+      <li>Read more: <a href="https://serde.rs/">the Serde guide</a>;
       Rust Book Ch.10 (the traits behind the derive).</li>
     </ul>
   </div>
@@ -151,16 +154,18 @@ serde_json = <span class="tok-s">"1"</span></code></pre>
 
       <p class="q">4. Why start with JSON if the engine will eventually use a binary format?</p>
       <details><summary>Show answer</summary><div class="answer">JSON is human-readable, so you can
-      inspect what you stored while learning. Because serde decouples model from format, switching to
-      MessagePack/BSON later is a small change, not a rewrite.</div></details>
+      inspect what you stored while learning. Serde keeps most model code independent of the format,
+      but the later switch still needs round-trip, range, and compatibility tests.</div></details>
     </div>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Doc:</strong> the serde book at <a href="https://serde.rs/">serde.rs</a>
-      (derive, attributes, data model) and <code>serde_json</code> docs. <span class="verify-tag">⚠️VERIFY</span> URLs/API.</li>
+      <li><strong>Doc:</strong> <a href="https://serde.rs/">the Serde guide</a>,
+      <a href="https://docs.rs/serde_json/latest/serde_json/fn.to_vec.html"><code>serde_json::to_vec</code></a>,
+      <a href="https://docs.rs/serde_json/latest/serde_json/fn.from_slice.html"><code>from_slice</code></a>,
+      and <a href="https://docs.rs/serde_json/latest/serde_json/enum.Value.html"><code>Value</code></a>.</li>
       <li><strong>Forward link:</strong> Phase 6.2 (BSON vs MessagePack vs JSON tradeoffs),
       Phase 1.5 (byte buffers across FFI), Phase 6.6 (querying fields out of stored bytes).</li>
       <li><strong>Hands-on:</strong> serialize a <code>Vec&lt;User&gt;</code>, write it to a file with

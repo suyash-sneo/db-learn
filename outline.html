@@ -37,10 +37,13 @@
       const st = done ? '<span class="status done">authored</span>'
                       : '<span class="status soon">coming soon</span>';
       const isBuild = l[0] === "build";
+      const label = (isBuild ? '▸ Build · ' : '<b>' + l[0] + '</b> · ') + l[1];
+      const item = done
+        ? '<a href="' + p.dir + '/' + l[2] + '">' + label + '</a>'
+        : '<span class="soon-link">' + label + '</span>';
       html += '<div class="lesson-row' + (isBuild ? ' build-row' : '') +
         '" style="display:flex;gap:.6rem;align-items:baseline;justify-content:space-between">' +
-        '<a href="' + p.dir + '/' + l[2] + '">' +
-        (isBuild ? '▸ Build · ' : '<b>' + l[0] + '</b> · ') + l[1] + '</a>' + st + '</div>';
+        item + st + '</div>';
     });
     html += '</div></div>';
   });

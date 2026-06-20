@@ -78,15 +78,16 @@
 <pre><code><span class="tok-k">pub struct</span> <span class="tok-f">Db</span> { <span class="tok-c">/* your real engine state */</span> }
 
 <span class="tok-c">// CREATE: heap-allocate, hand out the pointer, stop managing it.</span>
-<span class="tok-m">#[no_mangle]</span>
+<span class="tok-m">#[unsafe(no_mangle)]</span>
 <span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_open</span>() -&gt; *<span class="tok-k">mut</span> <span class="tok-f">Db</span> {
     <span class="tok-k">let</span> db = <span class="tok-f">Box</span>::<span class="tok-f">new</span>(<span class="tok-f">Db</span> { <span class="tok-c">/* … */</span> });
     <span class="tok-f">Box</span>::<span class="tok-f">into_raw</span>(db)        <span class="tok-c">// pointer escapes; Rust won't free it now</span>
 }
 
 <span class="tok-c">// USE: borrow the object from the pointer WITHOUT taking ownership.</span>
-<span class="tok-m">#[no_mangle]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_do_thing</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) -&gt; <span class="tok-f">i32</span> {
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-c">/// # Safety: `db` must be a live handle returned by db_open and exclusively used for this call.</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_do_thing</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) -&gt; <span class="tok-f">i32</span> {
     <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span> 1; }
     <span class="tok-k">let</span> db: &amp;<span class="tok-k">mut</span> <span class="tok-f">Db</span> = <span class="tok-k">unsafe</span> { &amp;<span class="tok-k">mut</span> *db };  <span class="tok-c">// reborrow; does NOT free</span>
     <span class="tok-c">// … use db …</span>
@@ -94,14 +95,18 @@
 }
 
 <span class="tok-c">// DESTROY: reclaim ownership so the Box drops and frees the Db.</span>
-<span class="tok-m">#[no_mangle]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_close</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) {
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-c">/// # Safety: `db` must be a live handle from db_open and must not have been closed before.</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_close</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) {
     <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span>; }
     <span class="tok-k">unsafe</span> { <span class="tok-k">let</span> _ = <span class="tok-f">Box</span>::<span class="tok-f">from_raw</span>(db); }   <span class="tok-c">// rebuilt Box drops here → freed</span>
 }</code></pre>
   <p>Read the three carefully: <code>into_raw</code> is "ownership <em>out</em>," <code>from_raw</code>
   is "ownership <em>back in</em>," and the use-case in the middle only <em>borrows</em>
-  (<code>&amp;mut *db</code>) so it never frees anything.</p>
+  (<code>&amp;mut *db</code>) so it never frees anything. The functions are marked
+  <code>unsafe</code> for Rust callers because a null check cannot prove that an arbitrary non-null
+  address is a live handle.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/std/boxed/struct.Box.html#method.from_raw"><code>Box::from_raw</code> safety contract</a>]</span></p>
 
   <div class="box warn">
     <div class="box-title">⚠️ The three rules that prevent disaster</div>
@@ -113,6 +118,10 @@
       caller owns the lifecycle; document it loudly.</li>
       <li><strong>Null after free (on the caller side).</strong> Dart should drop its reference / set it
       to null after <code>close</code> so it can't be reused.</li>
+      <li><strong>No concurrent or reentrant use in this phase.</strong> Creating
+      <code>&amp;mut Db</code> promises exclusive access. The same handle must not be used by two
+      calls at once, and a callback must not reenter it. A later API can put synchronized interior
+      mutability behind the handle if concurrent access is required.</li>
     </ul>
   </div>
 
@@ -121,8 +130,8 @@
   defined. The header says <code>typedef struct Db Db;</code> with no fields. The caller literally
   cannot read or construct a <code>Db</code>; they can only pass the pointer to your functions. That
   opacity is a feature: you can change <code>Db</code>'s internals freely without breaking the ABI, and
-  the caller can't corrupt your invariants. cbindgen (Lesson 1.8) generates exactly this opaque
-  declaration for you.</p>
+  the caller can't corrupt your invariants. With an appropriate public API and configuration,
+  cbindgen (Lesson 1.8) can emit the corresponding forward declaration.</p>
 
   <div class="box rust">
     <div class="box-title">🦀 Rust just-in-time</div>
@@ -134,8 +143,9 @@
       to drop it" intent explicit.</li>
       <li><code>&amp;mut *ptr</code> is a "reborrow": create a reference from a raw pointer. Only valid
       inside <code>unsafe</code>, and only if the pointer is truly valid (hence the null check).</li>
-      <li>Read more: <code>std::boxed::Box</code> docs (<code>into_raw</code>/<code>from_raw</code>);
-      Rustonomicon on FFI object lifecycles. <span class="verify-tag">⚠️VERIFY</span> exact doc URLs.</li>
+      <li>Read more: <a href="https://doc.rust-lang.org/std/boxed/struct.Box.html#method.into_raw"><code>Box::into_raw</code></a>,
+      <a href="https://doc.rust-lang.org/std/boxed/struct.Box.html#method.from_raw"><code>Box::from_raw</code></a>,
+      and <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon FFI</a>.</li>
     </ul>
   </div>
 
@@ -167,10 +177,10 @@
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Doc:</strong> <code>Box::into_raw</code> / <code>Box::from_raw</code> in std; the
-      Rustonomicon FFI chapter's object-passing section. <span class="verify-tag">⚠️VERIFY</span> URLs.</li>
+      <li><strong>Doc:</strong> the standard-library <code>Box</code> links above and the
+      <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon FFI chapter</a>.</li>
       <li><strong>Source:</strong> SQLite's <code>sqlite3 *</code> handle is the canonical real-world
-      example (Phase 8 studies <code>sqlite3.h</code>). <span class="verify-tag">⚠️VERIFY</span></li>
+      example (Phase 8 studies <a href="https://www.sqlite.org/c3ref/intro.html"><code>sqlite3.h</code>'s API</a>).</li>
       <li><strong>Forward link:</strong> 1.5 (passing byte buffers through these functions), 1.6 (wrapping
       each in <code>catch_unwind</code>), 8.1–8.2 (the full handle-based API).</li>
     </ul>

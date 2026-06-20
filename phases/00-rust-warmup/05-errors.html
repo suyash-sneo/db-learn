@@ -53,9 +53,9 @@
     <div class="box-title">⚠️ unwrap / expect — fine for tests, not for the engine</div>
     <p><code>.unwrap()</code> returns the inner value or <strong>panics</strong> on
     <code>None</code>/<code>Err</code>. <code>.expect("msg")</code> is the same with a custom panic
-    message. Convenient in tests and quick experiments — but a panic in library code that crosses the
-    FFI boundary is undefined behavior (Phase 1.6). In the engine, propagate errors instead of
-    unwrapping.</p>
+    message. Convenient in tests and quick experiments—but an uncaught panic reaching a normal
+    <code>extern "C"</code> boundary aborts the host process (Phase 1.6). In the engine, propagate
+    expected errors instead of unwrapping.</p>
   </div>
 
   <h2>The <code>?</code> operator — the workhorse</h2>
@@ -71,9 +71,10 @@
     f.<span class="tok-f">read_to_string</span>(&amp;<span class="tok-k">mut</span> s)?;        <span class="tok-c">// same</span>
     <span class="tok-f">Ok</span>(s)                            <span class="tok-c">// explicit Ok on success</span>
 }</code></pre>
-  <p>Read <code>?</code> as "or bail." It only works inside a function that itself returns a
-  <code>Result</code> (or <code>Option</code>), because that's where it bails <em>to</em>. This is how
-  nearly every engine function will look.</p>
+  <p>Read <code>?</code> as "or bail." It works inside a function whose return type supports
+  propagating that residual value—most commonly a compatible <code>Result</code> or
+  <code>Option</code>. In these examples it performs an early return; it is not exception handling.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html#the--operator"><code>?</code> operator</a>]</span></p>
 
   <h2>Your own error type</h2>
   <p>Real engines define one error <code>enum</code> that covers every way they can fail. Each variant
@@ -111,8 +112,9 @@
       <code>Ok</code>/<code>Some</code> value; <code>.unwrap_or(default)</code> supplies a fallback.</li>
       <li><code>type Result&lt;T&gt; = std::result::Result&lt;T, DbError&gt;;</code> — a type alias so you
       can write <code>Result&lt;Page&gt;</code> everywhere. Common in real crates.</li>
-      <li>The <code>std::error::Error</code> trait + the <code>thiserror</code> crate reduce error
-      boilerplate. <span class="verify-tag">⚠️VERIFY</span> current <code>thiserror</code> API before relying on it.</li>
+      <li>The <code>std::error::Error</code> trait plus the
+      <a href="https://docs.rs/thiserror/latest/thiserror/"><code>thiserror</code></a> crate can reduce
+      error boilerplate. Pin dependencies and follow the version's own documentation.</li>
       <li>Read more: <a href="https://doc.rust-lang.org/book/ch09-00-error-handling.html">Book Ch.9</a>.</li>
     </ul>
   </div>
@@ -133,8 +135,8 @@
 
       <p class="q">3. Why is <code>.unwrap()</code> dangerous in the engine but okay in a test?</p>
       <details><summary>Show answer</summary><div class="answer">It panics on failure. A panic in a test
-      just fails the test; a panic in library code can unwind across the FFI boundary (UB) and crash
-      the host app. Engine code should return errors, not panic.</div></details>
+      just fails the test; an uncaught panic reaching a normal <code>extern "C"</code> boundary aborts
+      the host process. Engine code should return expected errors rather than panic.</div></details>
 
       <p class="q">4. What lets <code>?</code> turn an <code>io::Error</code> into your
       <code>DbError</code> automatically?</p>
@@ -148,8 +150,9 @@
     <ul>
       <li><strong>Book:</strong> Ch.9 "Error Handling" — panic vs <code>Result</code>, <code>?</code>,
       and when each is appropriate. Also revisit Ch.6 for <code>Option</code>.</li>
-      <li><strong>Doc:</strong> <code>std::result</code> and <code>std::option</code> module docs for the
-      full combinator list. <span class="verify-tag">⚠️VERIFY</span> exact method names before quoting.</li>
+      <li><strong>Doc:</strong> <a href="https://doc.rust-lang.org/std/result/enum.Result.html"><code>Result</code></a>
+      and <a href="https://doc.rust-lang.org/std/option/enum.Option.html"><code>Option</code></a> for
+      the complete method lists.</li>
       <li><strong>Hands-on:</strong> Rustlings <code>error_handling</code>.</li>
     </ul>
   </div>

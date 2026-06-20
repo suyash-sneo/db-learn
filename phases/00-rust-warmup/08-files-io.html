@@ -92,20 +92,26 @@
     <li><code>flush()</code> (from <code>Write</code>) pushes Rust's <em>user-space</em> buffer to the
     operating system. (A raw <code>File</code> isn't buffered, so this is often a no-op; a
     <code>BufWriter</code> is.)</li>
-    <li><code>file.sync_all()</code> / <code>sync_data()</code> asks the <em>operating system</em> to
-    flush its caches all the way to the physical disk. This is the <code>fsync</code> system call.</li>
+    <li><code>file.sync_all()</code> asks the operating system to synchronize file content and
+    metadata with the underlying filesystem; <code>sync_data()</code> may omit metadata not needed
+    to recover the content. Rust describes both as attempts because the final guarantee depends on
+    the OS, filesystem, storage device, and hardware.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>File::sync_all</code></a>]</span></li>
   </ul>
   <div class="box warn">
     <div class="box-title">⚠️ "Written" ≠ "durable"</div>
     <p>After <code>write_all</code> returns, your data may still live only in the OS's page cache in
-    RAM. A power loss there <em>loses it</em>, even though the call succeeded. Only after
-    <code>sync_all()</code> returns is the data guaranteed on stable storage. This gap — fast writes
-    vs. crash-safe writes — is the entire reason WAL exists (Phase 5). For now, just know the two
-    calls are different and which one means "really saved."</p>
+    RAM. A power loss there can lose it even though the write succeeded. A successful
+    <code>sync_all()</code> is the standard request to push that file's content and metadata toward
+    durable storage, but a crash-safe protocol must also account for filesystem and device behavior.
+    Creating or renaming files may require synchronizing the containing directory. SQLite's atomic
+    commit design explicitly states its filesystem assumptions rather than treating one sync call as
+    an unconditional hardware guarantee.
+    <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite: Atomic Commit</a>]</span></p>
   </div>
   <span class="code-label">rust</span>
 <pre><code>file.<span class="tok-f">write_all</span>(data)?;
-file.<span class="tok-f">sync_all</span>()?;   <span class="tok-c">// fsync — now it's actually on disk (slow, but durable)</span></code></pre>
+file.<span class="tok-f">sync_all</span>()?;   <span class="tok-c">// request synchronization of this file's content + metadata</span></code></pre>
 
   <h2>Convenience helpers (for the warm-up build, not the engine)</h2>
   <span class="code-label">rust</span>
@@ -132,8 +138,9 @@ fs::<span class="tok-f">write</span>(<span class="tok-s">"notes.txt"</span>, b<s
       <p class="q">3. <code>write_all</code> returned <code>Ok(())</code>. Is the data safe across a
       power cut? What makes it safe?</p>
       <details><summary>Show answer</summary><div class="answer">Not necessarily — it may sit in the OS
-      cache. <code>file.sync_all()</code> (fsync) forces it to physical storage. This gap is why WAL
-      exists.</div></details>
+      cache. <code>file.sync_all()</code> requests synchronization of the file; a complete
+      crash-safety design must also state its OS/filesystem/device assumptions and may need to sync
+      directory metadata. This durability gap is one reason databases use WAL protocols.</div></details>
 
       <p class="q">4. You call <code>file.seek(...)</code> and the compiler says no method named
       <code>seek</code>. Likely cause?</p>
@@ -147,9 +154,10 @@ fs::<span class="tok-f">write</span>(<span class="tok-s">"notes.txt"</span>, b<s
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Book:</strong> Ch.12 (an I/O project — reading files, args), Ch.9 (errors with I/O).</li>
-      <li><strong>Doc:</strong> <code>std::fs::File</code>, <code>std::io</code> module,
-      <code>OpenOptions</code>, <code>SeekFrom</code>. <span class="verify-tag">⚠️VERIFY</span> method
-      names (<code>sync_all</code> vs <code>sync_data</code>) before relying on subtle differences.</li>
+      <li><strong>Doc:</strong> <a href="https://doc.rust-lang.org/std/fs/struct.File.html"><code>std::fs::File</code></a>,
+      <a href="https://doc.rust-lang.org/std/io/index.html"><code>std::io</code></a>,
+      <a href="https://doc.rust-lang.org/std/fs/struct.OpenOptions.html"><code>OpenOptions</code></a>,
+      and <a href="https://doc.rust-lang.org/std/io/enum.SeekFrom.html"><code>SeekFrom</code></a>.</li>
       <li><strong>Forward link:</strong> this connects to Phase 2.6 (fsync &amp; the durability gap) and
       Phase 5 (WAL).</li>
     </ul>

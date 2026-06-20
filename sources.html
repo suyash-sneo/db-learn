@@ -11,119 +11,121 @@
 <main>
   <div class="crumbs"><a href="index.html">Home</a> › Sources</div>
   <h1>Sources &amp; annotated bibliography</h1>
-  <p class="lead">These are the books, courses, docs, and repositories the curriculum is built
-  from. Lessons teach the same ideas in original words; come here when a <em>Go deeper / verify</em>
-  box sends you out. Links marked <span class="verify-tag">⚠️VERIFY</span> were not fetched at
-  authoring time and should be confirmed during your review pass.</p>
+  <p class="lead">Lessons are self-contained explanations. These links are evidence and optional
+  deeper reading, not missing chapters the learner must leave the site to understand. Web sources
+  on this page were opened and checked on <strong>June 20, 2026</strong>.</p>
 
   <div class="box deeper">
-    <div class="box-title">Legend</div>
-    <p>✅ = URL fetched and confirmed live while writing this page.
-    <span class="verify-tag">⚠️VERIFY</span> = plausible but unconfirmed; check it.
-    Licensing notes tell you what may be quoted.</p>
+    <div class="box-title">Source policy</div>
+    <p>Use primary specifications, official documentation, and upstream repositories for factual
+    claims. Books and lectures provide conceptual depth but are not reproduced. Fast-moving tools are
+    pinned in real projects; this bibliography records the upstream location rather than promising
+    that an unpinned “latest” API will stay unchanged.</p>
   </div>
+
+  <h2>Rust language, Cargo, and standard library</h2>
+  <ul>
+    <li><a href="https://doc.rust-lang.org/book/">The Rust Programming Language</a> — beginner
+    explanations of ownership, traits, packages, error handling, unsafe Rust, and tests.</li>
+    <li><a href="https://doc.rust-lang.org/cargo/">The Cargo Book</a> and
+    <a href="https://doc.rust-lang.org/cargo/commands/cargo-new.html"><code>cargo new</code></a> —
+    package layout, targets, profiles, and current edition selection.</li>
+    <li><a href="https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-attributes.html">Rust 2024
+    unsafe attributes</a> — why <code>no_mangle</code> is written
+    <code>#[unsafe(no_mangle)]</code>.</li>
+    <li><a href="https://doc.rust-lang.org/reference/items/external-blocks.html">Rust Reference:
+    external blocks and ABIs</a> and
+    <a href="https://doc.rust-lang.org/reference/type-layout.html">type layout</a>.</li>
+    <li><a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon FFI</a> — C ABI declarations,
+    callbacks, linking, and current unwind behavior.</li>
+    <li>Relevant standard-library contracts:
+    <a href="https://doc.rust-lang.org/std/slice/fn.from_raw_parts.html"><code>slice::from_raw_parts</code></a>,
+    <a href="https://doc.rust-lang.org/std/boxed/struct.Box.html"><code>Box</code></a>,
+    <a href="https://doc.rust-lang.org/std/panic/fn.catch_unwind.html"><code>catch_unwind</code></a>,
+    and <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>File::sync_all</code></a>.</li>
+    <li><a href="https://github.com/rust-lang/rustlings">Rustlings</a> — short practice exercises.</li>
+  </ul>
+
+  <h2>Serialization</h2>
+  <ul>
+    <li><a href="https://serde.rs/">Serde guide</a> — framework data model, derive, and attributes.</li>
+    <li><a href="https://docs.rs/serde_json/latest/serde_json/fn.to_vec.html"><code>serde_json::to_vec</code></a>,
+    <a href="https://docs.rs/serde_json/latest/serde_json/fn.from_slice.html"><code>from_slice</code></a>,
+    and <a href="https://docs.rs/serde_json/latest/serde_json/enum.Value.html"><code>Value</code></a>.</li>
+    <li><a href="https://bsonspec.org/">BSON specification</a> and
+    <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack specification</a> —
+    candidates to compare in the document phase.</li>
+  </ul>
+
+  <h2>C ABI, header generation, and Dart/Flutter</h2>
+  <ul>
+    <li><a href="https://github.com/mozilla/cbindgen">cbindgen upstream</a> and its
+    <a href="https://raw.githubusercontent.com/mozilla/cbindgen/main/docs.md">CLI/config reference</a>.
+    The CLI defaults to C++; this curriculum explicitly requests C.</li>
+    <li><a href="https://dart.dev/interop/c-interop">Dart C interop guide</a> —
+    <code>dart:ffi</code> concepts and <code>package:ffigen</code> for generating Dart bindings from
+    C headers.</li>
+    <li><a href="https://api.dart.dev/dart-ffi/">dart:ffi API</a>,
+    <a href="https://api.dart.dev/dart-ffi/Size-class.html"><code>Size</code></a>, and
+    <a href="https://pub.dev/packages/ffi">package:ffi</a>.</li>
+    <li><a href="https://docs.flutter.dev/platform-integration/legacy-ffi-plugin">Flutter native
+    library linking</a> — dynamic/static loading distinctions and the current recommendation to use
+    native-assets build hooks for new packages.</li>
+    <li><a href="https://cjycode.com/flutter_rust_bridge/">flutter_rust_bridge v2 docs</a> and
+    <a href="https://github.com/fzyzcjy/flutter_rust_bridge">upstream repository</a>.</li>
+  </ul>
+
+  <h2>SQLite — storage teacher</h2>
+  <p>SQLite documentation and source are the primary storage references. SQLite states that its source
+  code is in the public domain; still cite exact pages/functions and keep snippets short.</p>
+  <ul>
+    <li><a href="https://www.sqlite.org/arch.html">Architecture</a> — major modules and layering.</li>
+    <li><a href="https://www.sqlite.org/fileformat2.html">Database file format</a> — authoritative
+    byte-level format information.</li>
+    <li><a href="https://www.sqlite.org/atomiccommit.html">Atomic commit</a> — rollback-journal
+    protocol and filesystem assumptions.</li>
+    <li><a href="https://www.sqlite.org/wal.html">Write-ahead logging</a> and
+    <a href="https://www.sqlite.org/walformat.html">WAL format</a>.</li>
+    <li><a href="https://www.sqlite.org/lockingv3.html">Locking v3</a>.</li>
+    <li><a href="https://www.sqlite.org/cintro.html">C interface introduction</a>,
+    <a href="https://www.sqlite.org/c3ref/intro.html">C API reference</a>,
+    <a href="https://www.sqlite.org/rescode.html">result codes</a>, and
+    <a href="https://www.sqlite.org/c3ref/free.html">memory-allocation routines</a>.</li>
+    <li><a href="https://www.sqlite.org/src/">Source repository browser</a>. Planned source dives
+    should identify exact files and functions when authored, including <code>pager.c</code>,
+    <code>btree.c</code>, <code>wal.c</code>, and platform VFS implementations.</li>
+  </ul>
+
+  <h2>Document and embedded-engine references</h2>
+  <ul>
+    <li><a href="https://github.com/isar/isar">Isar upstream repository</a> — Apache-2.0. Its current
+    README warns that v4 is not ready for production and directs production use to stable v3. Treat
+    branch/version architecture separately; do not blend v3 and v4 claims.</li>
+    <li><a href="https://deepwiki.com/isar/isar">DeepWiki Isar index</a> — useful secondary navigation,
+    not a substitute for repository source when making exact architecture claims.</li>
+    <li><a href="http://www.lmdb.tech/doc/">LMDB documentation</a> and
+    <a href="https://libmdbx.dqdkfa.ru/">libmdbx documentation</a> — references for embedded
+    B-tree/MVCC designs. Later lessons must cite the exact version and source file they discuss.</li>
+    <li><a href="https://www.mongodb.com/docs/manual/data-modeling/">MongoDB data modeling</a> and
+    <a href="https://www.mongodb.com/docs/manual/crud/">CRUD operations</a>.</li>
+  </ul>
 
   <h2>Conceptual backbone</h2>
   <ul>
-    <li><strong>Database Internals</strong> — Alex Petrov (O'Reilly, 2019). The spine of the
-    storage half. Cited by chapter; <em>no prose reproduced</em>. ISBN 978-1492040347.</li>
-    <li><strong>CMU 15-445/645 — Intro to Database Systems</strong> — Andy Pavlo. Free lectures
-    on YouTube + course site <code>15445.courses.cs.cmu.edu</code> <span class="verify-tag">⚠️VERIFY</span>.
-    Cited by lecture title; any timestamps carry <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li><strong>Designing Data-Intensive Applications</strong> — Martin Kleppmann (O'Reilly,
-    2017). Chapter 3 ("Storage and Retrieval") for B-tree vs LSM. ISBN 978-1449373320.</li>
+    <li><strong>Database Internals</strong> — Alex Petrov, O'Reilly, 2019, ISBN 978-1492040347.
+    Storage structures and engine architecture; no prose reproduced.</li>
+    <li><strong>Designing Data-Intensive Applications</strong> — Martin Kleppmann, O'Reilly, 2017,
+    ISBN 978-1449373320. Storage and retrieval trade-offs; no prose reproduced.</li>
+    <li><a href="https://15445.courses.cs.cmu.edu/">CMU 15-445/645 Intro to Database Systems</a> —
+    current course site and lecture materials. Cite a specific offering/lecture if a later lesson
+    depends on ordering or timestamps.</li>
+    <li><a href="https://cstack.github.io/db_tutorial/">Let's Build a Simple Database</a> — a C-based,
+    pedagogical database implementation used only as a hands-on comparison.</li>
   </ul>
 
-  <h2>SQLite — docs &amp; source (public domain)</h2>
-  <p>SQLite's source is in the <strong>public domain</strong>, so illustrative snippets may be
-  shown freely. These are the storage-track teacher.</p>
-  <ul>
-    <li>✅ Architecture overview — <a href="https://www.sqlite.org/arch.html">sqlite.org/arch.html</a>.
-    Names the modules: Interface, Tokenizer, Parser, Code Generator, Bytecode Engine (VM),
-    B-Tree, Pager (Page Cache), OS Interface (VFS), Utilities, Test Code.</li>
-    <li>✅ File format — <a href="https://www.sqlite.org/fileformat2.html">fileformat2.html</a>.
-    Confirmed: header is the first <strong>100 bytes</strong> (§1.3); magic string
-    <code>"SQLite format 3\0"</code> (16 bytes) at offset 0; page size a power of two
-    <strong>512–65536</strong>; B-tree pages in §1.6.</li>
-    <li>✅ Write-ahead logging — <a href="https://www.sqlite.org/wal.html">wal.html</a>.
-    Confirmed: append changes to a <code>-wal</code> file, commit = special frame; default
-    auto-checkpoint near <strong>1000 pages</strong>; PASSIVE/FULL/RESTART checkpoints.</li>
-    <li>Atomic commit — <a href="https://www.sqlite.org/atomiccommit.html">atomiccommit.html</a>
-    <span class="verify-tag">⚠️VERIFY</span> (rollback-journal scheme; the original durability design).</li>
-    <li>Locking &amp; concurrency — <a href="https://www.sqlite.org/lockingv3.html">lockingv3.html</a>
-    <span class="verify-tag">⚠️VERIFY</span> (lock states: UNLOCKED, SHARED, RESERVED, PENDING, EXCLUSIVE).</li>
-    <li>C-interface reference — <a href="https://www.sqlite.org/c3ref/intro.html">c3ref/intro.html</a>
-    <span class="verify-tag">⚠️VERIFY</span> and the header
-    <a href="https://www.sqlite.org/cintro.html">cintro.html</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li>WAL file format details — <a href="https://www.sqlite.org/walformat.html">walformat.html</a>
-    <span class="verify-tag">⚠️VERIFY</span> (frame headers, the 32-byte WAL header — confirm exact sizes here).</li>
-    <li><strong>Source files</strong> to dive into (the lower / storage track): <code>pager.c</code>,
-    <code>wal.c</code>, <code>btree.c</code> + <code>btreeInt.h</code>, <code>os_unix.c</code>,
-    <code>build.c</code>, <code>main.c</code>, and the amalgamation <code>sqlite3.c</code> /
-    public header <code>sqlite3.h</code>. Browse at
-    <a href="https://www.sqlite.org/src/">sqlite.org/src</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
-  </ul>
-
-  <h2>Isar — Rust embedded NoSQL DB (Apache-2.0)</h2>
-  <p>The upper / document-track reference: schema, collections, indexes, query engine, and the
-  Rust↔Dart FFI boundary. <strong>Apache-2.0</strong>: short, attributed snippets only.</p>
-  <ul>
-    <li>Repo — <a href="https://github.com/isar/isar">github.com/isar/isar</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li>Architecture wiki — <a href="https://deepwiki.com/isar/isar">deepwiki.com/isar/isar</a>
-    <span class="verify-tag">⚠️VERIFY</span> (Core Architecture / Cross-Platform / Development sections).</li>
-    <li><span class="verify-tag">⚠️VERIFY</span> Isar v3's core sat on <strong>LMDB/libmdbx</strong>
-    (an embedded B-tree KV store) rather than a from-scratch engine; <strong>v4 reworked the
-    core</strong> — confirm the current state and whether the active community fork differs.</li>
-  </ul>
-
-  <h2>LMDB / libmdbx — embedded KV engine &amp; MVCC copy-on-write</h2>
-  <ul>
-    <li>LMDB — <a href="http://www.lmdb.tech/doc/">lmdb.tech/doc</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li>libmdbx — <a href="https://libmdbx.dqdkfa.ru/">libmdbx.dqdkfa.ru</a> <span class="verify-tag">⚠️VERIFY</span>
-    (the copy-on-write B-tree + MVCC design Isar sat on).</li>
-  </ul>
-
-  <h2>FFI / C-ABI track</h2>
-  <ul>
-    <li>The Rustonomicon — FFI chapter —
-    <a href="https://doc.rust-lang.org/nomicon/ffi.html">doc.rust-lang.org/nomicon/ffi.html</a>
-    <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li>cbindgen — <a href="https://github.com/mozilla/cbindgen">github.com/mozilla/cbindgen</a>
-    and its book <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">docs.md</a>
-    <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li>dart:ffi — <a href="https://dart.dev/interop/c-interop">dart.dev/interop/c-interop</a>
-    and API <a href="https://api.dart.dev/dart-ffi/dart-ffi-library.html">api.dart.dev/dart-ffi</a>
-    <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li>flutter_rust_bridge — <a href="https://cjycode.com/flutter_rust_bridge/">cjycode.com/flutter_rust_bridge</a>
-    <span class="verify-tag">⚠️VERIFY</span>.</li>
-  </ul>
-
-  <h2>Document-model track</h2>
-  <ul>
-    <li>MongoDB data model — <a href="https://www.mongodb.com/docs/manual/core/data-modeling-introduction/">mongodb.com/docs/manual/core/data-modeling-introduction</a>
-    <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li>MongoDB CRUD — <a href="https://www.mongodb.com/docs/manual/crud/">mongodb.com/docs/manual/crud</a>
-    <span class="verify-tag">⚠️VERIFY</span>.</li>
-    <li>BSON spec — <a href="https://bsonspec.org/">bsonspec.org</a> · MessagePack spec —
-    <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">msgpack spec</a>
-    <span class="verify-tag">⚠️VERIFY</span>.</li>
-  </ul>
-
-  <h2>Rust learning</h2>
-  <ul>
-    <li>✅ <strong>The Rust Programming Language</strong> ("the Book") —
-    <a href="https://doc.rust-lang.org/book/">doc.rust-lang.org/book</a>. Linked just-in-time
-    throughout Phase 0.</li>
-    <li>Rustlings — <a href="https://github.com/rust-lang/rustlings">github.com/rust-lang/rustlings</a>
-    <span class="verify-tag">⚠️VERIFY</span> (small exercises).</li>
-    <li>✅ cstack, <strong>Let's Build a Simple Database</strong> —
-    <a href="https://cstack.github.io/db_tutorial/">cstack.github.io/db_tutorial</a>. Confirmed:
-    written in <strong>C</strong>, ~15 parts (REPL → pager/persistence → cursor → B-tree leaf
-    /split/internal nodes). Hands-on companion; <em>incomplete</em> — we adapt its ideas to Rust.</li>
-  </ul>
-
-  <p class="muted small">If a link 404s or its content has moved, note it on the
-  <a href="verification.html">Verification</a> page so the bibliography stays trustworthy.</p>
+  <p class="muted small">If an upstream page moves or a fast-moving project changes behavior, add an
+  exact outstanding item to <a href="verification.html">Verification</a>; do not leave a vague
+  “verify everything” marker in a lesson.</p>
 </main>
 <script src="assets/app.js"></script>
 </body>

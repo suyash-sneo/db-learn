@@ -3,151 +3,154 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>1.8 Generating the header with cbindgen</title>
+<title>1.8 Generating a C header with cbindgen</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p1:1.8", root: "../../" };</script>
 </head>
 <body>
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.8</div>
-  <h1>1.8 — Generating the C header with <code>cbindgen</code></h1>
-  <div class="goal"><b>Goal:</b> Auto-generate a C header (<code>.h</code>) from your Rust
-  <code>extern "C"</code> declarations, so C/Dart callers have an accurate, always-in-sync description
-  of your ABI — without you hand-writing and hand-maintaining it.</div>
+  <h1>1.8 — Generate the C header with <code>cbindgen</code></h1>
+  <div class="goal"><b>Goal:</b> Generate a C declaration of the Rust ABI, understand what cbindgen
+  can and cannot infer, and keep the checked-in header synchronized with the Rust source.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>A C library is two things: a compiled binary <em>and</em> a header file declaring its functions and
-  types. Dart's FFI tooling reads that header to know what to bind. Writing the header by hand is
-  tedious and drifts out of sync with the Rust source the instant you change a signature.
-  <strong>cbindgen</strong> reads your Rust and emits the matching header automatically — your Rust stays
-  the single source of truth.</p>
+  <p>The compiled library contains symbols and machine code, but consumers also need declarations:
+  function names, parameter types, constants, and public C-layout types. Hand-written declarations
+  can silently drift from Rust. <code>cbindgen</code> derives the header from the public Rust API.
+  <span class="src">[src: <a href="https://github.com/mozilla/cbindgen">cbindgen repository</a>]</span></p>
 
-  <h2>What cbindgen does</h2>
-  <p>cbindgen scans your crate for <code>#[no_mangle] extern "C"</code> functions, <code>#[repr(C)]</code>
-  types, and constants, and produces a C (or C++) header declaring them. Opaque types (your boxed
-  handles) become forward-declared incomplete structs; your error-code constants become
-  <code>#define</code>s or an enum.</p>
+  <h2>cbindgen and ffigen do opposite jobs</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Tool</th><th>Input</th><th>Output</th></tr></thead>
+    <tbody>
+      <tr><td><code>cbindgen</code></td><td>Rust declarations</td><td>C/C++ header</td></tr>
+      <tr><td><code>package:ffigen</code></td><td>C header</td><td>Dart FFI bindings</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><code>dart:ffi</code> is the runtime API used by those Dart bindings; it does not itself parse a
+  header. Dart's official C interop guide identifies <code>package:ffigen</code> as the header-to-Dart
+  generator.
+  <span class="src">[src: <a href="https://dart.dev/interop/c-interop">Dart C interop</a>]</span></p>
 
-  <figure>
-  <svg viewBox="0 0 560 170" role="img" aria-label="cbindgen reads Rust extern C declarations and emits a C header">
-    <rect class="dg-bg" x="0" y="0" width="560" height="170" rx="10"/>
-    <rect class="dg-box-a" x="24" y="50" width="150" height="64" rx="10"/>
-    <text class="dg-txt-s" x="99" y="78" text-anchor="middle">src/lib.rs</text>
-    <text class="dg-txt-s" x="99" y="96" text-anchor="middle">#[no_mangle] extern "C"</text>
-    <path class="dg-arrow" d="M176,82 L246,82" marker-end="url(#a18)"/>
-    <rect class="dg-box" x="250" y="50" width="120" height="64" rx="10"/>
-    <text class="dg-txt-s" x="310" y="78" text-anchor="middle">cbindgen</text>
-    <text class="dg-txt-s" x="310" y="96" text-anchor="middle">(reads Rust)</text>
-    <path class="dg-arrow" d="M372,82 L442,82" marker-end="url(#a18)"/>
-    <rect class="dg-box" x="446" y="50" width="94" height="64" rx="10"/>
-    <text class="dg-txt-s" x="493" y="78" text-anchor="middle">mydb.h</text>
-    <text class="dg-txt-s" x="493" y="96" text-anchor="middle">(C header)</text>
-    <text class="dg-txt-s" x="24" y="150">Rust is the source of truth; the header is generated, never hand-edited.</text>
-    <defs><marker id="a18" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
-  </svg>
-  <figcaption>One command turns your Rust ABI declarations into a C header.</figcaption>
-  </figure>
-
-  <h2>Two ways to run it</h2>
-  <h3>1. As a CLI (simplest for the spike)</h3>
+  <h2>Generate a C header</h2>
   <span class="code-label">terminal</span>
-<pre><code>cargo install cbindgen           <span class="tok-c"># once ⚠️VERIFY current install method</span>
-cbindgen --crate mydb --output mydb.h
-<span class="tok-c"># optionally with a config file:</span>
-cbindgen --config cbindgen.toml --crate mydb --output mydb.h</code></pre>
+<pre><code>cargo install cbindgen
 
-  <h3>2. As a build script (auto-regenerate on every build)</h3>
-  <p>A <code>build.rs</code> file runs before compilation; you can have it invoke cbindgen so the header
-  is always fresh. This needs cbindgen as a <em>build dependency</em>:</p>
-  <span class="code-label">Cargo.toml</span>
-<pre><code>[build-dependencies]
-cbindgen = <span class="tok-s">"0.27"</span>   <span class="tok-c"># ⚠️VERIFY current version</span></code></pre>
-  <p>The <code>build.rs</code> calls cbindgen's API to generate <code>mydb.h</code> into your output
-  directory. <span class="verify-tag">⚠️VERIFY</span> the exact <code>build.rs</code> API against the
-  cbindgen docs — it changes between versions.</p>
+<span class="tok-c"># --lang c matters: the CLI's default output language is C++.</span>
+cbindgen --crate mydb --lang c --output include/mydb.h
 
-  <h2>Configuration (<code>cbindgen.toml</code>)</h2>
-  <p>A small config controls language, naming, includes, and an autogenerated-warning banner:</p>
+<span class="tok-c"># With a project config:</span>
+cbindgen --config cbindgen.toml --crate mydb --output include/mydb.h</code></pre>
+  <p>The current cbindgen CLI documents C++ as its default language, so either pass
+  <code>--lang c</code> or commit a config containing <code>language = "C"</code>.
+  <span class="src">[src: <a href="https://raw.githubusercontent.com/mozilla/cbindgen/main/docs.md">cbindgen CLI/config docs</a>]</span></p>
+
   <span class="code-label">cbindgen.toml</span>
 <pre><code>language = <span class="tok-s">"C"</span>
 include_guard = <span class="tok-s">"MYDB_H"</span>
 autogen_warning = <span class="tok-s">"/* Generated by cbindgen. Do not edit. */"</span>
-<span class="tok-c"># style, prefixes, etc. ⚠️VERIFY exact keys against cbindgen docs</span></code></pre>
+documentation = <span class="tok-k">true</span></code></pre>
 
-  <h2>What the generated header looks like</h2>
-  <p>For the opaque-handle + buffer + error-code API you've designed, cbindgen produces roughly:</p>
-  <span class="code-label">mydb.h (generated — illustrative ⚠️VERIFY exact output)</span>
-<pre><code><span class="tok-c">/* Generated by cbindgen. Do not edit. */</span>
-<span class="tok-m">#ifndef MYDB_H</span>
+  <h2>What it sees</h2>
+  <p>cbindgen follows the crate's public API and emits C declarations for compatible exported
+  functions, constants, and types. Types with a guaranteed representation can be defined in the
+  header; types without an exposed layout can appear as forward declarations and serve as opaque
+  handles. Internal Rust implementation details remain absent.
+  <span class="src">[src: <a href="https://raw.githubusercontent.com/mozilla/cbindgen/main/docs.md">cbindgen documentation</a>]</span></p>
+
+  <span class="code-label">Rust input</span>
+<pre><code><span class="tok-k">pub struct</span> <span class="tok-f">Db</span> { <span class="tok-c">/* private engine fields */</span> }
+
+<span class="tok-k">pub const</span> <span class="tok-f">MYDB_OK</span>: <span class="tok-f">i32</span> = 0;
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">mydb_open</span>() -&gt; *<span class="tok-k">mut</span> <span class="tok-f">Db</span> {
+    <span class="tok-m">todo!</span>()
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">mydb_close</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) {
+    <span class="tok-m">todo!</span>()
+}</code></pre>
+
+  <span class="code-label">Representative C output — inspect your generated file for exact formatting</span>
+<pre><code><span class="tok-m">#ifndef MYDB_H</span>
 <span class="tok-m">#define MYDB_H</span>
 <span class="tok-m">#include</span> <span class="tok-s">&lt;stdint.h&gt;</span>
-<span class="tok-m">#include</span> <span class="tok-s">&lt;stddef.h&gt;</span>
 
-<span class="tok-k">typedef struct</span> Db Db;            <span class="tok-c">// opaque — no fields exposed</span>
+<span class="tok-k">typedef struct</span> Db Db;
 
-<span class="tok-m">#define</span> OK 0
-<span class="tok-m">#define</span> ERR_NULL 1
-<span class="tok-m">#define</span> ERR_NOT_FOUND 2
+<span class="tok-k">extern const</span> int32_t MYDB_OK;
 
-Db *db_open(<span class="tok-k">void</span>);
-<span class="tok-k">void</span> db_close(Db *db);
-int32_t db_insert(Db *db, <span class="tok-k">const</span> uint8_t *ptr, size_t len);
+Db *mydb_open(<span class="tok-k">void</span>);
+<span class="tok-k">void</span> mydb_close(Db *db);
 
-<span class="tok-m">#endif</span>  <span class="tok-c">/* MYDB_H */</span></code></pre>
-  <p>Note how the design pays off: the handle is opaque (<code>typedef struct Db Db;</code> with no
-  definition), buffers are <code>const uint8_t *</code> + <code>size_t</code>, and results are
-  <code>int32_t</code> codes — exactly the surface you built across Lessons 1.2–1.7. cbindgen just
-  transcribes it.</p>
+<span class="tok-m">#endif</span></code></pre>
+  <p>Do not teach an illustrative rendering as byte-for-byte promised output. cbindgen formatting and
+  whether a constant becomes a declaration, definition, enum, or macro depend on configuration and
+  item shape. The generated header is the authority for the build that produced it.</p>
+
+  <h2>Keep the generated file honest</h2>
+  <ol>
+    <li>Commit <code>cbindgen.toml</code> and pin the cbindgen version used by development/CI.</li>
+    <li>Generate <code>include/mydb.h</code> from the crate.</li>
+    <li>Run generation in CI and fail if <code>git diff --exit-code -- include/mydb.h</code> is nonempty.</li>
+    <li>Compile a tiny C smoke test against the header and library; generation alone does not prove
+    that the final linker surface is correct.</li>
+  </ol>
+  <p>A <code>build.rs</code> can invoke cbindgen automatically, but generating source-tree files during
+  every Cargo build can surprise package consumers. For this curriculum, an explicit generation
+  command plus a CI drift check is easier to reason about. If you choose the library API, pin its
+  version and copy the exact call pattern from that version's documentation.</p>
+
+  <div class="box warn">
+    <div class="box-title">Header generation does not make a type safe</div>
+    <p>cbindgen transcribes declarations. It cannot prove pointer validity, ownership, thread safety,
+    panic containment, or that Dart selected the correct dynamic library. Those contracts belong in
+    Rust safety comments, C header documentation, tests, and the Dart wrapper.</p>
+  </div>
 
   <div class="box rust">
     <div class="box-title">🦀 Rust just-in-time</div>
     <ul>
-      <li><code>build.rs</code> is a special file Cargo compiles and runs <em>before</em> building your
-      crate — used for codegen, linking flags, finding native libs.</li>
-      <li>cbindgen only sees what's reachable and C-compatible: <code>#[no_mangle] extern "C"</code>
-      functions, <code>#[repr(C)]</code> types, exported consts. Internal Rust types are correctly
-      ignored.</li>
-      <li>Doc comments (<code>///</code>) on your exported items can be carried into the header as C
-      comments — good for the people consuming your API. <span class="verify-tag">⚠️VERIFY</span>.</li>
-      <li>Read more: cbindgen docs/book — <a href="https://github.com/mozilla/cbindgen">github.com/mozilla/cbindgen</a>
-      <span class="verify-tag">⚠️VERIFY</span> URL and the <code>docs.md</code>/book for config keys and the build.rs API.</li>
+      <li><code>pub</code> controls Rust visibility; <code>extern "C"</code> controls calling convention;
+      <code>#[unsafe(no_mangle)]</code> controls the exported symbol name.</li>
+      <li><code>#[repr(C)]</code> is needed for concrete structs shared by layout. Opaque handle fields
+      remain private and are not shared by layout.</li>
+      <li>Put a version prefix on symbols and header guards early, for example
+      <code>MYDB_H</code> and <code>mydb_open</code>.</li>
     </ul>
   </div>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
-      <p class="q">1. What problem does cbindgen solve that hand-writing a header doesn't?</p>
-      <details><summary>Show answer</summary><div class="answer">It keeps the header automatically in sync
-      with the Rust source (the single source of truth), eliminating drift and transcription errors when
-      signatures change.</div></details>
-
-      <p class="q">2. How does your opaque <code>Db</code> handle appear in the generated header?</p>
-      <details><summary>Show answer</summary><div class="answer">As a forward-declared incomplete type
-      (<code>typedef struct Db Db;</code> with no fields) — callers can hold a <code>Db *</code> but can't
-      inspect or construct it.</div></details>
-
-      <p class="q">3. Which Rust items does cbindgen include in the header, and which does it ignore?</p>
-      <details><summary>Show answer</summary><div class="answer">It includes <code>#[no_mangle] extern "C"</code>
-      functions, <code>#[repr(C)]</code> types, and exported constants; it ignores ordinary internal Rust
-      types and functions.</div></details>
-
-      <p class="q">4. What's the advantage of generating the header from a <code>build.rs</code> vs running
-      the CLI by hand?</p>
-      <details><summary>Show answer</summary><div class="answer">The header regenerates automatically on
-      every build, so it can never go stale relative to the code.</div></details>
+      <p class="q">1. Why pass <code>--lang c</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">cbindgen's CLI defaults to C++ output;
+      this project promises a C ABI and needs a C header.</div></details>
+      <p class="q">2. Which tool converts the generated C header into Dart declarations?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>package:ffigen</code>.
+      <code>dart:ffi</code> is the runtime interop library.</div></details>
+      <p class="q">3. Why still compile a C smoke test?</p>
+      <details><summary>Show answer</summary><div class="answer">A plausible header does not prove the
+      library exports matching symbols and link-compatible signatures.</div></details>
+      <p class="q">4. What should CI do after regenerating the header?</p>
+      <details><summary>Show answer</summary><div class="answer">Fail if regeneration changes the
+      committed header, which detects source/header drift.</div></details>
     </div>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Doc:</strong> cbindgen repo + book (config reference, <code>build.rs</code> usage). The
-      Cargo Book on build scripts. <span class="verify-tag">⚠️VERIFY</span> URLs/versions.</li>
-      <li><strong>Compare:</strong> SQLite's hand-maintained <code>sqlite3.h</code> (Phase 8) — see how a
-      world-class header reads, then let cbindgen approximate it for you.</li>
-      <li><strong>Forward link:</strong> 1.9 uses the generated header conceptually; Phase 8.5 produces the
-      polished header + Dart binding for the real engine.</li>
+      <li><strong>Primary docs:</strong> <a href="https://github.com/mozilla/cbindgen">cbindgen</a>,
+      its <a href="https://raw.githubusercontent.com/mozilla/cbindgen/main/docs.md">CLI/config reference</a>,
+      and <a href="https://doc.rust-lang.org/cargo/reference/build-scripts.html">Cargo build scripts</a>.</li>
+      <li><strong>Next:</strong> Lesson 1.9 consumes the same declarations manually; production can
+      generate them with <code>ffigen</code>.</li>
     </ul>
   </div>
 
