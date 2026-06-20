@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>1.1 What a C ABI is; ABI vs API</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1:1.1", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.1</div>
+  <h1>1.1 — What a C ABI is; ABI vs API; why Rust can expose one</h1>
+  <div class="goal"><b>Goal:</b> Understand precisely what "exposing a C ABI" means, why the C ABI is
+  the universal language-interop layer, and why Rust is unusually well-suited to producing one.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Your engine's whole reason to exist is to be callable from <em>any</em> language — Dart today,
+  Swift/Kotlin/Python tomorrow. None of those can call Rust directly. But all of them can call C. So
+  the plan is: write the engine in Rust, then wrap it in a thin layer that <em>looks like C</em> from
+  the outside. To design that layer well, you first need to know what "looks like C" actually means at
+  the binary level.</p>
+
+  <h2>API vs ABI — the core distinction</h2>
+  <p>These sound alike and are constantly confused. Pin them down:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>API</th><th>ABI</th></tr></thead>
+    <tbody>
+      <tr><td>Stands for</td><td>Application <em>Programming</em> Interface</td><td>Application <em>Binary</em> Interface</td></tr>
+      <tr><td>Level</td><td>Source code</td><td>Compiled machine code</td></tr>
+      <tr><td>Answers</td><td>"What functions/types do I call, and with what arguments?"</td><td>"Once compiled, how are those calls physically made?"</td></tr>
+      <tr><td>Examples</td><td>function names, signatures, docs</td><td>argument passing (registers/stack), name mangling, struct layout/padding, calling convention</td></tr>
+      <tr><td>Audience</td><td>the programmer</td><td>the linker &amp; CPU</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Analogy: the <strong>API</strong> is the menu (what you can order, by name). The <strong>ABI</strong>
+  is the kitchen's physical protocol — which window the order ticket goes through, how plates are
+  stacked, who hands what to whom. Two restaurants can offer the same menu (API) while running totally
+  different kitchens (ABI). For code in different languages to call each other, they must agree on the
+  ABI, not just the API.</p>
+
+  <h2>What's actually in an ABI</h2>
+  <p>When language A calls a function compiled from language B, both sides must agree on the mechanics:</p>
+  <ul>
+    <li><strong>Calling convention</strong> — which CPU registers and stack slots hold the arguments
+    and the return value; who cleans up the stack.</li>
+    <li><strong>Name mangling</strong> — the actual symbol name in the compiled binary. C++ and Rust
+    <em>mangle</em> names (encoding types into the symbol, so <code>foo(int)</code> and
+    <code>foo(float)</code> differ). C does <em>not</em> — a C <code>foo</code> is just the symbol
+    <code>foo</code>. Predictable names are what let another language find the function.</li>
+    <li><strong>Data layout</strong> — the exact byte arrangement of a struct: field order, alignment,
+    padding. If two sides disagree on layout, they read garbage.</li>
+    <li><strong>Type sizes</strong> — how big an <code>int</code>, a pointer, etc. are.</li>
+  </ul>
+
+  <h2>Why "C" specifically is the lingua franca</h2>
+  <p>There's no universal ABI across languages — but the <strong>C ABI</strong> of a given platform
+  (e.g. the System V AMD64 ABI on Linux/macOS x86-64 <span class="verify-tag">⚠️VERIFY</span> name) is
+  the closest thing. It's simple, stable, well-documented, and <em>every</em> serious language ships a
+  way to call into it (Dart's <code>dart:ffi</code>, Python's <code>ctypes</code>/CFFI, Java's JNI/Panama,
+  Swift's C interop, Go's cgo). So "expose a C ABI" = "present your library as if it were a plain C
+  library," and instantly the whole ecosystem can call it.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 230" role="img" aria-label="Many languages all call into one C ABI surface">
+    <rect class="dg-bg" x="0" y="0" width="560" height="230" rx="10"/>
+    <rect class="dg-box" x="40" y="24" width="110" height="40" rx="8"/><text class="dg-txt-s" x="95" y="49" text-anchor="middle">Dart / Flutter</text>
+    <rect class="dg-box" x="170" y="24" width="90" height="40" rx="8"/><text class="dg-txt-s" x="215" y="49" text-anchor="middle">Swift</text>
+    <rect class="dg-box" x="280" y="24" width="90" height="40" rx="8"/><text class="dg-txt-s" x="325" y="49" text-anchor="middle">Python</text>
+    <rect class="dg-box" x="390" y="24" width="130" height="40" rx="8"/><text class="dg-txt-s" x="455" y="49" text-anchor="middle">Kotlin / Go / …</text>
+    <path class="dg-arrow" d="M95,66 L280,96" marker-end="url(#a11)"/>
+    <path class="dg-arrow" d="M215,66 L290,96" marker-end="url(#a11)"/>
+    <path class="dg-arrow" d="M325,66 L300,96" marker-end="url(#a11)"/>
+    <path class="dg-arrow" d="M455,66 L310,96" marker-end="url(#a11)"/>
+    <rect class="dg-box-a" x="160" y="100" width="240" height="44" rx="8"/>
+    <text class="dg-txt" x="280" y="127" text-anchor="middle" font-weight="700">C ABI surface (the contract)</text>
+    <path class="dg-arrow" d="M280,144 L280,176" marker-end="url(#a11)"/>
+    <rect class="dg-box" x="160" y="180" width="240" height="40" rx="8"/>
+    <text class="dg-txt" x="280" y="205" text-anchor="middle">Your Rust engine</text>
+    <defs><marker id="a11" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>One C ABI surface; every language already knows how to call it. That's the leverage.</figcaption>
+  </figure>
+
+  <h2>Why Rust can expose a C ABI cleanly</h2>
+  <p>Rust normally mangles names and lays out structs however the compiler likes (it doesn't promise a
+  stable Rust ABI). But it gives you opt-in switches to produce <em>C-compatible</em> output for
+  specific items:</p>
+  <ul>
+    <li><code>extern "C"</code> on a function → use the C calling convention.</li>
+    <li><code>#[no_mangle]</code> → keep the symbol name exactly as written.</li>
+    <li><code>#[repr(C)]</code> on a struct/enum → lay it out the way C would.</li>
+  </ul>
+  <p>You'll meet all three in detail next lesson. The point here: Rust deliberately separates "fast,
+  flexible internal code" from "stable C-shaped boundary code," and you choose which is which. Your
+  engine core is the former; your shim is the latter.</p>
+
+  <div class="box deeper">
+    <div class="box-title">The three-layer plan, restated in ABI terms</div>
+    <p><strong>Layer 1 (Rust core):</strong> idiomatic Rust, mangled names, native layout — no ABI
+    promises, maximum freedom. <strong>Layer 2 (C ABI shim):</strong> a thin set of
+    <code>extern "C"</code> functions over opaque handles — the only thing the outside world sees.
+    <strong>Layer 3 (bindings):</strong> Dart code that calls Layer 2 through <code>dart:ffi</code>.
+    Keeping Layer 2 tiny is the whole strategy; the rest of Phase 1 is how to build it safely.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. In one line each: API vs ABI?</p>
+      <details><summary>Show answer</summary><div class="answer">API = the source-level contract (names,
+      signatures). ABI = the binary-level contract (calling convention, name mangling, data layout) that
+      governs how compiled code actually calls compiled code.</div></details>
+
+      <p class="q">2. Why does targeting <em>C</em> specifically let Dart, Python, Swift, and Kotlin all
+      use your Rust engine?</p>
+      <details><summary>Show answer</summary><div class="answer">Because there's no universal cross-language
+      ABI, but the platform's C ABI is the de-facto standard every language can call into. Presenting your
+      library as "C-shaped" makes it callable from all of them.</div></details>
+
+      <p class="q">3. What problem does name mangling cause for FFI, and how does C avoid it?</p>
+      <details><summary>Show answer</summary><div class="answer">Mangling encodes type info into symbol
+      names (so they're unpredictable to other languages). C doesn't mangle — a function <code>foo</code>
+      is literally the symbol <code>foo</code> — so callers can find it by name.</div></details>
+
+      <p class="q">4. Does Rust have a stable ABI of its own? What does that imply for your design?</p>
+      <details><summary>Show answer</summary><div class="answer">No — Rust's own ABI is unstable by design.
+      So cross-language interop must go through a C ABI boundary, which is exactly why Layer 2 (the shim)
+      exists and stays thin.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Doc:</strong> The Rustonomicon — FFI chapter,
+      <a href="https://doc.rust-lang.org/nomicon/ffi.html">doc.rust-lang.org/nomicon/ffi.html</a>
+      <span class="verify-tag">⚠️VERIFY</span> (the authoritative Rust FFI reference).</li>
+      <li><strong>Doc:</strong> SQLite C-interface intro — <a href="https://www.sqlite.org/cintro.html">sqlite.org/cintro.html</a>
+      <span class="verify-tag">⚠️VERIFY</span> — the gold-standard example of a clean, stable C API you'll study in Phase 8.</li>
+      <li><strong>Reference:</strong> the platform C ABI spec (System V AMD64 ABI) if you want the gory
+      register-level detail. <span class="verify-tag">⚠️VERIFY</span> exact name/version.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

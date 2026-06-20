@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>0.3 Ownership, borrowing, moves</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:0.3", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › 0.3</div>
+  <h1>0.3 — Ownership, borrowing, moves &amp; references</h1>
+  <div class="goal"><b>Goal:</b> Understand the single idea that makes Rust different from every
+  language you know — ownership — well enough that the borrow checker becomes a helper, not an enemy.
+  This is the lesson to actually slow down on.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>A storage engine constantly passes around big buffers of bytes (pages) and shares them between
+  the cache, the B+tree, and the writer. In C that sharing is where use-after-free and double-free
+  bugs live. Rust's ownership rules <em>prevent those at compile time</em> — but only once you think
+  in ownership. Every "cannot borrow ... as mutable" error you'll hit while building the pager comes
+  back to this page.</p>
+
+  <h2>The problem ownership solves</h2>
+  <p>Every value in memory must eventually be freed — exactly once. Free too early → use-after-free.
+  Free twice → double-free. Never free → leak. Other languages solve this with a garbage collector
+  (runtime cost, unpredictable pauses) or by trusting the programmer (C — and the bugs that follow).</p>
+  <p>Rust solves it at <em>compile time</em> with three rules:</p>
+  <div class="box rust">
+    <div class="box-title">🦀 The ownership rules</div>
+    <ol>
+      <li>Each value has exactly <strong>one owner</strong> (a variable).</li>
+      <li>When the owner goes out of scope, the value is <strong>dropped</strong> (freed) — automatically.</li>
+      <li>There can be only one owner at a time. Assigning or passing a value <strong>moves</strong>
+      ownership.</li>
+    </ol>
+  </div>
+
+  <h2>Move: the surprising default</h2>
+  <p>For types that own heap memory (like <code>String</code> or <code>Vec</code>), assignment
+  <em>moves</em> ownership — the original variable becomes unusable:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">let</span> a = <span class="tok-f">String</span>::from(<span class="tok-s">"page data"</span>);
+<span class="tok-k">let</span> b = a;            <span class="tok-c">// ownership MOVES from a to b</span>
+<span class="tok-c">// println!("{}", a);  // ❌ compile error: value borrowed after move</span>
+<span class="tok-m">println!</span>(<span class="tok-s">"{}"</span>, b);     <span class="tok-c">// ✅ b owns it now</span></code></pre>
+  <p>This isn't Rust being difficult — it's the rule "one owner" being enforced. If both <code>a</code>
+  and <code>b</code> were usable, both would try to free the same memory at scope end (double-free).
+  By making the move explicit-ish, Rust guarantees exactly one free.</p>
+
+  <p>The same thing happens when you pass a value to a function — the function takes ownership:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">fn</span> <span class="tok-f">consume</span>(s: <span class="tok-f">String</span>) {           <span class="tok-c">// s is owned here</span>
+    <span class="tok-m">println!</span>(<span class="tok-s">"got {}"</span>, s);
+}                                  <span class="tok-c">// s dropped (freed) here</span>
+
+<span class="tok-k">let</span> doc = <span class="tok-f">String</span>::from(<span class="tok-s">"hi"</span>);
+<span class="tok-f">consume</span>(doc);                       <span class="tok-c">// doc moved IN</span>
+<span class="tok-c">// doc is gone now — you gave it away</span></code></pre>
+
+  <h3>Copy types are the exception</h3>
+  <p>Small, stack-only types (integers, floats, <code>bool</code>, <code>char</code>) implement the
+  <code>Copy</code> trait — they're <em>copied</em>, not moved, because copying a few bytes is trivial
+  and there's no heap allocation to double-free:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">let</span> x = 5;
+<span class="tok-k">let</span> y = x;          <span class="tok-c">// x is COPIED, not moved</span>
+<span class="tok-m">println!</span>(<span class="tok-s">"{} {}"</span>, x, y);  <span class="tok-c">// ✅ both fine</span></code></pre>
+
+  <h2>Borrowing: using without owning</h2>
+  <p>Moving ownership every time you want to use a value would be miserable. So Rust lets you
+  <strong>borrow</strong> — take a <em>reference</em> (<code>&amp;</code>) without taking ownership.
+  The owner keeps the value; the borrow is temporary access.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">fn</span> <span class="tok-f">len_of</span>(s: &amp;<span class="tok-f">String</span>) -&gt; <span class="tok-f">usize</span> {   <span class="tok-c">// borrows, doesn't own</span>
+    s.<span class="tok-f">len</span>()
+}                                       <span class="tok-c">// borrow ends; nothing freed</span>
+
+<span class="tok-k">let</span> doc = <span class="tok-f">String</span>::from(<span class="tok-s">"hello"</span>);
+<span class="tok-k">let</span> n = <span class="tok-f">len_of</span>(&amp;doc);              <span class="tok-c">// lend a reference</span>
+<span class="tok-m">println!</span>(<span class="tok-s">"{} is {} bytes"</span>, doc, n); <span class="tok-c">// ✅ doc still owned &amp; usable</span></code></pre>
+
+  <h3>Shared vs mutable borrows — the core rule</h3>
+  <p>There are two kinds of references, and one rule governs them:</p>
+  <ul>
+    <li><code>&amp;T</code> — a <strong>shared</strong> (immutable) reference. You can have <em>many</em> at once.</li>
+    <li><code>&amp;mut T</code> — a <strong>mutable</strong> reference. You can have <em>exactly one</em>,
+    and no shared ones at the same time.</li>
+  </ul>
+  <div class="box rust">
+    <div class="box-title">🦀 The borrowing rule (memorize this)</div>
+    <p>At any given time you may have <strong>either</strong> any number of <code>&amp;T</code>
+    (readers) <strong>or</strong> exactly one <code>&amp;mut T</code> (writer) — never both.</p>
+  </div>
+  <p>This is "no shared mutation." It's exactly the discipline that prevents data races, and it's why
+  Rust can be safely concurrent. It also catches single-threaded bugs like mutating a collection
+  while iterating it.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 260" role="img" aria-label="Move transfers ownership; shared borrows allow many readers; mutable borrow allows one writer">
+    <rect class="dg-bg" x="0" y="0" width="560" height="260" rx="10"/>
+    <!-- move -->
+    <text class="dg-txt" x="20" y="34" font-weight="700">move:  let b = a;</text>
+    <rect class="dg-box" x="20" y="44" width="90" height="34" rx="6"/>
+    <text class="dg-txt-m" x="65" y="66" text-anchor="middle">a ✗</text>
+    <path class="dg-arrow" d="M118,61 L196,61" marker-end="url(#a3)"/>
+    <text class="dg-txt-s" x="135" y="52">ownership</text>
+    <rect class="dg-box-a" x="200" y="44" width="90" height="34" rx="6"/>
+    <text class="dg-txt-m" x="245" y="66" text-anchor="middle">b ✓</text>
+    <text class="dg-txt-s" x="320" y="65">a is now invalid</text>
+
+    <!-- shared -->
+    <text class="dg-txt" x="20" y="124" font-weight="700">shared &amp;T:  many readers OK</text>
+    <rect class="dg-box-a" x="20" y="134" width="90" height="34" rx="6"/>
+    <text class="dg-txt-m" x="65" y="156" text-anchor="middle">owner</text>
+    <path class="dg-line" d="M114,151 L180,140" /><rect class="dg-box" x="184" y="126" width="60" height="26" rx="5"/><text class="dg-txt-s" x="214" y="143" text-anchor="middle">&amp;r1</text>
+    <path class="dg-line" d="M114,151 L180,158" /><rect class="dg-box" x="184" y="156" width="60" height="26" rx="5"/><text class="dg-txt-s" x="214" y="173" text-anchor="middle">&amp;r2</text>
+    <path class="dg-line" d="M114,151 L300,151" /><rect class="dg-box" x="304" y="138" width="60" height="26" rx="5"/><text class="dg-txt-s" x="334" y="155" text-anchor="middle">&amp;r3</text>
+    <text class="dg-txt-s" x="380" y="155">read-only, any number</text>
+
+    <!-- mutable -->
+    <text class="dg-txt" x="20" y="216" font-weight="700">mutable &amp;mut T:  exactly one writer</text>
+    <rect class="dg-box-a" x="20" y="226" width="90" height="28" rx="6"/>
+    <text class="dg-txt-m" x="65" y="245" text-anchor="middle">owner</text>
+    <path class="dg-arrow" d="M114,240 L200,240" marker-end="url(#a3)"/>
+    <rect class="dg-fill-2" x="204" y="226" width="80" height="28" rx="6"/>
+    <text class="dg-txt-s" x="244" y="245" text-anchor="middle">&amp;mut w</text>
+    <text class="dg-txt-s" x="300" y="244">no other borrows allowed meanwhile</text>
+    <defs><marker id="a3" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Move = transfer. Shared borrow = many readers. Mutable borrow = one writer, alone.</figcaption>
+  </figure>
+
+  <h2>Lifetimes (a gentle first look)</h2>
+  <p>A reference must never outlive the data it points to — otherwise it'd be a dangling pointer. The
+  compiler tracks how long each reference is valid; that span is a <strong>lifetime</strong>. Most of
+  the time the compiler infers lifetimes and you write nothing. Occasionally (e.g. a struct that holds
+  a reference) you'll annotate one as <code>&amp;'a T</code>. You don't need to master lifetimes now —
+  just know <em>why</em> they exist: to guarantee no reference ever points at freed memory.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-c">// This won't compile: r would point at x's memory after x is dropped.</span>
+<span class="tok-k">let</span> r;
+{
+    <span class="tok-k">let</span> x = 5;
+    r = &amp;x;            <span class="tok-c">// borrow x</span>
+}                      <span class="tok-c">// x dropped here</span>
+<span class="tok-c">// println!("{}", r); // ❌ `x` does not live long enough</span></code></pre>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why does <code>let b = a;</code> make <code>a</code> unusable for a
+      <code>String</code> but not for an <code>i32</code>?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>String</code> owns heap memory,
+      so it moves (to keep one owner / one free). <code>i32</code> is <code>Copy</code> — copying its
+      few stack bytes is harmless, so both variables are valid.</div></details>
+
+      <p class="q">2. Can you have a <code>&amp;mut v</code> and a <code>&amp;v</code> alive at the same time?</p>
+      <details><summary>Show answer</summary><div class="answer">No. The rule is: many shared borrows
+      OR one mutable borrow, never both. A reader could see data change underneath it otherwise.</div></details>
+
+      <p class="q">3. You pass <code>page_buf</code> (a <code>Vec&lt;u8&gt;</code>) to
+      <code>fn write(buf: Vec&lt;u8&gt;)</code> and then try to use <code>page_buf</code> afterward.
+      What happens, and how do you fix it?</p>
+      <details><summary>Show answer</summary><div class="answer">Compile error — you moved
+      <code>page_buf</code> into the function. Fix by borrowing instead: make the parameter
+      <code>buf: &amp;[u8]</code> (or <code>&amp;Vec&lt;u8&gt;</code>) and call <code>write(&amp;page_buf)</code>.</div></details>
+
+      <p class="q">4. In plain words, what is a lifetime?</p>
+      <details><summary>Show answer</summary><div class="answer">The span during which a reference is
+      guaranteed to point at still-valid data. The compiler uses it to reject references that would
+      outlive what they point to.</div></details>
+    </div>
+  </div>
+
+  <div class="box stuck">
+    <div class="box-title">🧭 When the borrow checker yells at you</div>
+    <p>Read the error fully — Rust's are unusually good and often suggest the fix. The three reflexes
+    that resolve most cases: (1) borrow (<code>&amp;</code>) instead of moving; (2) if you need to keep
+    a copy, call <code>.clone()</code> (fine while learning — optimize later); (3) shrink the scope of
+    a <code>&amp;mut</code> so it ends before the next borrow starts.</p>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> Ch.4 "Understanding Ownership" — the canonical treatment of moves,
+      references, borrowing, and slices. Read it in full; it's the highest-leverage chapter for you.</li>
+      <li><strong>Book:</strong> Ch.10.3 for lifetimes when you're ready.</li>
+      <li><strong>Hands-on:</strong> Rustlings <code>move_semantics</code> exercises.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

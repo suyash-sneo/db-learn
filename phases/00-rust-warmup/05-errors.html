@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>0.5 Error handling: Result, Option, ?</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:0.5", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › 0.5</div>
+  <h1>0.5 — Error handling: <code>Result</code>, <code>Option</code>, <code>?</code>, custom errors</h1>
+  <div class="goal"><b>Goal:</b> Handle failure the Rust way. Rust has no exceptions — errors are
+  values you return. Master <code>Result</code>, <code>Option</code>, the <code>?</code> operator,
+  and your own error <code>enum</code>, because the engine's API is "give me a Result for everything
+  that can fail."</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Opening a file, reading a page, parsing a header, finding a key — every one can fail. Your engine
+  must surface those failures cleanly (no panics in normal operation), because later the C ABI turns
+  each <code>Err</code> into an integer error code crossing the FFI boundary. Get the error model right
+  now and the whole engine is easier.</p>
+
+  <h2>Two failure shapes: absence vs error</h2>
+  <p>Rust splits failure into two enums:</p>
+  <ul>
+    <li><code>Option&lt;T&gt;</code> = <code>Some(T)</code> or <code>None</code> — for "the value might
+    not be there" (a key not found, an empty list's first element). <em>Absence is not an error.</em></li>
+    <li><code>Result&lt;T, E&gt;</code> = <code>Ok(T)</code> or <code>Err(E)</code> — for "the operation
+    might fail, and there's a reason." The reason is the <code>E</code>.</li>
+  </ul>
+
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">fn</span> <span class="tok-f">first_byte</span>(buf: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Option</span>&lt;<span class="tok-f">u8</span>&gt; {
+    <span class="tok-k">if</span> buf.<span class="tok-f">is_empty</span>() { <span class="tok-f">None</span> } <span class="tok-k">else</span> { <span class="tok-f">Some</span>(buf[0]) }
+}
+
+<span class="tok-k">use</span> std::fs::File;
+<span class="tok-k">fn</span> <span class="tok-f">open_db</span>(path: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">File</span>, std::io::Error&gt; {
+    <span class="tok-f">File</span>::<span class="tok-f">open</span>(path)   <span class="tok-c">// File::open already returns Result&lt;File, io::Error&gt;</span>
+}</code></pre>
+
+  <h2>Handling a Result without panicking</h2>
+  <p>The honest way is <code>match</code>:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">match</span> <span class="tok-f">open_db</span>(<span class="tok-s">"data.db"</span>) {
+    <span class="tok-f">Ok</span>(file)  =&gt; <span class="tok-m">println!</span>(<span class="tok-s">"opened {:?}"</span>, file),
+    <span class="tok-f">Err</span>(e)    =&gt; <span class="tok-m">eprintln!</span>(<span class="tok-s">"failed: {}"</span>, e),
+}</code></pre>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ unwrap / expect — fine for tests, not for the engine</div>
+    <p><code>.unwrap()</code> returns the inner value or <strong>panics</strong> on
+    <code>None</code>/<code>Err</code>. <code>.expect("msg")</code> is the same with a custom panic
+    message. Convenient in tests and quick experiments — but a panic in library code that crosses the
+    FFI boundary is undefined behavior (Phase 1.6). In the engine, propagate errors instead of
+    unwrapping.</p>
+  </div>
+
+  <h2>The <code>?</code> operator — the workhorse</h2>
+  <p>Manually matching every <code>Result</code> to early-return its error is tedious. <code>?</code>
+  does it for you: on <code>Ok(v)</code> it unwraps to <code>v</code>; on <code>Err(e)</code> it
+  <em>returns</em> <code>Err(e)</code> from the current function immediately.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">use</span> std::io::Read;
+
+<span class="tok-k">fn</span> <span class="tok-f">read_all</span>(path: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">String</span>, std::io::Error&gt; {
+    <span class="tok-k">let mut</span> f = <span class="tok-f">File</span>::<span class="tok-f">open</span>(path)?;     <span class="tok-c">// if Err, return it now</span>
+    <span class="tok-k">let mut</span> s = <span class="tok-f">String</span>::<span class="tok-f">new</span>();
+    f.<span class="tok-f">read_to_string</span>(&amp;<span class="tok-k">mut</span> s)?;        <span class="tok-c">// same</span>
+    <span class="tok-f">Ok</span>(s)                            <span class="tok-c">// explicit Ok on success</span>
+}</code></pre>
+  <p>Read <code>?</code> as "or bail." It only works inside a function that itself returns a
+  <code>Result</code> (or <code>Option</code>), because that's where it bails <em>to</em>. This is how
+  nearly every engine function will look.</p>
+
+  <h2>Your own error type</h2>
+  <p>Real engines define one error <code>enum</code> that covers every way they can fail. Each variant
+  describes a category; some carry data.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">enum</span> <span class="tok-f">DbError</span> {
+    <span class="tok-f">Io</span>(std::io::Error),       <span class="tok-c">// wraps a lower-level error</span>
+    <span class="tok-f">BadMagic</span>,                 <span class="tok-c">// file isn't ours</span>
+    <span class="tok-f">KeyNotFound</span>(<span class="tok-f">i64</span>),
+    <span class="tok-f">Corrupt</span>(<span class="tok-f">String</span>),           <span class="tok-c">// with a message</span>
+}</code></pre>
+
+  <h3>Making <code>?</code> convert errors for you</h3>
+  <p>The magic of <code>?</code>: if the error it hits isn't your function's error type, it calls
+  <code>From</code> to convert. Implement <code>From&lt;io::Error&gt; for DbError</code> and now
+  <code>?</code> on a file operation automatically becomes a <code>DbError::Io</code>:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;std::io::Error&gt; <span class="tok-k">for</span> <span class="tok-f">DbError</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: std::io::Error) -&gt; <span class="tok-f">DbError</span> { <span class="tok-f">DbError</span>::<span class="tok-f">Io</span>(e) }
+}
+
+<span class="tok-k">fn</span> <span class="tok-f">open_checked</span>(path: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">File</span>, <span class="tok-f">DbError</span>&gt; {
+    <span class="tok-k">let</span> f = <span class="tok-f">File</span>::<span class="tok-f">open</span>(path)?;   <span class="tok-c">// io::Error auto-converts to DbError::Io</span>
+    <span class="tok-f">Ok</span>(f)
+}</code></pre>
+  <p>This is why a clean error enum pays off: every layer can use <code>?</code> and errors bubble up
+  with the right type, ready to become an FFI error code at the top.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>Handy combinators (use sparingly while learning): <code>.ok_or(err)</code> turns an
+      <code>Option</code> into a <code>Result</code>; <code>.map(...)</code> transforms the
+      <code>Ok</code>/<code>Some</code> value; <code>.unwrap_or(default)</code> supplies a fallback.</li>
+      <li><code>type Result&lt;T&gt; = std::result::Result&lt;T, DbError&gt;;</code> — a type alias so you
+      can write <code>Result&lt;Page&gt;</code> everywhere. Common in real crates.</li>
+      <li>The <code>std::error::Error</code> trait + the <code>thiserror</code> crate reduce error
+      boilerplate. <span class="verify-tag">⚠️VERIFY</span> current <code>thiserror</code> API before relying on it.</li>
+      <li>Read more: <a href="https://doc.rust-lang.org/book/ch09-00-error-handling.html">Book Ch.9</a>.</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. "Key not found" — <code>Option</code> or <code>Result</code>? Why?</p>
+      <details><summary>Show answer</summary><div class="answer">Either is defensible, but it's a
+      judgment call: if absence is normal/expected, <code>Option&lt;V&gt;</code> (return <code>None</code>);
+      if a caller treats a missing key as a failure with a reason, <code>Result&lt;V, DbError&gt;</code>
+      with <code>KeyNotFound</code>. The key point: absence isn't automatically an error.</div></details>
+
+      <p class="q">2. What exactly does <code>?</code> do on an <code>Err</code> value?</p>
+      <details><summary>Show answer</summary><div class="answer">It returns that error from the current
+      function immediately (after converting it via <code>From</code> if needed), so the rest of the
+      function doesn't run.</div></details>
+
+      <p class="q">3. Why is <code>.unwrap()</code> dangerous in the engine but okay in a test?</p>
+      <details><summary>Show answer</summary><div class="answer">It panics on failure. A panic in a test
+      just fails the test; a panic in library code can unwind across the FFI boundary (UB) and crash
+      the host app. Engine code should return errors, not panic.</div></details>
+
+      <p class="q">4. What lets <code>?</code> turn an <code>io::Error</code> into your
+      <code>DbError</code> automatically?</p>
+      <details><summary>Show answer</summary><div class="answer">An <code>impl From&lt;io::Error&gt; for
+      DbError</code>. <code>?</code> calls <code>From::from</code> on the error before returning it.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> Ch.9 "Error Handling" — panic vs <code>Result</code>, <code>?</code>,
+      and when each is appropriate. Also revisit Ch.6 for <code>Option</code>.</li>
+      <li><strong>Doc:</strong> <code>std::result</code> and <code>std::option</code> module docs for the
+      full combinator list. <span class="verify-tag">⚠️VERIFY</span> exact method names before quoting.</li>
+      <li><strong>Hands-on:</strong> Rustlings <code>error_handling</code>.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>1.2 extern "C", no_mangle, repr(C)</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1:1.2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.2</div>
+  <h1>1.2 — <code>extern "C"</code>, <code>#[no_mangle]</code>, <code>#[repr(C)]</code></h1>
+  <div class="goal"><b>Goal:</b> Learn the three Rust switches that turn a normal Rust function or
+  struct into something C — and Dart — can call, and how to configure Cargo to emit a loadable library.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>These are the literal building blocks of Layer 2. Every function the outside world calls on your
+  engine will carry <code>extern "C"</code> and <code>#[no_mangle]</code>; every struct that crosses
+  the boundary will carry <code>#[repr(C)]</code>. Misuse any of them and you get linker errors or,
+  worse, silent memory corruption. This lesson makes them routine.</p>
+
+  <h2>1. <code>extern "C"</code> — the calling convention</h2>
+  <p>Putting <code>extern "C"</code> on a function tells Rust: "compile this with the C calling
+  convention, not Rust's." That governs how arguments and return values are physically passed (recall
+  Lesson 1.1). The function body is still normal Rust.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">add</span>(a: <span class="tok-f">i32</span>, b: <span class="tok-f">i32</span>) -&gt; <span class="tok-f">i32</span> {
+    a + b   <span class="tok-c">// ordinary Rust inside</span>
+}</code></pre>
+
+  <h2>2. <code>#[no_mangle]</code> — keep the symbol name</h2>
+  <p>By default Rust <em>mangles</em> symbol names (encodes module + type info), so the compiled symbol
+  isn't simply <code>add</code>. A C/Dart caller looks the function up <em>by name</em>, so it needs the
+  predictable name. <code>#[no_mangle]</code> says "export this symbol exactly as written."</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">add</span>(a: <span class="tok-f">i32</span>, b: <span class="tok-f">i32</span>) -&gt; <span class="tok-f">i32</span> {
+    a + b
+}
+<span class="tok-c">// Now the binary contains a symbol literally named "add" that Dart can find.</span></code></pre>
+  <div class="box warn">
+    <div class="box-title">⚠️ No overloading, unique names</div>
+    <p>Because <code>#[no_mangle]</code> uses the raw name, every exported function needs a
+    <em>globally unique</em> name (no two <code>add</code>s, no overloads). Real C libraries solve this
+    by prefixing: <code>sqlite3_open</code>, <code>sqlite3_close</code>. You'll do the same —
+    <code>mydb_open</code>, <code>mydb_insert</code> — both to avoid clashes and to namespace your API.</p>
+  </div>
+
+  <h2>3. <code>#[repr(C)]</code> — C-compatible data layout</h2>
+  <p>Rust reserves the right to reorder struct fields and choose padding for efficiency. C does not —
+  it lays fields out in declaration order with defined alignment. If you pass a struct by value across
+  the boundary, both sides must agree, so you force C layout with <code>#[repr(C)]</code>:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-m">#[repr(C)]</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">Point</span> {
+    x: <span class="tok-f">f64</span>,
+    y: <span class="tok-f">f64</span>,
+}   <span class="tok-c">// guaranteed: x then y, C alignment — safe to share with C/Dart</span></code></pre>
+  <div class="box deeper">
+    <div class="box-title">You'll mostly avoid passing structs by value</div>
+    <p>Your design keeps the C surface tiny: documents cross as <em>byte buffers</em> (pointer + length),
+    and the database itself is an <em>opaque handle</em> (Lesson 1.4) — neither requires the caller to
+    know your struct layout. So <code>#[repr(C)]</code> matters most for the occasional small result
+    struct (e.g. a buffer descriptor). When in doubt, prefer pointers + lengths over by-value structs.</p>
+  </div>
+
+  <h2>Telling Cargo to build a C-callable library</h2>
+  <p>A normal Rust library compiles to an <code>.rlib</code> (only Rust can link it). To get a
+  <em>dynamic</em> library other languages can load (<code>.so</code> on Linux, <code>.dylib</code> on
+  macOS, <code>.dll</code> on Windows), set the crate type:</p>
+  <span class="code-label">Cargo.toml</span>
+<pre><code>[package]
+name = <span class="tok-s">"mydb"</span>
+version = <span class="tok-s">"0.1.0"</span>
+edition = <span class="tok-s">"2021"</span>
+
+[lib]
+<span class="tok-c"># cdylib = a C-compatible dynamic library (what Dart loads at runtime)</span>
+<span class="tok-c"># staticlib is for static linking; you'll want cdylib for Flutter desktop/dev</span>
+crate-type = [<span class="tok-s">"cdylib"</span>, <span class="tok-s">"staticlib"</span>, <span class="tok-s">"rlib"</span>]</code></pre>
+  <p>Including <code>"rlib"</code> too lets your own Rust tests still link the crate normally. After
+  <code>cargo build</code>, look in <code>target/debug/</code> for <code>libmydb.dylib</code> /
+  <code>.so</code> / <code>mydb.dll</code> <span class="verify-tag">⚠️VERIFY</span> exact file naming per
+  platform.</p>
+
+  <h2>Inspecting the exported symbol</h2>
+  <p>Confirm your function is actually exported with the right name — a great sanity check before you
+  ever touch Dart:</p>
+  <span class="code-label">terminal (macOS/Linux)</span>
+<pre><code>cargo build
+<span class="tok-c"># Linux:</span>
+nm -D target/debug/libmydb.so | grep add
+<span class="tok-c"># macOS:</span>
+nm -gU target/debug/libmydb.dylib | grep add
+<span class="tok-c"># expect to see a symbol named "add" (or "_add" with a leading underscore on macOS) ⚠️VERIFY</span></code></pre>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>The same three switches in concert is the canonical exported-function pattern:
+      <code>#[no_mangle] pub extern "C" fn …</code>.</li>
+      <li>Newer Rust may nudge you toward <code>#[unsafe(no_mangle)]</code> spelling
+      <span class="verify-tag">⚠️VERIFY</span> — check your compiler's warnings and the edition you chose.</li>
+      <li>Only C-compatible parameter/return types may appear in an <code>extern "C"</code> signature:
+      integers, floats, raw pointers (<code>*const T</code>/<code>*mut T</code>), and
+      <code>#[repr(C)]</code> types. <em>No</em> <code>String</code>, <code>Vec</code>, <code>&amp;str</code>,
+      or generics in the signature — you'll learn the buffer/pointer translations in 1.3 and 1.5.</li>
+      <li>Read more: Rustonomicon FFI chapter; the Rust Reference on
+      <a href="https://doc.rust-lang.org/reference/type-layout.html">type layout</a> and <code>repr</code>
+      <span class="verify-tag">⚠️VERIFY</span>.</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What does each of the three do: <code>extern "C"</code>, <code>#[no_mangle]</code>,
+      <code>#[repr(C)]</code>?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>extern "C"</code> = C calling
+      convention; <code>#[no_mangle]</code> = keep the symbol name unmangled so callers can find it;
+      <code>#[repr(C)]</code> = lay out a struct/enum the C way so both sides agree on its bytes.</div></details>
+
+      <p class="q">2. Why can't you have two <code>#[no_mangle]</code> functions named <code>open</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">Unmangled symbols must be unique in the
+      binary — there's no type info to disambiguate. Hence prefixing (<code>mydb_open</code>).</div></details>
+
+      <p class="q">3. Which crate-type makes a library Dart can load at runtime?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>cdylib</code> (a C-compatible
+      dynamic library). You often list <code>["cdylib","staticlib","rlib"]</code> so tests/static
+      linking still work.</div></details>
+
+      <p class="q">4. Why does your design rarely need <code>#[repr(C)]</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">Because documents cross as byte buffers
+      (pointer+length) and the DB is an opaque handle — neither exposes a struct layout to the caller.
+      <code>repr(C)</code> only matters for the occasional by-value struct.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Doc:</strong> Rustonomicon FFI chapter (calling convention, <code>repr(C)</code>);
+      The Cargo Book on <code>crate-type</code>. <span class="verify-tag">⚠️VERIFY</span> URLs/section names.</li>
+      <li><strong>Forward link:</strong> 1.3 (pointers), 1.4 (opaque handle), 1.8 (cbindgen turns these
+      declarations into a C header automatically).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

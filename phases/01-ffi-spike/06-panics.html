@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>1.6 Panics across FFI = UB</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1:1.6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.6</div>
+  <h1>1.6 — Panics across FFI = undefined behavior; <code>catch_unwind</code> / <code>panic=abort</code></h1>
+  <div class="goal"><b>Goal:</b> Understand why a Rust panic must <em>never</em> cross the C ABI, and
+  the two ways to guarantee it can't: catch every panic at the boundary with
+  <code>catch_unwind</code>, or compile with <code>panic = "abort"</code>. This is a correctness
+  requirement, not a nicety.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Your engine code <em>will</em> panic sometimes — an <code>unwrap</code> you missed, an array index
+  out of range, an arithmetic overflow in debug. Inside pure Rust that's a controlled crash. But if a
+  panic unwinds out of an <code>extern "C"</code> function into Dart, the behavior is
+  <strong>undefined</strong> — the host app can corrupt memory or crash unpredictably. A database that
+  can crash its host app on a bad input is unacceptable, so every boundary function must contain panics.</p>
+
+  <h2>What "panic" and "unwind" mean</h2>
+  <p>A Rust <code>panic!</code> is an unrecoverable error. By default it <strong>unwinds</strong> the
+  stack: it walks back up the call stack running destructors (like exceptions in C++). That unwinding
+  machinery is Rust-specific. The C ABI has no notion of it — C functions don't unwind. So when Rust
+  unwinding hits the <code>extern "C"</code> frame and tries to continue up into C/Dart frames, it's
+  doing something the foreign code was never built to handle.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Unwinding across an FFI boundary is undefined behavior</div>
+    <p>"Undefined behavior" (UB) is the worst category of bug: the compiler is allowed to do
+    <em>anything</em> — crash, corrupt memory, appear to work then fail later. It is not a catchable
+    exception on the Dart side. The only safe rule is: <strong>a panic must be stopped before it leaves
+    your Rust function.</strong></p>
+  </div>
+
+  <figure>
+  <svg viewBox="0 0 560 200" role="img" aria-label="A panic unwinding from Rust into Dart is undefined behavior; catch_unwind stops it at the boundary">
+    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
+    <rect class="dg-box" x="30" y="30" width="150" height="40" rx="8"/><text class="dg-txt-s" x="105" y="54" text-anchor="middle">Dart frame</text>
+    <rect class="dg-box" x="30" y="78" width="150" height="40" rx="8"/><text class="dg-txt-s" x="105" y="102" text-anchor="middle">extern "C" fn</text>
+    <rect class="dg-box-a" x="30" y="126" width="150" height="40" rx="8"/><text class="dg-txt-s" x="105" y="150" text-anchor="middle">deep Rust code</text>
+    <path class="dg-arrow" d="M210,146 L210,52" marker-end="url(#a16)"/>
+    <text class="dg-txt-s" x="226" y="100">panic unwinds upward…</text>
+    <text class="verify-tag" x="226" y="44">…into Dart = UB ✗</text>
+    <line x1="300" y1="74" x2="540" y2="74" class="dg-line" stroke-dasharray="5 4"/>
+    <text class="dg-txt-s" x="320" y="120">catch_unwind wraps the extern fn body</text>
+    <text class="dg-txt-s" x="320" y="138">→ converts panic to an error CODE</text>
+    <text class="dg-txt-s" x="320" y="156">→ returns normally across the boundary ✓</text>
+    <defs><marker id="a16" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Stop the unwind at the boundary; turn it into a normal return value.</figcaption>
+  </figure>
+
+  <h2>Solution A: <code>catch_unwind</code> at every boundary (recommended)</h2>
+  <p><code>std::panic::catch_unwind</code> runs a closure and, if it panics, catches the unwind and
+  returns an <code>Err</code> instead of letting it propagate. You wrap the body of every
+  <code>extern "C"</code> function in it and convert a caught panic into your error code:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">use</span> std::panic::catch_unwind;
+
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_do_thing</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">let</span> result = <span class="tok-f">catch_unwind</span>(|| {
+        <span class="tok-c">// … real work; may panic …</span>
+        0i32   <span class="tok-c">// success code</span>
+    });
+    <span class="tok-k">match</span> result {
+        <span class="tok-f">Ok</span>(code) =&gt; code,
+        <span class="tok-f">Err</span>(_)   =&gt; -<span class="tok-n">99</span>,   <span class="tok-c">// a panic was caught → return an error code, NOT UB</span>
+    }
+}</code></pre>
+  <p>Because every boundary function repeats this shape, real projects wrap it in a small helper macro
+  or function so you write it once. The principle stands: <em>no <code>extern "C"</code> function lets a
+  panic escape.</em></p>
+  <div class="box deeper">
+    <div class="box-title">A subtlety: <code>UnwindSafe</code></div>
+    <p><code>catch_unwind</code> wants the closure to be <code>UnwindSafe</code> — a marker that catching a
+    panic mid-operation won't leave shared state in a broken, observable condition. For raw pointers and
+    most boundary code this is satisfiable, sometimes with <code>AssertUnwindSafe</code> to tell the
+    compiler you've reasoned about it. <span class="verify-tag">⚠️VERIFY</span> the exact mechanics in
+    the std docs before leaning on <code>AssertUnwindSafe</code>.</p>
+  </div>
+
+  <h2>Solution B: <code>panic = "abort"</code></h2>
+  <p>You can tell Cargo to make panics <em>abort the process immediately</em> instead of unwinding.
+  Then there's no unwind to cross the boundary — but the whole app dies on any panic.</p>
+  <span class="code-label">Cargo.toml</span>
+<pre><code>[profile.release]
+panic = <span class="tok-s">"abort"</span>
+
+[profile.dev]
+panic = <span class="tok-s">"abort"</span></code></pre>
+  <p>This is simpler and removes unwinding overhead, but it's a blunt instrument: a single panic kills
+  the host Flutter app rather than returning a recoverable error. For a library others embed, you
+  generally want <strong>Solution A</strong> — catch panics and return error codes — so the host can
+  decide what to do. Some projects do both (abort as a backstop, catch_unwind for graceful errors).</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time — also: don't panic on bad input</div>
+    <ul>
+      <li><code>catch_unwind</code> is your <em>safety net</em>, not your error strategy. Normal failures
+      (key not found, bad buffer) should be returned as error codes via <code>Result</code> (Lesson 1.7),
+      not panics. Reserve panics (and the net) for genuine bugs.</li>
+      <li>Replace boundary-layer <code>unwrap()</code>/<code>expect()</code> with proper error handling;
+      they're the most common accidental panic source.</li>
+      <li>Integer overflow panics in debug builds but wraps in release by default — another reason to
+      validate inputs rather than assume.</li>
+      <li>Read more: <code>std::panic::catch_unwind</code> docs; the Rustonomicon "Unwinding" /
+      "FFI and panics" section. <span class="verify-tag">⚠️VERIFY</span> exact titles/URLs.</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What exactly is undefined behavior here — what crosses the boundary illegally?</p>
+      <details><summary>Show answer</summary><div class="answer">The stack <em>unwind</em> from a panic.
+      C/Dart frames aren't built to be unwound by Rust's machinery, so letting the unwind propagate out of
+      an <code>extern "C"</code> function is UB.</div></details>
+
+      <p class="q">2. What does <code>catch_unwind</code> let you do at the boundary?</p>
+      <details><summary>Show answer</summary><div class="answer">Run the function body, catch any panic as
+      an <code>Err</code>, and return a normal error code instead of letting the unwind escape.</div></details>
+
+      <p class="q">3. Trade-off of <code>panic = "abort"</code> vs <code>catch_unwind</code>?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>abort</code> is simple and removes
+      unwinding, but kills the entire host app on any panic. <code>catch_unwind</code> lets you return a
+      recoverable error code, which is better for an embedded library.</div></details>
+
+      <p class="q">4. Should "key not found" be handled by <code>catch_unwind</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">No — that's an expected failure; return it
+      as an error code from a <code>Result</code> (Lesson 1.7). <code>catch_unwind</code> is only the net
+      for unexpected panics/bugs.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Doc:</strong> <code>std::panic::catch_unwind</code> and <code>AssertUnwindSafe</code>;
+      the Rustonomicon unwinding/FFI sections; Cargo Book on the <code>panic</code> profile setting.
+      <span class="verify-tag">⚠️VERIFY</span> URLs.</li>
+      <li><strong>Forward link:</strong> 1.7 (turning errors into codes — the thing <code>catch_unwind</code>
+      complements), the Phase 1 Build (your echo functions are wrapped), Phase 8.4 (error reporting/ABI stability).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

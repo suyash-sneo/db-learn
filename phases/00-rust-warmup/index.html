@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 0 — Just-enough Rust</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 0</div>
+  <span class="pill">Phase 0</span>
+  <h1>Just-enough Rust + re-anchor</h1>
+  <p class="lead">You can't build a database in a language you can't read. This phase gives you the
+  exact slice of Rust the engine needs — ownership, errors, traits, byte buffers, files, serde —
+  taught from a beginner's footing, with every feature introduced the first time it appears. It
+  ends with a from-scratch key-value store: your Rust litmus test and a deliberate reset of the
+  AI-dependence habit.</p>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 0</div>
+    <p>Read and write idiomatic Rust comfortably enough to implement a pager and a B+tree:
+    move values around without fighting the borrow checker, model data with structs/enums,
+    handle errors with <code>Result</code> and <code>?</code>, push bytes through
+    <code>&amp;[u8]</code>/<code>Vec&lt;u8&gt;</code>, and read/write files with explicit seeks.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p0");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

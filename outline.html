@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Outline — DB-Internals Curriculum</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>window.PAGE = { id: null, root: "" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="index.html">Home</a> › Outline</div>
+  <h1>The full curriculum</h1>
+  <p class="lead">Nine phases. Each numbered item is one self-contained lesson; each phase ends
+  with a <strong>Build</strong> you do with AI switched off. Phases are an ordering, not a schedule.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Reading order</div>
+    <p>Phase 0 (Rust) → 1 (FFI spike) front-load the two scariest unknowns. Then the engine is
+    built bottom-up: 2 (pager) → 3 (B+tree) → 4 (records) → 5 (durability) → 6 (documents)
+    → 7 (concurrency) → 8 (public C ABI). Tap any lesson to open it.</p>
+  </div>
+
+  <div class="omap" id="omap"></div>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function () {
+  const mount = document.getElementById("omap");
+  let html = "";
+  PHASES.forEach(p => {
+    html += '<div class="phase-block">';
+    html += '<div class="ph-head"><span class="ph-num">Phase ' + p.num + '</span> — ' + p.title + '</div>';
+    html += '<div style="padding:.5rem 1rem 1rem">';
+    p.lessons.forEach(l => {
+      const done = l[3] === "done";
+      const st = done ? '<span class="status done">authored</span>'
+                      : '<span class="status soon">coming soon</span>';
+      const isBuild = l[0] === "build";
+      html += '<div class="lesson-row' + (isBuild ? ' build-row' : '') +
+        '" style="display:flex;gap:.6rem;align-items:baseline;justify-content:space-between">' +
+        '<a href="' + p.dir + '/' + l[2] + '">' +
+        (isBuild ? '▸ Build · ' : '<b>' + l[0] + '</b> · ') + l[1] + '</a>' + st + '</div>';
+    });
+    html += '</div></div>';
+  });
+  mount.innerHTML = html;
+})();
+</script>
+</body>
+</html>

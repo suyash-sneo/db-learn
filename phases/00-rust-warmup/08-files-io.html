@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>0.8 Files &amp; I/O: Read, Write, Seek</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:0.8", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › 0.8</div>
+  <h1>0.8 — Files &amp; I/O: <code>std::fs</code>, <code>Read</code>/<code>Write</code>/<code>Seek</code></h1>
+  <div class="goal"><b>Goal:</b> Read and write a file at <em>arbitrary byte offsets</em> — open it,
+  seek to a position, read or write N bytes, and flush. This is the literal mechanism the pager uses
+  to turn a file into a numbered array of pages.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>The entire database is one file. "Read page 5" means: seek to offset <code>5 × page_size</code>,
+  read <code>page_size</code> bytes. "Write page 5" means: seek to that offset, write the bytes, and
+  (for durability) flush. Master <code>Seek</code> + <code>read_exact</code> + <code>write_all</code>
+  + <code>flush</code> and you have the pager's I/O core.</p>
+
+  <h2>Opening files</h2>
+  <p><code>File::open</code> opens read-only; <code>File::create</code> creates/truncates for writing.
+  For a database you want read <em>and</em> write on an existing-or-new file, which means
+  <code>OpenOptions</code>:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">use</span> std::fs::OpenOptions;
+
+<span class="tok-k">let mut</span> file = <span class="tok-f">OpenOptions</span>::<span class="tok-f">new</span>()
+    .<span class="tok-f">read</span>(<span class="tok-k">true</span>)
+    .<span class="tok-f">write</span>(<span class="tok-k">true</span>)
+    .<span class="tok-f">create</span>(<span class="tok-k">true</span>)     <span class="tok-c">// create if missing, keep if present</span>
+    .<span class="tok-f">open</span>(<span class="tok-s">"data.db"</span>)?; <span class="tok-c">// Result&lt;File, io::Error&gt; — note the ?</span></code></pre>
+  <p><code>read</code>, <code>write</code>, <code>create</code> are the options you'll use for the DB
+  file. (<code>create_new(true)</code> fails if the file already exists; <code>truncate(true)</code>
+  zeroes it — you do <em>not</em> want truncate on a real database.)</p>
+
+  <h2>The three I/O traits</h2>
+  <p>File I/O in Rust is built on traits, so the same code works on files, in-memory buffers, sockets,
+  etc. The three that matter here:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Trait</th><th>Key methods</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>Read</code></td><td><code>read</code>, <code>read_exact</code></td><td>pull bytes <em>from</em> the source into a buffer</td></tr>
+      <tr><td><code>Write</code></td><td><code>write</code>, <code>write_all</code>, <code>flush</code></td><td>push bytes <em>to</em> the sink; flush user-space buffers</td></tr>
+      <tr><td><code>Seek</code></td><td><code>seek</code></td><td>move the read/write cursor to a byte offset</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>You must <code>use std::io::{Read, Write, Seek, SeekFrom};</code> to call these methods — they're
+  only in scope when the trait is imported (a common beginner stumble).</p>
+
+  <h2>Seeking to a page and reading it</h2>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">use</span> std::io::{Read, Write, Seek, SeekFrom};
+
+<span class="tok-k">const</span> <span class="tok-f">PAGE_SIZE</span>: <span class="tok-f">u64</span> = 4096;
+
+<span class="tok-k">fn</span> <span class="tok-f">read_page</span>(file: &amp;<span class="tok-k">mut</span> std::fs::File, page_no: <span class="tok-f">u64</span>) -&gt; std::io::Result&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
+    <span class="tok-k">let</span> offset = page_no * <span class="tok-f">PAGE_SIZE</span>;
+    file.<span class="tok-f">seek</span>(<span class="tok-f">SeekFrom</span>::<span class="tok-f">Start</span>(offset))?;   <span class="tok-c">// move cursor to the page</span>
+    <span class="tok-k">let mut</span> buf = <span class="tok-f">vec!</span>[0u8; <span class="tok-f">PAGE_SIZE</span> <span class="tok-k">as</span> <span class="tok-f">usize</span>];
+    file.<span class="tok-f">read_exact</span>(&amp;<span class="tok-k">mut</span> buf)?;             <span class="tok-c">// fill the whole buffer or error</span>
+    <span class="tok-f">Ok</span>(buf)
+}</code></pre>
+  <div class="box rust">
+    <div class="box-title">🦀 read vs read_exact (this distinction bites everyone)</div>
+    <p><code>read(&amp;mut buf)</code> may read <em>fewer</em> bytes than the buffer holds and returns
+    how many — you'd have to loop. <code>read_exact(&amp;mut buf)</code> reads <em>exactly</em>
+    <code>buf.len()</code> bytes or returns an error. For fixed-size pages, <code>read_exact</code> is
+    almost always what you want. Same idea for writing: prefer <code>write_all</code> over
+    <code>write</code>.</p>
+  </div>
+
+  <h2>Writing a page</h2>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">fn</span> <span class="tok-f">write_page</span>(file: &amp;<span class="tok-k">mut</span> std::fs::File, page_no: <span class="tok-f">u64</span>, data: &amp;[<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt; {
+    file.<span class="tok-f">seek</span>(<span class="tok-f">SeekFrom</span>::<span class="tok-f">Start</span>(page_no * <span class="tok-f">PAGE_SIZE</span>))?;
+    file.<span class="tok-f">write_all</span>(data)?;   <span class="tok-c">// write every byte</span>
+    <span class="tok-f">Ok</span>(())               <span class="tok-c">// note: NOT durable yet — see below</span>
+}</code></pre>
+  <p><code>SeekFrom</code> has three modes: <code>Start(n)</code> (from the beginning),
+  <code>End(n)</code> (from the end, e.g. to append), <code>Current(n)</code> (relative). For paged
+  access you'll almost always use <code>Start</code>.</p>
+
+  <h2>flush vs sync — the durability preview</h2>
+  <p>This is your first real glimpse of the hardest problem in the engine, so read carefully:</p>
+  <ul>
+    <li><code>flush()</code> (from <code>Write</code>) pushes Rust's <em>user-space</em> buffer to the
+    operating system. (A raw <code>File</code> isn't buffered, so this is often a no-op; a
+    <code>BufWriter</code> is.)</li>
+    <li><code>file.sync_all()</code> / <code>sync_data()</code> asks the <em>operating system</em> to
+    flush its caches all the way to the physical disk. This is the <code>fsync</code> system call.</li>
+  </ul>
+  <div class="box warn">
+    <div class="box-title">⚠️ "Written" ≠ "durable"</div>
+    <p>After <code>write_all</code> returns, your data may still live only in the OS's page cache in
+    RAM. A power loss there <em>loses it</em>, even though the call succeeded. Only after
+    <code>sync_all()</code> returns is the data guaranteed on stable storage. This gap — fast writes
+    vs. crash-safe writes — is the entire reason WAL exists (Phase 5). For now, just know the two
+    calls are different and which one means "really saved."</p>
+  </div>
+  <span class="code-label">rust</span>
+<pre><code>file.<span class="tok-f">write_all</span>(data)?;
+file.<span class="tok-f">sync_all</span>()?;   <span class="tok-c">// fsync — now it's actually on disk (slow, but durable)</span></code></pre>
+
+  <h2>Convenience helpers (for the warm-up build, not the engine)</h2>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">use</span> std::fs;
+fs::<span class="tok-f">write</span>(<span class="tok-s">"notes.txt"</span>, b<span class="tok-s">"hello"</span>)?;          <span class="tok-c">// whole file at once</span>
+<span class="tok-k">let</span> bytes: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; = fs::<span class="tok-f">read</span>(<span class="tok-s">"notes.txt"</span>)?;  <span class="tok-c">// read whole file</span>
+<span class="tok-k">let</span> text:  <span class="tok-f">String</span>  = fs::<span class="tok-f">read_to_string</span>(<span class="tok-s">"notes.txt"</span>)?;</code></pre>
+  <p>(<code>b"hello"</code> is a <em>byte string literal</em> — a <code>&amp;[u8]</code> instead of a
+  <code>&amp;str</code>.) These whole-file helpers are great for the KV warm-up; the real engine uses
+  the seek/read/write path above because it touches pages, not whole files.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What byte offset is page number 5 at, with a 4096-byte page size?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>5 × 4096 = 20480</code>. In code:
+      <code>SeekFrom::Start(5 * PAGE_SIZE)</code>.</div></details>
+
+      <p class="q">2. Why <code>read_exact</code> instead of <code>read</code> for a page?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>read</code> may return fewer bytes
+      than requested; you'd have to loop. <code>read_exact</code> fills the entire fixed-size buffer or
+      errors — exactly the semantics for a known-size page.</div></details>
+
+      <p class="q">3. <code>write_all</code> returned <code>Ok(())</code>. Is the data safe across a
+      power cut? What makes it safe?</p>
+      <details><summary>Show answer</summary><div class="answer">Not necessarily — it may sit in the OS
+      cache. <code>file.sync_all()</code> (fsync) forces it to physical storage. This gap is why WAL
+      exists.</div></details>
+
+      <p class="q">4. You call <code>file.seek(...)</code> and the compiler says no method named
+      <code>seek</code>. Likely cause?</p>
+      <details><summary>Show answer</summary><div class="answer">You didn't bring the trait into scope.
+      Add <code>use std::io::Seek;</code> (and friends). Trait methods are only callable when the trait
+      is imported.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> Ch.12 (an I/O project — reading files, args), Ch.9 (errors with I/O).</li>
+      <li><strong>Doc:</strong> <code>std::fs::File</code>, <code>std::io</code> module,
+      <code>OpenOptions</code>, <code>SeekFrom</code>. <span class="verify-tag">⚠️VERIFY</span> method
+      names (<code>sync_all</code> vs <code>sync_data</code>) before relying on subtle differences.</li>
+      <li><strong>Forward link:</strong> this connects to Phase 2.6 (fsync &amp; the durability gap) and
+      Phase 5 (WAL).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

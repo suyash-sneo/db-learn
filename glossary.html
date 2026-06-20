@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Glossary — DB-Internals Curriculum</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>window.PAGE = { id: null, root: "" };</script>
+<style>
+  #gsearch { width: 100%; padding: .7rem .9rem; font-size: 1rem; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--bg-soft); color: var(--text);
+    margin: .4rem 0 1.2rem; }
+  dl.gloss dt { font-weight: 700; color: var(--accent); margin-top: 1.1rem; }
+  dl.gloss dd { margin: .25rem 0 0; color: var(--text-soft); }
+  dl.gloss dd code { color: var(--accent-2); }
+</style>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="index.html">Home</a> › Glossary</div>
+  <h1>Glossary</h1>
+  <p class="lead">Plain-language definitions, in the order you'll meet them. This list grows as
+  new phases are authored. Type to filter.</p>
+  <input id="gsearch" type="search" placeholder="Filter terms… (e.g. page, fsync, borrow)" autocomplete="off">
+
+  <dl class="gloss" id="gloss">
+    <dt data-term="abi application binary interface">ABI (Application Binary Interface)</dt>
+    <dd>The binary-level contract for how compiled code calls compiled code: how arguments are
+    laid out in registers/stack, how names are mangled, how structs are packed. An <em>API</em>
+    is the source-level contract; the ABI is what survives after compilation. Stable C ABIs are
+    why a Rust library can be called from Dart, Python, or Swift.</dd>
+
+    <dt data-term="acid atomicity consistency isolation durability">ACID</dt>
+    <dd>Atomicity, Consistency, Isolation, Durability — the four guarantees a transactional
+    store aims for. At the storage layer you mostly implement <em>atomicity</em> (all-or-nothing)
+    and <em>durability</em> (committed data survives a crash).</dd>
+
+    <dt data-term="aggregation pipeline">Aggregation pipeline</dt>
+    <dd>A sequence of stages (match → group → sort → …) that transform a stream of documents
+    into a computed result. MongoDB's model; a v2 feature for your engine.</dd>
+
+    <dt data-term="borrow borrowing reference rust">Borrow / borrowing</dt>
+    <dd>In Rust, accessing a value through a reference (<code>&amp;T</code> or <code>&amp;mut T</code>)
+    without taking ownership. The borrow checker enforces: many shared <code>&amp;</code> borrows
+    OR exactly one <code>&amp;mut</code>, never both at once.</dd>
+
+    <dt data-term="bson binary json">BSON</dt>
+    <dd>Binary JSON — MongoDB's document serialization format. Length-prefixed, typed, supports
+    more types than JSON (dates, binary, ObjectId). A candidate for documents crossing your FFI
+    boundary as byte buffers.</dd>
+
+    <dt data-term="btree b-tree balanced tree">B-tree</dt>
+    <dd>A balanced, high-fan-out search tree designed for block storage: each node fills a page,
+    so a shallow tree means few disk reads. The classic database index.</dd>
+
+    <dt data-term="bplus b+tree leaf internal">B+tree</dt>
+    <dd>A B-tree variant where <em>all</em> values live in the leaf nodes and internal nodes hold
+    only keys for routing; leaves are often linked for fast range scans. The core index you'll build.</dd>
+
+    <dt data-term="buffer pool page cache">Buffer pool / page cache</dt>
+    <dd>An in-memory cache of pages read from the file, so repeated access avoids disk I/O.
+    Tracks which pages are <em>dirty</em> (modified, must be written back) and which are
+    <em>pinned</em> (in use, must not be evicted).</dd>
+
+    <dt data-term="catch_unwind panic ffi">catch_unwind</dt>
+    <dd>Rust's <code>std::panic::catch_unwind</code> — catches a panic at a boundary so it does
+    not unwind across the FFI line (which would be undefined behavior). Wraps every C-ABI
+    function body.</dd>
+
+    <dt data-term="cbindgen header generation">cbindgen</dt>
+    <dd>A tool that reads your Rust <code>extern "C"</code> declarations and generates a matching
+    C header (<code>.h</code>) so other languages can call your library.</dd>
+
+    <dt data-term="cell record slot">Cell</dt>
+    <dd>SQLite's term for a single record stored on a B-tree page (key + payload, possibly with
+    an overflow pointer). Located via the page's slot/pointer array.</dd>
+
+    <dt data-term="checkpoint wal merge">Checkpoint</dt>
+    <dd>Moving committed changes from the WAL back into the main database file, then (eventually)
+    resetting the WAL. Balances read speed against WAL growth.</dd>
+
+    <dt data-term="cow copy-on-write">Copy-on-write (CoW)</dt>
+    <dd>Instead of overwriting a page in place, write a modified copy to a new location and
+    re-point references. Gives crash safety and MVCC for free; the LMDB/MDBX (and thus Isar) design.</dd>
+
+    <dt data-term="dirty page">Dirty page</dt>
+    <dd>A cached page whose in-memory copy differs from disk because it was modified. Must be
+    flushed before it can be safely evicted or before commit.</dd>
+
+    <dt data-term="extern c no_mangle repr">extern "C" / #[no_mangle] / #[repr(C)]</dt>
+    <dd>The three Rust attributes that produce C-compatible output:
+    <code>extern "C"</code> selects the C calling convention, <code>#[no_mangle]</code> keeps the
+    symbol name unmangled, <code>#[repr(C)]</code> lays out a struct the way C expects.</dd>
+
+    <dt data-term="ffi foreign function interface">FFI (Foreign Function Interface)</dt>
+    <dd>The mechanism by which code in one language calls code in another, typically through a C
+    ABI. Here: Dart calling your Rust engine.</dd>
+
+    <dt data-term="freelist free page trunk">Freelist</dt>
+    <dd>The list of pages inside the file that are currently unused and available for reuse, so
+    the file doesn't grow forever. SQLite uses freelist "trunk" pages that point to free "leaf" pages.</dd>
+
+    <dt data-term="fsync flush durability">fsync</dt>
+    <dd>A system call that forces buffered file writes all the way down to stable storage. Without
+    it the OS may still hold your data in a cache that a power loss would erase. The hinge of durability.</dd>
+
+    <dt data-term="opaque handle pointer">Opaque handle</dt>
+    <dd>A pointer the other language holds but cannot inspect — it only passes it back to your
+    functions. In Rust: <code>Box::into_raw</code> hands out the pointer, <code>Box::from_raw</code>
+    reclaims it. Keeps the C surface tiny and the internals private.</dd>
+
+    <dt data-term="overflow page">Overflow page</dt>
+    <dd>An extra page used to store the tail of a record too large to fit in its home page. The
+    cell keeps a pointer to the overflow chain.</dd>
+
+    <dt data-term="ownership move rust">Ownership / move</dt>
+    <dd>Rust's rule that each value has exactly one owner; assigning or passing it <em>moves</em>
+    ownership (the source can no longer be used) unless the type is <code>Copy</code>. When the
+    owner goes out of scope, the value is dropped (freed).</dd>
+
+    <dt data-term="page block fixed-size">Page</dt>
+    <dd>A fixed-size block (e.g. 4 KiB) that is the unit of I/O between the file and memory. The
+    whole engine is organized around reading and writing whole pages.</dd>
+
+    <dt data-term="pager pageio">Pager</dt>
+    <dd>The layer that turns a file into a numbered array of pages: it reads/writes pages, caches
+    them, tracks dirty pages, and coordinates flushing and journaling. The foundation everything
+    sits on.</dd>
+
+    <dt data-term="panic abort unwind rust">panic</dt>
+    <dd>Rust's mechanism for unrecoverable errors; by default it <em>unwinds</em> the stack. Across
+    an FFI boundary that is undefined behavior, so you contain it (<code>catch_unwind</code> or
+    <code>panic = "abort"</code>).</dd>
+
+    <dt data-term="repr c layout">repr(C)</dt>
+    <dd>An attribute forcing a struct/enum to use C's field order and alignment, so a value can be
+    safely shared across the FFI boundary.</dd>
+
+    <dt data-term="result option question mark error">Result / Option / ?</dt>
+    <dd>Rust's error types: <code>Result&lt;T, E&gt;</code> is success-or-error,
+    <code>Option&lt;T&gt;</code> is value-or-nothing, and <code>?</code> propagates the error/None
+    case to the caller. Rust has no exceptions; these <em>are</em> error handling.</dd>
+
+    <dt data-term="rollback journal">Rollback journal</dt>
+    <dd>SQLite's original atomic-commit scheme: before modifying a page, copy its <em>old</em>
+    contents to a journal file; on crash, restore from the journal. Contrast with WAL, which logs
+    <em>new</em> contents.</dd>
+
+    <dt data-term="serde serialize deserialize">serde</dt>
+    <dd>Rust's standard serialization framework. <code>#[derive(Serialize, Deserialize)]</code>
+    plus a format crate (e.g. <code>serde_json</code>) converts structs to/from bytes.</dd>
+
+    <dt data-term="slotted page slot array">Slotted page</dt>
+    <dd>A page layout for variable-length records: a slot/pointer array grows from one end, the
+    record data grows from the other, free space sits in the middle. Lets records move during
+    compaction without changing their slot index.</dd>
+
+    <dt data-term="vfs os interface">VFS (OS interface)</dt>
+    <dd>An abstraction over the operating system's file operations (open, read, write, sync, lock)
+    so the engine doesn't bake in OS-specific calls. SQLite's <code>os_unix.c</code> is one implementation.</dd>
+
+    <dt data-term="wal write-ahead log frame">WAL (Write-Ahead Log)</dt>
+    <dd>A durability scheme: append every change to a log file and <code>fsync</code> that, before
+    touching the main file. Commit = a special frame in the log. Enables fast commits and concurrent
+    readers; later checkpointed back into the main file.</dd>
+  </dl>
+
+  <p class="muted small" id="nohits" hidden>No terms match that filter.</p>
+</main>
+<script src="assets/app.js"></script>
+<script>
+(function () {
+  const inp = document.getElementById("gsearch");
+  const dts = Array.from(document.querySelectorAll("#gloss dt"));
+  const none = document.getElementById("nohits");
+  inp.addEventListener("input", () => {
+    const q = inp.value.trim().toLowerCase();
+    let hits = 0;
+    dts.forEach(dt => {
+      const dd = dt.nextElementSibling;
+      const hay = (dt.dataset.term + " " + dt.textContent + " " + dd.textContent).toLowerCase();
+      const show = !q || hay.includes(q);
+      dt.hidden = !show; dd.hidden = !show;
+      if (show) hits++;
+    });
+    none.hidden = hits !== 0;
+  });
+})();
+</script>
+</body>
+</html>

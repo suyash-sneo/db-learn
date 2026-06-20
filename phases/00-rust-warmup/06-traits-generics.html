@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>0.6 Traits &amp; generics (just enough)</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:0.6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › 0.6</div>
+  <h1>0.6 — Traits &amp; generics (just enough)</h1>
+  <div class="goal"><b>Goal:</b> Understand <code>trait</code> (shared behavior, like an interface)
+  and generics (code that works over many types), at the depth the engine needs — no more. These
+  two features power <code>Read</code>/<code>Write</code>, <code>serde</code>, and the standard
+  collections you're about to use.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>You'll write functions that work with "anything you can read bytes from" — a file, an in-memory
+  buffer, a network stream. That "anything readable" is the <code>Read</code> trait. You'll derive
+  <code>Serialize</code> for documents — that's a trait. Knowing how traits and generics work means
+  these stop being magic and become tools you can wield.</p>
+
+  <h2>Traits — shared behavior</h2>
+  <p>A trait is a set of method signatures a type can promise to implement. If Dart/Java is your
+  background: a trait is close to an <strong>interface</strong> (with optional default methods).</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">trait</span> <span class="tok-f">Summary</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">summarize</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">String</span>;          <span class="tok-c">// required</span>
+    <span class="tok-k">fn</span> <span class="tok-f">preview</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">String</span> {            <span class="tok-c">// default impl</span>
+        <span class="tok-f">format!</span>(<span class="tok-s">"({}…)"</span>, <span class="tok-k">self</span>.<span class="tok-f">summarize</span>())
+    }
+}
+
+<span class="tok-k">struct</span> <span class="tok-f">Doc</span> { title: <span class="tok-f">String</span> }
+
+<span class="tok-k">impl</span> <span class="tok-f">Summary</span> <span class="tok-k">for</span> <span class="tok-f">Doc</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">summarize</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">String</span> { <span class="tok-k">self</span>.title.<span class="tok-f">clone</span>() }
+    <span class="tok-c">// preview() comes free from the default</span>
+}</code></pre>
+  <p>Note the shape: <code>impl TraitName for TypeName</code>. You can implement a trait for a type
+  even if you didn't define the type (with some rules), which is how the standard library can make
+  <em>your</em> types printable, comparable, hashable.</p>
+
+  <h3>Derivable traits — the ones you'll use daily</h3>
+  <p>Many common traits can be auto-implemented with <code>#[derive(...)]</code>, saving you the
+  boilerplate:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Trait</th><th>Gives you</th></tr></thead>
+    <tbody>
+      <tr><td><code>Debug</code></td><td><code>{:?}</code> formatting for printing/inspecting</td></tr>
+      <tr><td><code>Clone</code></td><td>a <code>.clone()</code> method (deep copy)</td></tr>
+      <tr><td><code>Copy</code></td><td>implicit bitwise copy (only for simple types)</td></tr>
+      <tr><td><code>PartialEq</code>, <code>Eq</code></td><td><code>==</code> comparison</td></tr>
+      <tr><td><code>PartialOrd</code>, <code>Ord</code></td><td><code>&lt; &gt; sort()</code> — <em>vital for B+tree keys</em></td></tr>
+      <tr><td><code>Hash</code></td><td>use as a <code>HashMap</code> key</td></tr>
+      <tr><td><code>Serialize</code>, <code>Deserialize</code></td><td>serde conversion (Lesson 0.9)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-m">#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]</span>
+<span class="tok-k">struct</span> <span class="tok-f">Key</span>(<span class="tok-f">i64</span>);   <span class="tok-c">// now Key is printable, cloneable, comparable, sortable</span></code></pre>
+
+  <h2>Generics — write once, work for many types</h2>
+  <p>A generic function/struct has a type <em>parameter</em> (usually <code>T</code>) filled in at
+  each call site. The compiler generates a specialized version per concrete type
+  ("monomorphization") — so generics are zero runtime cost.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-c">// works for any T, returns the first element if present</span>
+<span class="tok-k">fn</span> <span class="tok-f">first</span>&lt;<span class="tok-f">T</span>: <span class="tok-f">Clone</span>&gt;(items: &amp;[<span class="tok-f">T</span>]) -&gt; <span class="tok-f">Option</span>&lt;<span class="tok-f">T</span>&gt; {
+    items.<span class="tok-f">first</span>().<span class="tok-f">cloned</span>()
+}
+
+<span class="tok-k">let</span> a = <span class="tok-f">first</span>(&amp;[1, 2, 3]);          <span class="tok-c">// T = i32  → Some(1)</span>
+<span class="tok-k">let</span> b = <span class="tok-f">first</span>(&amp;[<span class="tok-s">"x"</span>, <span class="tok-s">"y"</span>]);          <span class="tok-c">// T = &amp;str → Some("x")</span></code></pre>
+
+  <h3>Trait bounds: "T, but only if it can do X"</h3>
+  <p>The <code>&lt;T: Clone&gt;</code> above is a <strong>trait bound</strong>: it constrains
+  <code>T</code> to types that implement <code>Clone</code>, which is what lets the body call
+  <code>.cloned()</code>. Bounds are how generics stay safe — you can only use capabilities you've
+  required. To sort keys, you'd require <code>T: Ord</code>:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">fn</span> <span class="tok-f">sorted</span>&lt;<span class="tok-f">T</span>: <span class="tok-f">Ord</span> + <span class="tok-f">Clone</span>&gt;(items: &amp;[<span class="tok-f">T</span>]) -&gt; <span class="tok-f">Vec</span>&lt;<span class="tok-f">T</span>&gt; {
+    <span class="tok-k">let mut</span> v = items.<span class="tok-f">to_vec</span>();
+    v.<span class="tok-f">sort</span>();   <span class="tok-c">// allowed because T: Ord</span>
+    v
+}</code></pre>
+
+  <h2>Traits as parameters &amp; the two ways to be generic</h2>
+  <p>You'll see two syntaxes for "accept anything implementing a trait":</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-c">// 1. static dispatch (impl Trait / generic) — fast, resolved at compile time</span>
+<span class="tok-k">fn</span> <span class="tok-f">print_summary</span>(item: &amp;<span class="tok-k">impl</span> <span class="tok-f">Summary</span>) {
+    <span class="tok-m">println!</span>(<span class="tok-s">"{}"</span>, item.<span class="tok-f">summarize</span>());
+}
+
+<span class="tok-c">// 2. dynamic dispatch (dyn Trait) — one function, type chosen at runtime via a vtable</span>
+<span class="tok-k">fn</span> <span class="tok-f">print_dyn</span>(item: &amp;<span class="tok-k">dyn</span> <span class="tok-f">Summary</span>) {
+    <span class="tok-m">println!</span>(<span class="tok-s">"{}"</span>, item.<span class="tok-f">summarize</span>());
+}</code></pre>
+  <p>For now: prefer the first (generics / <code>impl Trait</code>) — it's the common case and has no
+  runtime cost. Reach for <code>dyn Trait</code> only when you need a collection of mixed concrete
+  types behind one interface (e.g. a <code>Vec&lt;Box&lt;dyn Trait&gt;&gt;</code>).</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>where</code> clauses move long bounds out of the signature for readability:
+      <code>fn f&lt;T&gt;(x: T) -&gt; T where T: Ord + Clone { … }</code>.</li>
+      <li>You'll constantly use trait methods from the standard library: <code>.iter()</code>,
+      <code>.map()</code>, <code>.collect()</code> come from the <code>Iterator</code> trait.</li>
+      <li><strong>For the B+tree:</strong> your key type needs <code>Ord</code> so the tree can compare
+      and order keys. Keep that in mind when you design it.</li>
+      <li>Read more: <a href="https://doc.rust-lang.org/book/ch10-00-generics.html">Book Ch.10</a>
+      (generics, traits, bounds, lifetimes).</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. In one sentence, what is a trait?</p>
+      <details><summary>Show answer</summary><div class="answer">A named set of behaviors (method
+      signatures) that types can implement — Rust's version of an interface, with optional default
+      methods.</div></details>
+
+      <p class="q">2. Which derived trait must your B+tree key type have, and why?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>Ord</code> (and its prerequisites
+      <code>Eq</code>/<code>PartialOrd</code>/<code>PartialEq</code>) — a search tree must compare and
+      order keys to decide left/right.</div></details>
+
+      <p class="q">3. What does the bound in <code>fn f&lt;T: Clone&gt;(…)</code> let the body do?</p>
+      <details><summary>Show answer</summary><div class="answer">Call <code>Clone</code> methods (like
+      <code>.clone()</code>) on values of type <code>T</code>. Without the bound, the compiler can't
+      assume <code>T</code> is cloneable.</div></details>
+
+      <p class="q">4. Static dispatch (generics) vs dynamic dispatch (<code>dyn</code>): which has zero
+      runtime cost, and which should you default to?</p>
+      <details><summary>Show answer</summary><div class="answer">Generics/<code>impl Trait</code> are
+      monomorphized at compile time — zero runtime cost — and are the default. <code>dyn</code> uses a
+      runtime vtable; use it only when you need mixed types behind one pointer.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> Ch.10 (generics &amp; traits), Ch.13 (iterators &amp; closures — heavy
+      trait usage), Ch.17 for trait objects (<code>dyn</code>).</li>
+      <li><strong>Hands-on:</strong> Rustlings <code>traits</code>, <code>generics</code>, <code>iterators</code>.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>1.3 Passing primitives &amp; pointers</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1:1.3", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.3</div>
+  <h1>1.3 — Passing primitives and pointers across the boundary</h1>
+  <div class="goal"><b>Goal:</b> Know which types can legally cross the C ABI (the easy primitives),
+  meet Rust's raw pointers (<code>*const T</code> / <code>*mut T</code>), and understand why touching
+  them requires <code>unsafe</code> — and what <code>unsafe</code> really promises.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Everything richer than a number crosses the boundary as a <em>pointer</em>: a document buffer is a
+  pointer to bytes, the database is a pointer to an opaque object, an error message is a pointer to
+  text. Pointers are where FFI gets dangerous, so getting comfortable and disciplined with them now is
+  what keeps the engine memory-safe later.</p>
+
+  <h2>Primitives: the trivial case</h2>
+  <p>Fixed-size scalar types map directly onto their C counterparts and pass by value with no fuss:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Rust</th><th>C</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>i8 i16 i32 i64</code></td><td><code>int8_t … int64_t</code></td><td>signed integers</td></tr>
+      <tr><td><code>u8 u16 u32 u64</code></td><td><code>uint8_t … uint64_t</code></td><td>unsigned</td></tr>
+      <tr><td><code>usize / isize</code></td><td><code>size_t / ptrdiff_t</code></td><td>pointer-sized — great for lengths</td></tr>
+      <tr><td><code>f32 / f64</code></td><td><code>float / double</code></td><td>floats</td></tr>
+      <tr><td><code>bool</code></td><td><code>_Bool</code></td><td>fine, but many APIs use <code>i32</code> 0/1 for clarity <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td><code>*const T / *mut T</code></td><td><code>const T* / T*</code></td><td>raw pointers — the rest of this lesson</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Prefer the explicitly-sized integer types (<code>i32</code>, <code>u64</code>, …) at the boundary —
+  they have one fixed size everywhere, unlike C's <code>int</code> whose width is platform-dependent.</p>
+
+  <h2>Rust's two reference worlds</h2>
+  <p>Rust has <em>safe references</em> (<code>&amp;T</code>, <code>&amp;mut T</code>) — the borrow-checked
+  ones from Phase 0 — and <em>raw pointers</em> (<code>*const T</code>, <code>*mut T</code>). Safe
+  references can't cross the C ABI (they carry lifetime/borrow guarantees C knows nothing about). So at
+  the boundary you use <strong>raw pointers</strong>, which are just addresses — no lifetime, no borrow
+  rules, can be null, can dangle. They're exactly C pointers.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 180" role="img" aria-label="Safe references stay inside Rust; raw pointers cross the boundary">
+    <rect class="dg-bg" x="0" y="0" width="560" height="180" rx="10"/>
+    <rect class="dg-box-a" x="24" y="40" width="240" height="100" rx="10"/>
+    <text class="dg-txt" x="144" y="64" text-anchor="middle" font-weight="700">Inside Rust</text>
+    <text class="dg-txt-s" x="144" y="90" text-anchor="middle">&amp;T, &amp;mut T — borrow-checked</text>
+    <text class="dg-txt-s" x="144" y="110" text-anchor="middle">lifetimes, no null, no dangling</text>
+    <line x1="284" y1="20" x2="284" y2="160" class="dg-line" stroke-dasharray="5 4"/>
+    <text class="dg-txt-s" x="284" y="16" text-anchor="middle">boundary</text>
+    <rect class="dg-box" x="304" y="40" width="232" height="100" rx="10"/>
+    <text class="dg-txt" x="420" y="64" text-anchor="middle" font-weight="700">Across the C ABI</text>
+    <text class="dg-txt-s" x="420" y="90" text-anchor="middle">*const T, *mut T — raw</text>
+    <text class="dg-txt-s" x="420" y="110" text-anchor="middle">may be null/dangling — you check</text>
+    <path class="dg-arrow" d="M250,128 C284,128 284,128 318,128" marker-end="url(#a13)"/>
+    <text class="dg-txt-s" x="285" y="150" text-anchor="middle">convert at the edge</text>
+    <defs><marker id="a13" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Keep safe references inside Rust; convert to/from raw pointers only at the boundary.</figcaption>
+  </figure>
+
+  <h2>Out-parameters via pointers</h2>
+  <p>C functions often return a value by writing through a pointer the caller supplies — an
+  "out-parameter." You'll use this constantly (the result code is the real return; outputs go through
+  pointers). To write through a raw pointer you need <code>unsafe</code>:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-c">/// Writes a*b into *out. Returns 0 on success, 1 if out is null.</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">mul</span>(a: <span class="tok-f">i64</span>, b: <span class="tok-f">i64</span>, out: *<span class="tok-k">mut</span> <span class="tok-f">i64</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">if</span> out.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span> 1; }      <span class="tok-c">// always null-check pointers from C</span>
+    <span class="tok-k">unsafe</span> { *out = a * b; }            <span class="tok-c">// deref a raw pointer = unsafe</span>
+    0
+}</code></pre>
+
+  <h2>What <code>unsafe</code> actually means</h2>
+  <p>This is the most misunderstood word in Rust. <code>unsafe</code> does <strong>not</strong> turn off
+  the borrow checker or mean "sloppy code." It unlocks exactly five extra abilities the compiler can't
+  verify for you — most relevantly here, <em>dereferencing a raw pointer</em> and <em>calling other
+  unsafe/FFI functions</em>. It is a contract: <em>"I, the programmer, have personally verified the
+  safety conditions the compiler couldn't."</em></p>
+  <div class="box warn">
+    <div class="box-title">⚠️ The obligations you take on inside <code>unsafe</code></div>
+    <p>When you deref a <code>*mut T</code> from C you are promising it is: non-null, properly aligned,
+    pointing at a valid <code>T</code>, and not aliased in a way that breaks Rust's rules. The compiler
+    won't check — you must. That's why <code>unsafe</code> blocks should be <em>small</em> and every
+    pointer gets a null check. FFI is inherently unsafe; your job is to wrap that unsafety in a thin,
+    audited layer and keep the engine core 100% safe Rust.</p>
+  </div>
+
+  <h2>Strings: a first look (full treatment in 1.5)</h2>
+  <p>A C string is a <code>*const c_char</code> (a pointer to bytes ending in a <code>\0</code>). Rust
+  strings are length-prefixed UTF-8 with no terminator, so they don't match — you convert with
+  <code>CStr</code>/<code>CString</code>. But your design largely sidesteps C strings: documents travel
+  as length-prefixed <em>byte buffers</em> (pointer + length), which is simpler and binary-safe. We
+  cover buffers thoroughly in Lesson 1.5; just note here that "string across FFI" = "pointer to bytes,"
+  and the length question is the crux.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>Use <code>std::os::raw::c_char</code> / <code>std::ffi::c_void</code> (or the
+      <code>libc</code> crate) for C-typed pointers in signatures. <span class="verify-tag">⚠️VERIFY</span>
+      current preferred path (<code>core::ffi</code> vs <code>std::os::raw</code>).</li>
+      <li>Check a raw pointer with <code>p.is_null()</code> before any deref.</li>
+      <li>The five unsafe superpowers (FYI): deref raw pointers; call unsafe/extern fns; access/modify
+      mutable statics; implement unsafe traits; access union fields. You'll mostly use the first two.</li>
+      <li>Read more: <a href="https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html">Book Ch.20 (Unsafe Rust)</a>
+      <span class="verify-tag">⚠️VERIFY</span> chapter number; Rustonomicon for the deep version.</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why can't a Rust <code>&amp;mut i64</code> cross the C ABI, but a <code>*mut i64</code> can?</p>
+      <details><summary>Show answer</summary><div class="answer">Safe references carry lifetime/borrow
+      guarantees the C side knows nothing about and can't uphold. Raw pointers are just addresses — the
+      same thing C already passes around.</div></details>
+
+      <p class="q">2. Does <code>unsafe</code> disable the borrow checker?</p>
+      <details><summary>Show answer</summary><div class="answer">No. It only unlocks a few extra operations
+      (like dereferencing raw pointers) and shifts responsibility for <em>their</em> safety conditions to
+      you. The borrow checker still runs on everything else.</div></details>
+
+      <p class="q">3. What's the first thing to do with any pointer C hands you?</p>
+      <details><summary>Show answer</summary><div class="answer">Null-check it (<code>p.is_null()</code>)
+      and return an error code if it's null — before any dereference.</div></details>
+
+      <p class="q">4. Why prefer <code>i32</code>/<code>u64</code> over C's <code>int</code> at the boundary?</p>
+      <details><summary>Show answer</summary><div class="answer">The Rust types have a fixed, known size on
+      every platform; C's <code>int</code> width can vary, which would make the ABI ambiguous.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Doc:</strong> Rustonomicon FFI chapter; Book Ch.20 (Unsafe Rust); <code>std::ptr</code>
+      and <code>core::ffi</code> module docs. <span class="verify-tag">⚠️VERIFY</span> exact module paths.</li>
+      <li><strong>Forward link:</strong> 1.4 turns "pointer to my object" into the opaque-handle pattern;
+      1.5 turns "pointer to bytes" into safe byte-buffer transfer; 1.6 covers the panic hazard inside
+      these unsafe functions.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

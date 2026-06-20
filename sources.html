@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sources — DB-Internals Curriculum</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>window.PAGE = { id: null, root: "" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="index.html">Home</a> › Sources</div>
+  <h1>Sources &amp; annotated bibliography</h1>
+  <p class="lead">These are the books, courses, docs, and repositories the curriculum is built
+  from. Lessons teach the same ideas in original words; come here when a <em>Go deeper / verify</em>
+  box sends you out. Links marked <span class="verify-tag">⚠️VERIFY</span> were not fetched at
+  authoring time and should be confirmed during your review pass.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Legend</div>
+    <p>✅ = URL fetched and confirmed live while writing this page.
+    <span class="verify-tag">⚠️VERIFY</span> = plausible but unconfirmed; check it.
+    Licensing notes tell you what may be quoted.</p>
+  </div>
+
+  <h2>Conceptual backbone</h2>
+  <ul>
+    <li><strong>Database Internals</strong> — Alex Petrov (O'Reilly, 2019). The spine of the
+    storage half. Cited by chapter; <em>no prose reproduced</em>. ISBN 978-1492040347.</li>
+    <li><strong>CMU 15-445/645 — Intro to Database Systems</strong> — Andy Pavlo. Free lectures
+    on YouTube + course site <code>15445.courses.cs.cmu.edu</code> <span class="verify-tag">⚠️VERIFY</span>.
+    Cited by lecture title; any timestamps carry <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li><strong>Designing Data-Intensive Applications</strong> — Martin Kleppmann (O'Reilly,
+    2017). Chapter 3 ("Storage and Retrieval") for B-tree vs LSM. ISBN 978-1449373320.</li>
+  </ul>
+
+  <h2>SQLite — docs &amp; source (public domain)</h2>
+  <p>SQLite's source is in the <strong>public domain</strong>, so illustrative snippets may be
+  shown freely. These are the storage-track teacher.</p>
+  <ul>
+    <li>✅ Architecture overview — <a href="https://www.sqlite.org/arch.html">sqlite.org/arch.html</a>.
+    Names the modules: Interface, Tokenizer, Parser, Code Generator, Bytecode Engine (VM),
+    B-Tree, Pager (Page Cache), OS Interface (VFS), Utilities, Test Code.</li>
+    <li>✅ File format — <a href="https://www.sqlite.org/fileformat2.html">fileformat2.html</a>.
+    Confirmed: header is the first <strong>100 bytes</strong> (§1.3); magic string
+    <code>"SQLite format 3\0"</code> (16 bytes) at offset 0; page size a power of two
+    <strong>512–65536</strong>; B-tree pages in §1.6.</li>
+    <li>✅ Write-ahead logging — <a href="https://www.sqlite.org/wal.html">wal.html</a>.
+    Confirmed: append changes to a <code>-wal</code> file, commit = special frame; default
+    auto-checkpoint near <strong>1000 pages</strong>; PASSIVE/FULL/RESTART checkpoints.</li>
+    <li>Atomic commit — <a href="https://www.sqlite.org/atomiccommit.html">atomiccommit.html</a>
+    <span class="verify-tag">⚠️VERIFY</span> (rollback-journal scheme; the original durability design).</li>
+    <li>Locking &amp; concurrency — <a href="https://www.sqlite.org/lockingv3.html">lockingv3.html</a>
+    <span class="verify-tag">⚠️VERIFY</span> (lock states: UNLOCKED, SHARED, RESERVED, PENDING, EXCLUSIVE).</li>
+    <li>C-interface reference — <a href="https://www.sqlite.org/c3ref/intro.html">c3ref/intro.html</a>
+    <span class="verify-tag">⚠️VERIFY</span> and the header
+    <a href="https://www.sqlite.org/cintro.html">cintro.html</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li>WAL file format details — <a href="https://www.sqlite.org/walformat.html">walformat.html</a>
+    <span class="verify-tag">⚠️VERIFY</span> (frame headers, the 32-byte WAL header — confirm exact sizes here).</li>
+    <li><strong>Source files</strong> to dive into (the lower / storage track): <code>pager.c</code>,
+    <code>wal.c</code>, <code>btree.c</code> + <code>btreeInt.h</code>, <code>os_unix.c</code>,
+    <code>build.c</code>, <code>main.c</code>, and the amalgamation <code>sqlite3.c</code> /
+    public header <code>sqlite3.h</code>. Browse at
+    <a href="https://www.sqlite.org/src/">sqlite.org/src</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
+  </ul>
+
+  <h2>Isar — Rust embedded NoSQL DB (Apache-2.0)</h2>
+  <p>The upper / document-track reference: schema, collections, indexes, query engine, and the
+  Rust↔Dart FFI boundary. <strong>Apache-2.0</strong>: short, attributed snippets only.</p>
+  <ul>
+    <li>Repo — <a href="https://github.com/isar/isar">github.com/isar/isar</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li>Architecture wiki — <a href="https://deepwiki.com/isar/isar">deepwiki.com/isar/isar</a>
+    <span class="verify-tag">⚠️VERIFY</span> (Core Architecture / Cross-Platform / Development sections).</li>
+    <li><span class="verify-tag">⚠️VERIFY</span> Isar v3's core sat on <strong>LMDB/libmdbx</strong>
+    (an embedded B-tree KV store) rather than a from-scratch engine; <strong>v4 reworked the
+    core</strong> — confirm the current state and whether the active community fork differs.</li>
+  </ul>
+
+  <h2>LMDB / libmdbx — embedded KV engine &amp; MVCC copy-on-write</h2>
+  <ul>
+    <li>LMDB — <a href="http://www.lmdb.tech/doc/">lmdb.tech/doc</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li>libmdbx — <a href="https://libmdbx.dqdkfa.ru/">libmdbx.dqdkfa.ru</a> <span class="verify-tag">⚠️VERIFY</span>
+    (the copy-on-write B-tree + MVCC design Isar sat on).</li>
+  </ul>
+
+  <h2>FFI / C-ABI track</h2>
+  <ul>
+    <li>The Rustonomicon — FFI chapter —
+    <a href="https://doc.rust-lang.org/nomicon/ffi.html">doc.rust-lang.org/nomicon/ffi.html</a>
+    <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li>cbindgen — <a href="https://github.com/mozilla/cbindgen">github.com/mozilla/cbindgen</a>
+    and its book <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">docs.md</a>
+    <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li>dart:ffi — <a href="https://dart.dev/interop/c-interop">dart.dev/interop/c-interop</a>
+    and API <a href="https://api.dart.dev/dart-ffi/dart-ffi-library.html">api.dart.dev/dart-ffi</a>
+    <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li>flutter_rust_bridge — <a href="https://cjycode.com/flutter_rust_bridge/">cjycode.com/flutter_rust_bridge</a>
+    <span class="verify-tag">⚠️VERIFY</span>.</li>
+  </ul>
+
+  <h2>Document-model track</h2>
+  <ul>
+    <li>MongoDB data model — <a href="https://www.mongodb.com/docs/manual/core/data-modeling-introduction/">mongodb.com/docs/manual/core/data-modeling-introduction</a>
+    <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li>MongoDB CRUD — <a href="https://www.mongodb.com/docs/manual/crud/">mongodb.com/docs/manual/crud</a>
+    <span class="verify-tag">⚠️VERIFY</span>.</li>
+    <li>BSON spec — <a href="https://bsonspec.org/">bsonspec.org</a> · MessagePack spec —
+    <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">msgpack spec</a>
+    <span class="verify-tag">⚠️VERIFY</span>.</li>
+  </ul>
+
+  <h2>Rust learning</h2>
+  <ul>
+    <li>✅ <strong>The Rust Programming Language</strong> ("the Book") —
+    <a href="https://doc.rust-lang.org/book/">doc.rust-lang.org/book</a>. Linked just-in-time
+    throughout Phase 0.</li>
+    <li>Rustlings — <a href="https://github.com/rust-lang/rustlings">github.com/rust-lang/rustlings</a>
+    <span class="verify-tag">⚠️VERIFY</span> (small exercises).</li>
+    <li>✅ cstack, <strong>Let's Build a Simple Database</strong> —
+    <a href="https://cstack.github.io/db_tutorial/">cstack.github.io/db_tutorial</a>. Confirmed:
+    written in <strong>C</strong>, ~15 parts (REPL → pager/persistence → cursor → B-tree leaf
+    /split/internal nodes). Hands-on companion; <em>incomplete</em> — we adapt its ideas to Rust.</li>
+  </ul>
+
+  <p class="muted small">If a link 404s or its content has moved, note it on the
+  <a href="verification.html">Verification</a> page so the bibliography stays trustworthy.</p>
+</main>
+<script src="assets/app.js"></script>
+</body>
+</html>

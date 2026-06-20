@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 1 — FFI spike</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 1</div>
+  <span class="pill">Phase 1</span>
+  <h1>FFI spike — de-risk the scariest unknown early</h1>
+  <p class="lead">Before you build a single page or B-tree node, you'll prove the hardest, least
+  familiar part of the whole project actually works: a byte buffer travelling from Rust, across a
+  C ABI, into a running Flutter app — and back. This is a deliberate "spike": a small, focused
+  experiment that retires the biggest risk so the rest of the engine has somewhere safe to land.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Why do this so early?</div>
+    <p>The C ABI / FFI boundary is where most ambitious Rust+Flutter projects quietly die — memory
+    ownership across languages, panics turning into crashes, header generation, build/linking. If
+    you're going to hit a wall, hit it now, on a trivial "echo" program, not after months of engine
+    work. By the end of Phase 1 you'll have a real Flutter app calling real Rust.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 1</div>
+    <p>Expose a Rust function with a stable C ABI, hand out an opaque handle to a Rust object, pass
+    byte buffers in and out with correct ownership and a free function, stop panics from crossing the
+    boundary, report errors as integer codes, generate a C header with cbindgen, and call all of it
+    from Dart with <code>dart:ffi</code>.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p1");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

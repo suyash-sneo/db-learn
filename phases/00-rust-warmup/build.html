@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Build — file-backed key-value store</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:build", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › Build</div>
+  <span class="pill">Build · AI off</span>
+  <h1>Build: a file-backed key-value store CLI</h1>
+  <div class="goal"><b>Goal:</b> Prove you can write real Rust unassisted, and reset the
+  AI-dependence habit. You'll build a persistent string→string key-value store with a tiny CLI. This
+  is your Rust litmus test before the engine begins.</div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ The rule for every Build page</div>
+    <p>Close the AI assistant now. You may use the Rust Book, the std docs, and the <em>Stuck?</em>
+    ladder on this page. You may <strong>not</strong> ask an AI to write any of this. Debugging your
+    own compiler errors by reading them is the skill you're building.</p>
+  </div>
+
+  <h2>Deliverable spec</h2>
+  <p>A crate <code>kvstore</code> exposing a <code>Store</code> type that persists a map of
+  <code>String → String</code> to a single file, plus a CLI binary that drives it. Concretely:</p>
+  <ul>
+    <li><code>Store::open(path)</code> — open an existing store file or create an empty one.</li>
+    <li><code>store.set(key, value)</code> — insert or overwrite, and persist.</li>
+    <li><code>store.get(key)</code> — return <code>Option&lt;String&gt;</code>.</li>
+    <li><code>store.delete(key)</code> — remove a key (return whether it existed), and persist.</li>
+    <li><code>store.keys()</code> — list all keys.</li>
+    <li>A CLI: <code>kvstore set name Ada</code>, <code>kvstore get name</code>,
+    <code>kvstore del name</code>, <code>kvstore list</code> — each opens the file, does one op, exits.</li>
+    <li>Data <strong>survives process restarts</strong> (it's on disk, re-read on <code>open</code>).</li>
+  </ul>
+
+  <div class="box rust">
+    <div class="box-title">Allowed tools</div>
+    <p>Use <code>std::collections::HashMap</code> for the in-memory map,
+    <code>serde</code> + <code>serde_json</code> for persistence (serialize the whole map to the file
+    on each change — simple and correct for this size), and <code>std::fs</code> for the file. This
+    is deliberately the "load whole file" approach; the <em>real</em> engine won't do this, which is
+    exactly the point you'll feel in Phase 2.</p>
+  </div>
+
+  <h2>Ordered milestones</h2>
+  <ol>
+    <li><strong>M1 — In-memory only.</strong> <code>Store</code> wraps a <code>HashMap</code>;
+    <code>set</code>/<code>get</code>/<code>delete</code>/<code>keys</code> work, no file yet. Make the
+    in-memory tests pass.</li>
+    <li><strong>M2 — Persist on change.</strong> <code>open</code> reads the file (or starts empty if
+    missing); every mutation serializes the map back to the file. Make the persistence tests pass.</li>
+    <li><strong>M3 — CLI.</strong> Parse <code>std::env::args()</code>, dispatch to the right method,
+    print results. Manual check.</li>
+    <li><strong>M4 — Robustness.</strong> Missing file is fine (empty store); a get on a missing key
+    returns <code>None</code>, not an error; corrupt file returns a clean <code>Err</code>, not a panic.</li>
+  </ol>
+
+  <h2>Acceptance criteria</h2>
+  <ul>
+    <li><code>cargo test</code> is fully green.</li>
+    <li>Running <code>kvstore set a 1</code> then, in a <em>new</em> process, <code>kvstore get a</code>
+    prints <code>1</code> — proving on-disk persistence.</li>
+    <li>No <code>.unwrap()</code> / <code>.expect()</code> in <code>src/lib.rs</code> outside of tests;
+    fallible operations return <code>Result</code>.</li>
+    <li>Opening a non-existent path creates an empty, usable store without error.</li>
+  </ul>
+
+  <h2>Stub: <code>src/lib.rs</code></h2>
+  <p>Start from these <em>exact</em> signatures. <code>todo!()</code> compiles but panics if reached,
+  so the crate builds and the tests run (and fail) immediately.</p>
+  <span class="code-label">src/lib.rs — implement the todo!()s</span>
+<pre><code><span class="tok-k">use</span> std::collections::HashMap;
+<span class="tok-k">use</span> std::path::{Path, PathBuf};
+
+<span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">pub enum</span> <span class="tok-f">StoreError</span> {
+    <span class="tok-f">Io</span>(std::io::Error),
+    <span class="tok-f">Corrupt</span>(<span class="tok-f">String</span>),
+}
+
+<span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;std::io::Error&gt; <span class="tok-k">for</span> <span class="tok-f">StoreError</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: std::io::Error) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">StoreError</span>::<span class="tok-f">Io</span>(e) }
+}
+
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">StoreError</span>&gt;;
+
+<span class="tok-k">pub struct</span> <span class="tok-f">Store</span> {
+    path: <span class="tok-f">PathBuf</span>,
+    map: <span class="tok-f">HashMap</span>&lt;<span class="tok-f">String</span>, <span class="tok-f">String</span>&gt;,
+}
+
+<span class="tok-k">impl</span> <span class="tok-f">Store</span> {
+    <span class="tok-c">/// Open the store at `path`, loading existing data or starting empty.</span>
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(path: &amp;<span class="tok-f">Path</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Store</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: read the file if it exists, else empty map"</span>)
+    }
+
+    <span class="tok-c">/// Insert or overwrite, then persist.</span>
+    <span class="tok-k">pub fn</span> <span class="tok-f">set</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;<span class="tok-f">str</span>, value: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1 insert; M2 persist"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">get</span>(&amp;<span class="tok-k">self</span>, key: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">Option</span>&lt;<span class="tok-f">String</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: look up &amp; clone the value"</span>)
+    }
+
+    <span class="tok-c">/// Remove `key`; return true if it was present. Persist if changed.</span>
+    <span class="tok-k">pub fn</span> <span class="tok-f">delete</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">bool</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1 remove; M2 persist"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">keys</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">Vec</span>&lt;<span class="tok-f">String</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: collect the keys"</span>)
+    }
+
+    <span class="tok-c">// suggested private helper:</span>
+    <span class="tok-c">// fn persist(&amp;self) -&gt; Result&lt;()&gt; { ... serialize self.map to self.path ... }</span>
+}</code></pre>
+
+  <h2>Failing test suite</h2>
+  <p>Drop this into <code>src/lib.rs</code> (or <code>tests/store.rs</code>). It will not compile until
+  the signatures exist, then it will fail until you implement them. Green = done.</p>
+  <span class="code-label">tests</span>
+<pre><code><span class="tok-m">#[cfg(test)]</span>
+<span class="tok-k">mod</span> tests {
+    <span class="tok-k">use super</span>::*;
+
+    <span class="tok-k">fn</span> <span class="tok-f">tmp</span>(name: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">PathBuf</span> {
+        <span class="tok-k">let mut</span> p = std::env::<span class="tok-f">temp_dir</span>();
+        p.<span class="tok-f">push</span>(<span class="tok-f">format!</span>(<span class="tok-s">"kvstore_test_{}_{}.json"</span>, name, std::process::<span class="tok-f">id</span>()));
+        <span class="tok-k">let</span> _ = std::fs::<span class="tok-f">remove_file</span>(&amp;p);   <span class="tok-c">// clean slate</span>
+        p
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">set_then_get</span>() {
+        <span class="tok-k">let</span> path = <span class="tok-f">tmp</span>(<span class="tok-s">"setget"</span>);
+        <span class="tok-k">let mut</span> s = <span class="tok-f">Store</span>::<span class="tok-f">open</span>(&amp;path).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">set</span>(<span class="tok-s">"name"</span>, <span class="tok-s">"Ada"</span>).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(<span class="tok-s">"name"</span>), <span class="tok-f">Some</span>(<span class="tok-s">"Ada"</span>.<span class="tok-f">to_string</span>()));
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(<span class="tok-s">"missing"</span>), <span class="tok-f">None</span>);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">overwrite</span>() {
+        <span class="tok-k">let</span> path = <span class="tok-f">tmp</span>(<span class="tok-s">"overwrite"</span>);
+        <span class="tok-k">let mut</span> s = <span class="tok-f">Store</span>::<span class="tok-f">open</span>(&amp;path).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">set</span>(<span class="tok-s">"k"</span>, <span class="tok-s">"1"</span>).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">set</span>(<span class="tok-s">"k"</span>, <span class="tok-s">"2"</span>).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(<span class="tok-s">"k"</span>), <span class="tok-f">Some</span>(<span class="tok-s">"2"</span>.<span class="tok-f">to_string</span>()));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">delete_reports_presence</span>() {
+        <span class="tok-k">let</span> path = <span class="tok-f">tmp</span>(<span class="tok-s">"delete"</span>);
+        <span class="tok-k">let mut</span> s = <span class="tok-f">Store</span>::<span class="tok-f">open</span>(&amp;path).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">set</span>(<span class="tok-s">"k"</span>, <span class="tok-s">"v"</span>).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">delete</span>(<span class="tok-s">"k"</span>).<span class="tok-f">unwrap</span>(), <span class="tok-k">true</span>);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">delete</span>(<span class="tok-s">"k"</span>).<span class="tok-f">unwrap</span>(), <span class="tok-k">false</span>);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(<span class="tok-s">"k"</span>), <span class="tok-f">None</span>);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">persists_across_reopen</span>() {     <span class="tok-c">// the important one</span>
+        <span class="tok-k">let</span> path = <span class="tok-f">tmp</span>(<span class="tok-s">"persist"</span>);
+        {
+            <span class="tok-k">let mut</span> s = <span class="tok-f">Store</span>::<span class="tok-f">open</span>(&amp;path).<span class="tok-f">unwrap</span>();
+            s.<span class="tok-f">set</span>(<span class="tok-s">"a"</span>, <span class="tok-s">"1"</span>).<span class="tok-f">unwrap</span>();
+            s.<span class="tok-f">set</span>(<span class="tok-s">"b"</span>, <span class="tok-s">"2"</span>).<span class="tok-f">unwrap</span>();
+        } <span class="tok-c">// s dropped — simulate process exit</span>
+        <span class="tok-k">let</span> s2 = <span class="tok-f">Store</span>::<span class="tok-f">open</span>(&amp;path).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(s2.<span class="tok-f">get</span>(<span class="tok-s">"a"</span>), <span class="tok-f">Some</span>(<span class="tok-s">"1"</span>.<span class="tok-f">to_string</span>()));
+        <span class="tok-m">assert_eq!</span>(s2.<span class="tok-f">get</span>(<span class="tok-s">"b"</span>), <span class="tok-f">Some</span>(<span class="tok-s">"2"</span>.<span class="tok-f">to_string</span>()));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">open_missing_is_empty</span>() {
+        <span class="tok-k">let</span> path = <span class="tok-f">tmp</span>(<span class="tok-s">"missing"</span>);   <span class="tok-c">// tmp() deletes it first</span>
+        <span class="tok-k">let</span> s = <span class="tok-f">Store</span>::<span class="tok-f">open</span>(&amp;path).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert!</span>(s.<span class="tok-f">keys</span>().<span class="tok-f">is_empty</span>());
+    }
+}</code></pre>
+
+  <h2>Stuck? — graduated hints</h2>
+  <p>Use these in order. Each reveals a little more; none writes it for you.</p>
+
+  <details><summary>Stuck on M1 (get returns the wrong type)</summary>
+    <div class="answer"><strong>Nudge:</strong> The map owns its <code>String</code> values. You can't
+    return a reference that outlives the borrow, and the test wants an owned <code>Option&lt;String&gt;</code>.
+    <br><strong>Bigger:</strong> <code>HashMap::get</code> returns <code>Option&lt;&amp;String&gt;</code>.
+    You need to turn the inner <code>&amp;String</code> into a <code>String</code>.
+    <br><strong>Technique:</strong> map over the option and clone — i.e. reach for <code>.cloned()</code>
+    (or <code>.map(|v| v.clone())</code>). Look it up in the <code>Option</code> docs.</div></details>
+
+  <details><summary>Stuck on M2 (reading the file on open)</summary>
+    <div class="answer"><strong>Nudge:</strong> "File might not exist yet" is not an error for you — it
+    just means empty.
+    <br><strong>Bigger:</strong> Check existence (e.g. <code>path.exists()</code>) before reading, or
+    match on the read result and treat a not-found error as "empty map."
+    <br><strong>Technique:</strong> read bytes with <code>std::fs::read</code>, then
+    <code>serde_json::from_slice</code> into a <code>HashMap&lt;String,String&gt;</code>. Map any JSON
+    parse failure to <code>StoreError::Corrupt</code>.</div></details>
+
+  <details><summary>Stuck on M2 (persisting)</summary>
+    <div class="answer"><strong>Nudge:</strong> Simplest correct approach: after every mutation, write
+    the <em>entire</em> map to the file.
+    <br><strong>Bigger:</strong> Write a private <code>persist(&amp;self) -&gt; Result&lt;()&gt;</code> and call
+    it at the end of <code>set</code> and (when something changed) <code>delete</code>.
+    <br><strong>Technique:</strong> <code>serde_json::to_vec(&amp;self.map)?</code> then
+    <code>std::fs::write(&amp;self.path, bytes)?</code>. (Yes, rewriting the whole file every time is
+    wasteful — feel that pain; it's the motivation for paging.)</div></details>
+
+  <details><summary>Stuck on the CLI (M3)</summary>
+    <div class="answer"><strong>Nudge:</strong> <code>std::env::args()</code> yields the program name
+    first, then the arguments.
+    <br><strong>Bigger:</strong> Collect into a <code>Vec&lt;String&gt;</code>, then
+    <code>match</code> on <code>args[1].as_str()</code> for <code>"set"|"get"|"del"|"list"</code>.
+    <br><strong>Technique:</strong> decide a fixed db path (e.g. <code>"kv.json"</code>), open the
+    store, dispatch, and <code>println!</code> the result. Handle wrong arg counts with a usage message.</div></details>
+
+  <details><summary>Stuck: borrow checker fights you in <code>set</code></summary>
+    <div class="answer"><strong>Nudge:</strong> You probably want to insert into <code>self.map</code>
+    and then call <code>self.persist()</code>. Both touch <code>self</code>.
+    <br><strong>Technique:</strong> Do the mutation first (the <code>&amp;mut</code> borrow ends at the
+    statement), <em>then</em> call the persist helper — they don't need to overlap. If you tried to
+    hold a reference into the map across the persist call, drop it first.</div></details>
+
+  <h2>Definition of Done</h2>
+  <ul>
+    <li>☐ All six tests pass with <code>cargo test</code>.</li>
+    <li>☐ <code>kvstore set a 1</code> in one run, <code>kvstore get a</code> in another, prints <code>1</code>.</li>
+    <li>☐ No <code>unwrap</code>/<code>expect</code> in non-test library code.</li>
+    <li>☐ Missing file → empty store; missing key → <code>None</code>; corrupt file → clean <code>Err</code>.</li>
+    <li>☐ You can explain, out loud, why rewriting the whole file on every <code>set</code> is a problem
+    a real engine must avoid. (That explanation is your on-ramp to Phase 2.)</li>
+    <li>☐ <strong>You wrote every line yourself.</strong></li>
+  </ul>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Reflect before moving on</div>
+    <p>This store is correct but does everything the engine <em>won't</em>: it loads the whole dataset
+    into RAM, has no concept of pages, and rewrites the entire file on each change. Hold onto that
+    discomfort — Phase 2 replaces "rewrite the whole file" with "read/write one fixed-size page," and
+    every phase after builds on that.</p>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

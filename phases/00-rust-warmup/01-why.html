@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>0.1 Why I'm building this &amp; how to use it</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:0.1", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › 0.1</div>
+  <h1>0.1 — Why I'm building this &amp; how to use this curriculum</h1>
+  <div class="goal"><b>Goal:</b> Leave this page knowing exactly what you're building, why
+  "from scratch in Rust" is the right call, and the one discipline that makes this whole thing
+  work — AI as tutor, never as author.</div>
+
+  <h2>The thing you're building</h2>
+  <p>A <strong>schemaless, MongoDB-like, single-file, embedded database</strong>, written in Rust,
+  exposing a <strong>C ABI</strong> so any language can call it — with Flutter/Dart as the first
+  consumer. "Embedded" means it runs <em>inside</em> your app, like SQLite, with no server process.
+  "Single-file" means the entire database — documents, indexes, everything — lives in one file on
+  disk. "Schemaless" means you store JSON-ish documents without declaring tables and columns up front.</p>
+
+  <p>That is genuinely ambitious, and you are deliberately <em>not</em> taking the shortcut of
+  wrapping SQLite. You're building the storage engine yourself: the part that decides how bytes are
+  laid out in the file, how they're indexed, and how they survive a crash. SQLite is your
+  <em>teacher</em>, not your foundation.</p>
+
+  <div class="box deeper">
+    <div class="box-title">📌 Decisions already made (the lessons teach toward these)</div>
+    <ul>
+      <li><strong>From-scratch storage engine in Rust</strong> — not a layer over SQLite.</li>
+      <li><strong>B+tree</strong> as the core index — fits the single-file goal. (LSM trees are a
+      valid alternative you'll learn about and could revisit in a v2.)</li>
+      <li><strong>Three layers:</strong> (1) a pure, idiomatic Rust core engine; (2) a thin C ABI
+      shim; (3) language bindings, Dart first.</li>
+      <li><strong>Documents cross the language boundary as serialized byte buffers</strong>
+      (BSON or MessagePack), so the C surface stays tiny.</li>
+    </ul>
+  </div>
+
+  <h2>Why Rust, why from scratch</h2>
+  <p>A storage engine spends its life doing two dangerous things: manipulating raw bytes, and
+  managing memory and concurrency. In C, both are landmines (buffer overruns, use-after-free, data
+  races). In a garbage-collected language, you can't control memory layout tightly enough and you
+  pay latency you don't want in an embedded engine. Rust is the sweet spot: it gives you C-level
+  control over bytes and layout, <em>and</em> a compiler that statically prevents the classic memory
+  bugs. It also produces a clean C ABI, which is exactly what you need for the FFI layer.</p>
+
+  <p><strong>From scratch</strong> because the goal isn't "ship a database fast" — it's
+  <em>understand databases deeply enough to have built one</em>. Wrapping SQLite would teach you its
+  API, not its internals. Writing the pager, the B+tree, the freelist, and the WAL yourself is the
+  only way the knowledge becomes yours.</p>
+
+  <h2>The one rule: AI as tutor, never author</h2>
+  <p>Be honest about the trap you're climbing out of: over-relying on AI to write code wrecked your
+  focus and hollowed out your understanding. This project is the cure, and it only works if you
+  enforce a single rule.</p>
+
+  <div class="box rust">
+    <div class="box-title">📐 The rule</div>
+    <p><strong>You write every line of the database yourself.</strong> AI explains concepts, reviews
+    your code, and answers "why does this compile error happen" — it never hands you a working pager,
+    B+tree, freelist, WAL, query evaluator, or C-ABI function.</p>
+  </div>
+
+  <p>This curriculum is built to <em>enforce</em> that. Lesson pages teach concepts in full. But every
+  <strong>Build</strong> page gives you only: a spec, ordered milestones, acceptance criteria, a
+  <em>failing</em> test suite, and <code>todo!()</code> stubs to implement against. There is never a
+  reference implementation of a database component anywhere in here. If you could paste a page's
+  contents and get a working engine, the page would have failed its job.</p>
+
+  <p>When you're stuck on a Build, you have two legitimate moves: (1) use the graduated
+  <em>Stuck?</em> hint ladder on that page, which nudges → nudges harder → names the technique, but
+  never writes the solution; (2) ask AI to explain the <em>concept</em> or debug <em>your</em> code —
+  not to produce the component. The difference between "explain why my split logic loses a key" and
+  "write the split function" is the entire difference between this project working and not.</p>
+
+  <h2>How the curriculum is structured</h2>
+  <ul>
+    <li><strong>Phases are an ordering, not a schedule.</strong> No day/week targets. You move when
+    you understand, not when a calendar says so.</li>
+    <li><strong>Lessons are self-contained, ~10–20 minutes.</strong> Each one teaches its concept
+    from the page alone — you shouldn't need the book or a video open to follow it. The
+    <em>Go deeper / verify</em> box at the end tells you where the same material lives if you want
+    more depth.</li>
+    <li><strong>Builds are AI-off.</strong> When you hit a <code>build.html</code>, that's the
+    deliverable for the phase. Close the assistant and implement.</li>
+    <li><strong>Two reference tracks run throughout.</strong> The <em>lower / storage track</em> uses
+    <strong>SQLite</strong> (its file format, WAL, locking, and public-domain source). The
+    <em>upper / document track</em> uses <strong>Isar</strong>, a real Rust embedded NoSQL DB for
+    Flutter, for the document model and the Rust↔Dart boundary.</li>
+  </ul>
+
+  <h2>How to read the trust markers</h2>
+  <p>A database is built out of <em>exact</em> facts: byte offsets, header sizes, default page sizes,
+  algorithm steps. AI can state any of these wrongly with full confidence. So this curriculum makes
+  its claims checkable:</p>
+  <ul>
+    <li>A precise claim carries an inline pointer like
+    <span class="src">[src: SQLite fileformat2.html §1.3]</span> — go there to confirm it.</li>
+    <li>Anything reconstructed from memory wears a <span class="verify-tag">⚠️VERIFY</span> tag.
+    Treat it as unconfirmed until you've checked the primary source. The
+    <a href="../../verification.html">Verification page</a> collects every one of these into a single
+    checklist for your review pass.</li>
+  </ul>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why not just build this on top of SQLite and save months?</p>
+      <details><summary>Show answer</summary><div class="answer">Because the goal is to understand
+      database internals deeply enough to have built one. Wrapping SQLite teaches its API, not how a
+      storage engine actually works. The pager, B+tree, freelist, and WAL are the learning.</div></details>
+
+      <p class="q">2. You're stuck on the B+tree split during a Build. Which of these is allowed:
+      (a) ask AI to write the split function, (b) ask AI why your split drops a key, (c) read the
+      Stuck? hints?</p>
+      <details><summary>Show answer</summary><div class="answer">(b) and (c). Asking AI to debug
+      <em>your</em> code or explain a concept is tutoring. Asking it to <em>write the component</em>
+      is authoring — the one thing the rule forbids.</div></details>
+
+      <p class="q">3. A lesson says "the page size defaults to 4096 bytes" with a
+      <span class="verify-tag">⚠️VERIFY</span> tag. What should you do before hard-coding 4096?</p>
+      <details><summary>Show answer</summary><div class="answer">Confirm it against the primary
+      source (the SQLite file-format doc) — and note that <em>your</em> engine can pick its own
+      default anyway. The tag means "don't trust this number on my say-so."</div></details>
+
+      <p class="q">4. Why does the C ABI keep documents as opaque byte buffers instead of exposing
+      a rich struct API?</p>
+      <details><summary>Show answer</summary><div class="answer">To keep the C surface tiny and
+      stable. A schemaless document has no fixed shape, so serializing it to bytes (BSON/MessagePack)
+      lets one buffer-in/buffer-out function carry any document across the boundary.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> <em>Database Internals</em> (Petrov), Preface &amp; Ch.1 — what a
+      storage engine is and where it sits.</li>
+      <li><strong>Course:</strong> CMU 15-445, the opening "Course Introduction / Relational Model"
+      lecture for framing (we diverge into document storage). <span class="verify-tag">⚠️VERIFY</span> lecture title/order.</li>
+      <li><strong>Doc:</strong> SQLite architecture overview —
+      <a href="https://www.sqlite.org/arch.html">sqlite.org/arch.html</a> (the layered design you're echoing).</li>
+      <li><strong>Repo:</strong> Isar — <a href="https://github.com/isar/isar">github.com/isar/isar</a>
+      <span class="verify-tag">⚠️VERIFY</span> (your document-track reference).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

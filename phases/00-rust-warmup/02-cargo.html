@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>0.2 Rust + Cargo setup &amp; running tests</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:0.2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › 0.2</div>
+  <h1>0.2 — Rust + Cargo setup, project layout, running tests</h1>
+  <div class="goal"><b>Goal:</b> Install Rust, create a project, understand the file layout Cargo
+  gives you, and run your first test — so that when a Build page says "make this failing test pass,"
+  you know exactly what to type.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Your whole workflow for the engine is <em>test-driven</em>: every Build page hands you failing
+  tests and stubs, and you implement until <code>cargo test</code> is green. So before any database
+  ideas, you need the loop — write code, run tests, read failures — to be second nature.</p>
+
+  <h2>Installing Rust</h2>
+  <p>Rust is installed via <code>rustup</code>, which manages the compiler (<code>rustc</code>), the
+  build tool/package manager (<code>cargo</code>), and toolchain versions. On macOS/Linux:</p>
+  <span class="code-label">terminal</span>
+<pre><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# then restart your shell, or:  source "$HOME/.cargo/env"
+
+rustc --version    # e.g. rustc 1.x.y
+cargo --version</code></pre>
+  <p><span class="verify-tag">⚠️VERIFY</span> the install command against
+  <a href="https://www.rust-lang.org/tools/install">rust-lang.org/tools/install</a> — it occasionally
+  changes. Everything else here is stable.</p>
+
+  <h2>What Cargo is</h2>
+  <p>Coming from Flutter, the mental model is easy: <strong>Cargo is to Rust what
+  <code>pub</code>/<code>flutter</code> + <code>pubspec.yaml</code> are to Dart.</strong> It creates
+  projects, downloads dependencies ("crates"), builds, tests, and runs. A "crate" is Rust's unit of
+  a package/library, the equivalent of a Dart package.</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>You want to…</th><th>Flutter/Dart</th><th>Rust/Cargo</th></tr></thead>
+    <tbody>
+      <tr><td>Create a project</td><td><code>flutter create</code></td><td><code>cargo new</code></td></tr>
+      <tr><td>Declare deps</td><td><code>pubspec.yaml</code></td><td><code>Cargo.toml</code></td></tr>
+      <tr><td>Lockfile</td><td><code>pubspec.lock</code></td><td><code>Cargo.lock</code></td></tr>
+      <tr><td>Fetch deps</td><td><code>pub get</code></td><td><code>cargo build</code> (auto)</td></tr>
+      <tr><td>Run</td><td><code>flutter run</code></td><td><code>cargo run</code></td></tr>
+      <tr><td>Test</td><td><code>flutter test</code></td><td><code>cargo test</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Creating your first project</h2>
+  <span class="code-label">terminal</span>
+<pre><code>cargo new kvstore        # a binary (has main.rs)
+# or for a library:
+cargo new mylib --lib    # a library (has lib.rs)
+
+cd kvstore
+cargo run                # builds + runs; prints "Hello, world!"</code></pre>
+
+  <h2>The project layout Cargo gives you</h2>
+  <figure>
+  <svg viewBox="0 0 560 300" role="img" aria-label="Cargo project directory tree">
+    <rect class="dg-bg" x="0" y="0" width="560" height="300" rx="10"/>
+    <text class="dg-txt-m" x="24" y="40">kvstore/</text>
+    <text class="dg-txt-m" x="48" y="68">├─ Cargo.toml</text>
+    <text class="dg-txt-s" x="220" y="68">package name, version, dependencies</text>
+    <text class="dg-txt-m" x="48" y="96">├─ Cargo.lock</text>
+    <text class="dg-txt-s" x="220" y="96">exact resolved versions (commit this)</text>
+    <text class="dg-txt-m" x="48" y="124">├─ src/</text>
+    <text class="dg-txt-m" x="72" y="152">│  ├─ main.rs</text>
+    <text class="dg-txt-s" x="220" y="152">binary entry point — fn main()</text>
+    <text class="dg-txt-m" x="72" y="180">│  └─ lib.rs</text>
+    <text class="dg-txt-s" x="220" y="180">library code (add this when you split out logic)</text>
+    <text class="dg-txt-m" x="48" y="208">├─ tests/</text>
+    <text class="dg-txt-s" x="220" y="208">integration tests (each file = its own crate)</text>
+    <text class="dg-txt-m" x="48" y="236">└─ target/</text>
+    <text class="dg-txt-s" x="220" y="236">build output (gitignore this)</text>
+    <text class="dg-txt-s" x="24" y="278">Library + binary can coexist: lib.rs holds the logic, main.rs is a thin shell over it.</text>
+  </svg>
+  <figcaption>The standard Cargo layout. For the engine you'll keep logic in <code>lib.rs</code> /
+  modules and keep binaries thin.</figcaption>
+  </figure>
+
+  <h3>Cargo.toml</h3>
+  <span class="code-label">Cargo.toml</span>
+<pre><code><span class="tok-c"># package metadata</span>
+[package]
+name = <span class="tok-s">"kvstore"</span>
+version = <span class="tok-s">"0.1.0"</span>
+edition = <span class="tok-s">"2021"</span>   <span class="tok-c"># the Rust "edition" — language epoch; 2021 is a safe default ⚠️VERIFY latest</span>
+
+<span class="tok-c"># dependencies (crates from crates.io)</span>
+[dependencies]
+serde = { version = <span class="tok-s">"1"</span>, features = [<span class="tok-s">"derive"</span>] }
+serde_json = <span class="tok-s">"1"</span></code></pre>
+
+  <h2>The test loop — the most important thing in this lesson</h2>
+  <p>Rust has testing <em>built in</em>. You don't need a framework. A test is a function annotated
+  with <code>#[test]</code> that panics on failure (usually via an assertion macro). You can put
+  tests right next to the code in a <code>#[cfg(test)] mod tests</code> block.</p>
+
+  <span class="code-label">src/lib.rs</span>
+<pre><code><span class="tok-k">pub fn</span> <span class="tok-f">add</span>(a: <span class="tok-f">i64</span>, b: <span class="tok-f">i64</span>) -&gt; <span class="tok-f">i64</span> {
+    a + b
+}
+
+<span class="tok-c">// Only compiled when running tests, thanks to #[cfg(test)].</span>
+<span class="tok-m">#[cfg(test)]</span>
+<span class="tok-k">mod</span> tests {
+    <span class="tok-k">use super</span>::*;          <span class="tok-c">// bring add() into scope</span>
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">adds_two_numbers</span>() {
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">add</span>(2, 3), 5);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">handles_negatives</span>() {
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">add</span>(-4, 1), -3);
+    }
+}</code></pre>
+
+  <span class="code-label">terminal</span>
+<pre><code>cargo test                    <span class="tok-c"># run every test</span>
+cargo test adds_two           <span class="tok-c"># run tests whose name contains "adds_two"</span>
+cargo test -- --nocapture     <span class="tok-c"># show println! output even on passing tests</span></code></pre>
+
+  <p>A failing test looks like this — learn to read it, because you'll see it constantly:</p>
+<pre><code>---- tests::adds_two_numbers stdout ----
+thread 'tests::adds_two_numbers' panicked at src/lib.rs:14:9:
+assertion `left == right` failed
+  left: 6
+ right: 5</code></pre>
+  <p>It tells you the test, the file:line, and (for <code>assert_eq!</code>) the actual
+  (<code>left</code>) vs expected (<code>right</code>) values. This is the entire Build workflow:
+  run, read the panic, fix, repeat.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>fn name(args) -&gt; ReturnType { … }</code> declares a function. No return keyword
+      needed: the last <em>expression</em> (no semicolon) is the return value.</li>
+      <li><code>pub</code> makes an item public (visible outside its module) — like <em>not</em>
+      prefixing with <code>_</code> in Dart, but explicit.</li>
+      <li><code>#[...]</code> is an <strong>attribute</strong> — metadata the compiler reads.
+      <code>#[test]</code>, <code>#[cfg(test)]</code>, and later <code>#[derive(...)]</code> are all attributes.</li>
+      <li>Names ending in <code>!</code> (<code>assert_eq!</code>, <code>println!</code>) are
+      <strong>macros</strong>, not functions. For now: treat them as built-in helpers.</li>
+      <li>Read more: <a href="https://doc.rust-lang.org/book/ch01-00-getting-started.html">Book Ch.1</a>
+      (setup) and <a href="https://doc.rust-lang.org/book/ch11-00-testing.html">Book Ch.11</a> (testing).</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What does <code>#[cfg(test)]</code> on a module mean?</p>
+      <details><summary>Show answer</summary><div class="answer">That module is only compiled when you
+      run tests, so your test code (and any test-only helpers) doesn't bloat the real build.</div></details>
+
+      <p class="q">2. In <code>assert_eq!(add(2,3), 5)</code>, when it fails the output shows
+      <code>left</code> and <code>right</code>. Which is your code's output?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>left</code> is the first
+      argument — your actual result. <code>right</code> is the expected value.</div></details>
+
+      <p class="q">3. You want to see <code>println!</code> debug output from a test that's passing.
+      What flag?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>cargo test -- --nocapture</code>.
+      By default Rust captures (hides) stdout from passing tests.</div></details>
+
+      <p class="q">4. Why keep engine logic in <code>lib.rs</code> rather than <code>main.rs</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">Library code can be tested by the
+      <code>tests/</code> directory and reused by multiple binaries — and crucially, later compiled
+      into a C-ABI <code>cdylib</code>. A binary's <code>main.rs</code> can't be linked into by other code.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> Ch.1 (Getting Started), Ch.7 (packages/crates/modules), Ch.11 (writing tests).</li>
+      <li><strong>Doc:</strong> The Cargo Book — <a href="https://doc.rust-lang.org/cargo/">doc.rust-lang.org/cargo</a> <span class="verify-tag">⚠️VERIFY</span>.</li>
+      <li><strong>Hands-on:</strong> Rustlings <code>intro</code> exercises to get the loop in your fingers.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

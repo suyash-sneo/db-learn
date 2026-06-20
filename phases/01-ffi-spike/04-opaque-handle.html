@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>1.4 The opaque-handle pattern</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1:1.4", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.4</div>
+  <h1>1.4 — The opaque-handle pattern (<code>Box::into_raw</code> / <code>from_raw</code>)</h1>
+  <div class="goal"><b>Goal:</b> Learn the single most important pattern in your whole C ABI: how to
+  hand the caller a pointer to a Rust object they can hold and pass back, without exposing any of its
+  internals — and how to give it back to Rust to be freed correctly.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>The caller needs something that <em>represents an open database</em> — to pass to
+  <code>insert</code>, <code>find</code>, <code>close</code>. That "something" is an <strong>opaque
+  handle</strong>: a pointer to your real Rust <code>Db</code> struct that the caller treats as a
+  meaningless token. They never see its fields, never know its size — they just keep the pointer and
+  give it back. This is exactly how <code>sqlite3 *</code> works, and it's the backbone of Layer 2.</p>
+
+  <h2>The problem it solves</h2>
+  <p>You have a rich Rust type — <code>Db { pager, btree, cache, … }</code> — full of <code>Vec</code>s,
+  <code>HashMap</code>s, and other non-C types. You can't pass that across the C ABI by value (C has no
+  idea how to lay it out, and you don't want to expose it). But the caller needs a persistent reference
+  to it across many calls. Solution: keep the object on the Rust heap, and give the caller only its
+  <em>address</em> as an opaque pointer.</p>
+
+  <h2>The lifecycle: into_raw on create, from_raw on destroy</h2>
+  <p>Three moves make up the pattern:</p>
+  <ol>
+    <li><strong>Box it</strong> — put the object on the heap with <code>Box::new(...)</code>.</li>
+    <li><strong>Leak it out</strong> — <code>Box::into_raw</code> converts the <code>Box</code> into a
+    raw pointer <em>and tells Rust to stop managing it</em> (so it won't be freed when the function
+    returns). You hand this pointer to C.</li>
+    <li><strong>Reclaim it</strong> — when the caller is done, they pass the pointer back to your
+    <code>close</code> function, which uses <code>Box::from_raw</code> to rebuild the <code>Box</code>.
+    Now Rust manages it again, and dropping that <code>Box</code> frees the object correctly.</li>
+  </ol>
+
+  <figure>
+  <svg viewBox="0 0 560 240" role="img" aria-label="Box into_raw hands a pointer to C; from_raw reclaims and frees it">
+    <rect class="dg-bg" x="0" y="0" width="560" height="240" rx="10"/>
+    <text class="dg-txt" x="20" y="30" font-weight="700">open():</text>
+    <rect class="dg-box-a" x="20" y="40" width="150" height="40" rx="8"/>
+    <text class="dg-txt-s" x="95" y="64" text-anchor="middle">Box::new(Db{…})</text>
+    <path class="dg-arrow" d="M172,60 L236,60" marker-end="url(#a14)"/>
+    <text class="dg-txt-s" x="204" y="52" text-anchor="middle">into_raw</text>
+    <rect class="dg-box" x="240" y="40" width="120" height="40" rx="8"/>
+    <text class="dg-txt-s" x="300" y="64" text-anchor="middle">*mut Db</text>
+    <path class="dg-arrow" d="M362,60 L430,60" marker-end="url(#a14)"/>
+    <rect class="dg-box" x="434" y="40" width="106" height="40" rx="8"/>
+    <text class="dg-txt-s" x="487" y="64" text-anchor="middle">Dart holds it</text>
+
+    <text class="dg-txt-s" x="20" y="118">— Dart keeps the opaque pointer and passes it to every call —</text>
+    <rect class="dg-box" x="434" y="128" width="106" height="36" rx="8"/>
+    <text class="dg-txt-s" x="487" y="151" text-anchor="middle">insert(ptr,…)</text>
+    <text class="dg-txt-s" x="200" y="151">inside Rust: &amp;*ptr → use the Db, don't free</text>
+
+    <text class="dg-txt" x="20" y="200" font-weight="700">close():</text>
+    <rect class="dg-box" x="80" y="180" width="120" height="40" rx="8"/>
+    <text class="dg-txt-s" x="140" y="204" text-anchor="middle">*mut Db</text>
+    <path class="dg-arrow" d="M202,200 L266,200" marker-end="url(#a14)"/>
+    <text class="dg-txt-s" x="234" y="192" text-anchor="middle">from_raw</text>
+    <rect class="dg-box-a" x="270" y="180" width="150" height="40" rx="8"/>
+    <text class="dg-txt-s" x="345" y="204" text-anchor="middle">Box&lt;Db&gt; → dropped → freed</text>
+    <defs><marker id="a14" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>into_raw leaks the box out to C; from_raw pulls it back so Rust can drop (free) it.</figcaption>
+  </figure>
+
+  <h2>The code shape</h2>
+  <p>This is FFI plumbing (not a database component), so it's fine to show the pattern in full:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">pub struct</span> <span class="tok-f">Db</span> { <span class="tok-c">/* your real engine state */</span> }
+
+<span class="tok-c">// CREATE: heap-allocate, hand out the pointer, stop managing it.</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_open</span>() -&gt; *<span class="tok-k">mut</span> <span class="tok-f">Db</span> {
+    <span class="tok-k">let</span> db = <span class="tok-f">Box</span>::<span class="tok-f">new</span>(<span class="tok-f">Db</span> { <span class="tok-c">/* … */</span> });
+    <span class="tok-f">Box</span>::<span class="tok-f">into_raw</span>(db)        <span class="tok-c">// pointer escapes; Rust won't free it now</span>
+}
+
+<span class="tok-c">// USE: borrow the object from the pointer WITHOUT taking ownership.</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_do_thing</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span> 1; }
+    <span class="tok-k">let</span> db: &amp;<span class="tok-k">mut</span> <span class="tok-f">Db</span> = <span class="tok-k">unsafe</span> { &amp;<span class="tok-k">mut</span> *db };  <span class="tok-c">// reborrow; does NOT free</span>
+    <span class="tok-c">// … use db …</span>
+    0
+}
+
+<span class="tok-c">// DESTROY: reclaim ownership so the Box drops and frees the Db.</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_close</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) {
+    <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span>; }
+    <span class="tok-k">unsafe</span> { <span class="tok-k">let</span> _ = <span class="tok-f">Box</span>::<span class="tok-f">from_raw</span>(db); }   <span class="tok-c">// rebuilt Box drops here → freed</span>
+}</code></pre>
+  <p>Read the three carefully: <code>into_raw</code> is "ownership <em>out</em>," <code>from_raw</code>
+  is "ownership <em>back in</em>," and the use-case in the middle only <em>borrows</em>
+  (<code>&amp;mut *db</code>) so it never frees anything.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ The three rules that prevent disaster</div>
+    <ul>
+      <li><strong>Borrow in use, own in close.</strong> If <code>db_do_thing</code> accidentally did
+      <code>Box::from_raw</code>, it'd free the Db while the caller still holds the pointer →
+      use-after-free on the next call. Use <code>&amp;*</code> / <code>&amp;mut *</code> to borrow.</li>
+      <li><strong>Free exactly once.</strong> Calling <code>db_close</code> twice → double-free. The
+      caller owns the lifecycle; document it loudly.</li>
+      <li><strong>Null after free (on the caller side).</strong> Dart should drop its reference / set it
+      to null after <code>close</code> so it can't be reused.</li>
+    </ul>
+  </div>
+
+  <h2>Why "opaque"?</h2>
+  <p>From C/Dart's perspective the pointer points at an <em>incomplete type</em> — declared but never
+  defined. The header says <code>typedef struct Db Db;</code> with no fields. The caller literally
+  cannot read or construct a <code>Db</code>; they can only pass the pointer to your functions. That
+  opacity is a feature: you can change <code>Db</code>'s internals freely without breaking the ABI, and
+  the caller can't corrupt your invariants. cbindgen (Lesson 1.8) generates exactly this opaque
+  declaration for you.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>Box&lt;T&gt;</code> is a smart pointer that owns a heap allocation; dropping the
+      <code>Box</code> frees it. <code>into_raw</code>/<code>from_raw</code> are how you temporarily
+      step <em>outside</em> that automatic management.</li>
+      <li><code>let _ = ...;</code> binds-and-immediately-drops — here it makes the "rebuild the Box just
+      to drop it" intent explicit.</li>
+      <li><code>&amp;mut *ptr</code> is a "reborrow": create a reference from a raw pointer. Only valid
+      inside <code>unsafe</code>, and only if the pointer is truly valid (hence the null check).</li>
+      <li>Read more: <code>std::boxed::Box</code> docs (<code>into_raw</code>/<code>from_raw</code>);
+      Rustonomicon on FFI object lifecycles. <span class="verify-tag">⚠️VERIFY</span> exact doc URLs.</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What does <code>Box::into_raw</code> do to Rust's ownership of the object?</p>
+      <details><summary>Show answer</summary><div class="answer">It releases Rust's automatic management:
+      the object stays alive on the heap and won't be freed until someone calls <code>from_raw</code> to
+      take ownership back. You've "leaked" it deliberately.</div></details>
+
+      <p class="q">2. Why must a "use" function borrow (<code>&amp;mut *ptr</code>) rather than
+      <code>from_raw</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">Because <code>from_raw</code> takes
+      ownership, and the resulting Box would be dropped at function end — freeing the object the caller
+      still holds a pointer to (use-after-free). Borrowing leaves ownership where it is.</div></details>
+
+      <p class="q">3. What goes wrong if the caller calls <code>db_close</code> twice?</p>
+      <details><summary>Show answer</summary><div class="answer">Double-free / undefined behavior. The
+      lifecycle must be exactly one open ↔ one close; the caller is responsible, and you document it.</div></details>
+
+      <p class="q">4. Why is it valuable that C sees <code>Db</code> as an incomplete (opaque) type?</p>
+      <details><summary>Show answer</summary><div class="answer">The caller can't read or build a
+      <code>Db</code>, so they can't break your invariants, and you can change its internals without
+      changing the ABI. The pointer is just a token.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Doc:</strong> <code>Box::into_raw</code> / <code>Box::from_raw</code> in std; the
+      Rustonomicon FFI chapter's object-passing section. <span class="verify-tag">⚠️VERIFY</span> URLs.</li>
+      <li><strong>Source:</strong> SQLite's <code>sqlite3 *</code> handle is the canonical real-world
+      example (Phase 8 studies <code>sqlite3.h</code>). <span class="verify-tag">⚠️VERIFY</span></li>
+      <li><strong>Forward link:</strong> 1.5 (passing byte buffers through these functions), 1.6 (wrapping
+      each in <code>catch_unwind</code>), 8.1–8.2 (the full handle-based API).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

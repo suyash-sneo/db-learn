@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>0.7 Collections &amp; byte buffers</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:0.7", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › 0.7</div>
+  <h1>0.7 — Collections: <code>Vec</code>, <code>HashMap</code>, slices &amp; byte buffers</h1>
+  <div class="goal"><b>Goal:</b> Get fluent with <code>Vec&lt;T&gt;</code>, <code>HashMap</code>,
+  slices, and especially <strong>byte buffers</strong> (<code>&amp;[u8]</code> /
+  <code>Vec&lt;u8&gt;</code>) — because a storage engine is, at bottom, a machine for moving bytes
+  in and out of fixed-size buffers.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>A page is a <code>Vec&lt;u8&gt;</code> (or fixed array) of, say, 4096 bytes. The buffer pool is a
+  <code>HashMap&lt;u32, Page&gt;</code> mapping page number → cached page. Reading a record means
+  slicing bytes out of a page. Writing one means copying bytes into the right offset. If you're
+  comfortable with these four things, the pager is mostly mechanical.</p>
+
+  <h2><code>Vec&lt;T&gt;</code> — a growable array</h2>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">let mut</span> v: <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt; = <span class="tok-f">Vec</span>::<span class="tok-f">new</span>();
+v.<span class="tok-f">push</span>(10);
+v.<span class="tok-f">push</span>(20);
+<span class="tok-k">let</span> first = v[0];              <span class="tok-c">// index (panics if out of range)</span>
+<span class="tok-k">let</span> maybe = v.<span class="tok-f">get</span>(99);          <span class="tok-c">// Option&lt;&amp;i64&gt; — safe, returns None</span>
+<span class="tok-k">let</span> n = v.<span class="tok-f">len</span>();
+
+<span class="tok-c">// the vec! macro builds and fills in one step:</span>
+<span class="tok-k">let</span> zeros = <span class="tok-f">vec!</span>[0u8; 4096];   <span class="tok-c">// 4096 bytes, all 0 — a blank page</span></code></pre>
+  <p><code>v[i]</code> panics on a bad index; <code>v.get(i)</code> returns an <code>Option</code> so
+  you can handle absence. In engine code that parses untrusted bytes, prefer <code>.get()</code> and
+  range checks — a malformed file shouldn't crash you.</p>
+
+  <h2>Slices — a borrowed window into a sequence</h2>
+  <p>A <strong>slice</strong> <code>&amp;[T]</code> is a reference to a contiguous run of elements —
+  a (pointer, length) pair, no ownership, no copy. Slicing a page to read a record is the single most
+  common operation you'll do.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">let</span> page: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; = <span class="tok-f">vec!</span>[0u8; 4096];
+<span class="tok-k">let</span> header: &amp;[<span class="tok-f">u8</span>] = &amp;page[0..16];     <span class="tok-c">// first 16 bytes (no copy)</span>
+<span class="tok-k">let</span> body:   &amp;[<span class="tok-f">u8</span>] = &amp;page[16..];      <span class="tok-c">// 16 to end</span>
+<span class="tok-m">println!</span>(<span class="tok-s">"{} {}"</span>, header.<span class="tok-f">len</span>(), body.<span class="tok-f">len</span>());</code></pre>
+  <div class="box warn">
+    <div class="box-title">⚠️ Slice ranges panic if out of bounds</div>
+    <p><code>&amp;page[0..5000]</code> on a 4096-byte page panics. When offsets come from data you're
+    parsing, validate first or use <code>page.get(start..end)</code> which returns an
+    <code>Option&lt;&amp;[u8]</code>.</p>
+  </div>
+
+  <figure>
+  <svg viewBox="0 0 560 170" role="img" aria-label="A Vec of bytes with two slices windowing into it">
+    <rect class="dg-bg" x="0" y="0" width="560" height="170" rx="10"/>
+    <text class="dg-txt" x="20" y="34" font-weight="700">page: Vec&lt;u8&gt; (owns 4096 bytes on the heap)</text>
+    <rect class="dg-box" x="20" y="48" width="520" height="34" rx="5"/>
+    <line x1="180" y1="48" x2="180" y2="82" class="dg-line"/>
+    <text class="dg-txt-s" x="95" y="70" text-anchor="middle">bytes 0..16</text>
+    <text class="dg-txt-s" x="360" y="70" text-anchor="middle">bytes 16..4096</text>
+    <rect class="dg-box-a" x="20" y="104" width="160" height="30" rx="5"/>
+    <text class="dg-txt-s" x="100" y="124" text-anchor="middle">&amp;page[0..16]  (header slice)</text>
+    <rect class="dg-box-a" x="200" y="104" width="220" height="30" rx="5"/>
+    <text class="dg-txt-s" x="310" y="124" text-anchor="middle">&amp;page[16..]  (body slice)</text>
+    <path class="dg-line" d="M100,104 L100,82"/><path class="dg-line" d="M310,104 L360,82"/>
+    <text class="dg-txt-s" x="20" y="158">Slices borrow — they point into the Vec without copying. The Vec still owns the data.</text>
+  </svg>
+  <figcaption>A slice is a borrowed (pointer, length) window. Reading records = slicing pages.</figcaption>
+  </figure>
+
+  <h2>Byte buffers: <code>Vec&lt;u8&gt;</code> and <code>&amp;[u8]</code></h2>
+  <p>These are your bread and butter. <code>u8</code> is an 8-bit unsigned byte. A
+  <code>Vec&lt;u8&gt;</code> is an owned, growable buffer; <code>&amp;[u8]</code> is a borrowed view.
+  Conventions you'll lean on:</p>
+  <ul>
+    <li><strong>Take <code>&amp;[u8]</code> for "read these bytes"</strong> and
+    <strong>return / take <code>Vec&lt;u8&gt;</code> for "here are owned bytes."</strong> This is the
+    same convention as <code>&amp;str</code> vs <code>String</code>.</li>
+    <li>Copy a slice into an owned buffer with <code>.to_vec()</code>.</li>
+    <li>Write bytes into an existing buffer at an offset with
+    <code>buf[off..off+n].copy_from_slice(src)</code> (lengths must match).</li>
+  </ul>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-c">// read a u32 page number stored little-endian at offset 0</span>
+<span class="tok-k">fn</span> <span class="tok-f">read_u32_le</span>(buf: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">u32</span> {
+    <span class="tok-f">u32</span>::<span class="tok-f">from_le_bytes</span>([buf[0], buf[1], buf[2], buf[3]])
+}
+
+<span class="tok-c">// write a u32 into a buffer at offset `off`</span>
+<span class="tok-k">fn</span> <span class="tok-f">write_u32_le</span>(buf: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>], off: <span class="tok-f">usize</span>, val: <span class="tok-f">u32</span>) {
+    buf[off..off + 4].<span class="tok-f">copy_from_slice</span>(&amp;val.<span class="tok-f">to_le_bytes</span>());
+}</code></pre>
+  <p><code>to_le_bytes</code>/<code>from_le_bytes</code> convert between integers and their byte
+  representation (little-endian here). Choosing and <em>fixing</em> an endianness for your file format
+  is a real decision you'll make in Phase 2 — these are the methods you'll use.</p>
+
+  <h2><code>HashMap&lt;K, V&gt;</code> — key→value lookup</h2>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">use</span> std::collections::HashMap;
+
+<span class="tok-k">let mut</span> cache: <span class="tok-f">HashMap</span>&lt;<span class="tok-f">u32</span>, <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; = <span class="tok-f">HashMap</span>::<span class="tok-f">new</span>();
+cache.<span class="tok-f">insert</span>(1, <span class="tok-f">vec!</span>[0u8; 4096]);    <span class="tok-c">// page 1 → its bytes</span>
+
+<span class="tok-k">if let</span> <span class="tok-f">Some</span>(page) = cache.<span class="tok-f">get</span>(&amp;1) {  <span class="tok-c">// Option&lt;&amp;Vec&lt;u8&gt;&gt;</span>
+    <span class="tok-m">println!</span>(<span class="tok-s">"cached, {} bytes"</span>, page.<span class="tok-f">len</span>());
+}
+<span class="tok-k">let</span> entry = cache.<span class="tok-f">entry</span>(2).<span class="tok-f">or_insert_with</span>(|| <span class="tok-f">vec!</span>[0u8; 4096]); <span class="tok-c">// get-or-create</span></code></pre>
+  <p>Keys must implement <code>Eq + Hash</code> (recall Lesson 0.6 — derive them). The
+  <code>entry</code> API ("get the slot for this key, inserting a default if absent") is exactly the
+  pattern a buffer pool uses to load-on-miss.</p>
+
+  <h3>Iterating</h3>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">for</span> b <span class="tok-k">in</span> &amp;buf { <span class="tok-c">/* b: &amp;u8, read each byte */</span> }
+<span class="tok-k">for</span> (i, b) <span class="tok-k">in</span> buf.<span class="tok-f">iter</span>().<span class="tok-f">enumerate</span>() { <span class="tok-c">/* i: index, b: &amp;u8 */</span> }
+<span class="tok-k">let</span> total: <span class="tok-f">u64</span> = nums.<span class="tok-f">iter</span>().<span class="tok-f">map</span>(|&amp;x| x <span class="tok-k">as</span> <span class="tok-f">u64</span>).<span class="tok-f">sum</span>();</code></pre>
+  <p><code>|x| …</code> is a <strong>closure</strong> (an anonymous function). Iterator chains
+  (<code>.iter().map().filter().collect()</code>) are idiomatic and compile down to tight loops.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>Fixed-size array vs <code>Vec</code>: <code>[u8; 4096]</code> is a stack array with a
+      compile-time length; <code>Vec&lt;u8&gt;</code> is heap-allocated and growable. Pages can be
+      either; a fixed array makes "this is exactly 4096 bytes" a type-level guarantee.</li>
+      <li><code>&amp;str</code> (borrowed string slice) is to <code>String</code> as <code>&amp;[u8]</code>
+      is to <code>Vec&lt;u8&gt;</code>. A <code>String</code> is just a <code>Vec&lt;u8&gt;</code> known to be
+      valid UTF-8.</li>
+      <li>Convert text↔bytes: <code>s.as_bytes()</code> (&amp;str → &amp;[u8]) and
+      <code>String::from_utf8(vec)</code> (bytes → Result&lt;String&gt;).</li>
+      <li>Read more: <a href="https://doc.rust-lang.org/book/ch08-00-common-collections.html">Book Ch.8</a>
+      (Vec, String, HashMap), <a href="https://doc.rust-lang.org/book/ch04-03-slices.html">Ch.4.3</a> (slices).</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Difference between <code>Vec&lt;u8&gt;</code> and <code>&amp;[u8]</code>?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>Vec&lt;u8&gt;</code> owns a growable
+      heap buffer. <code>&amp;[u8]</code> is a borrowed, fixed view into bytes someone else owns — no
+      allocation, no copy.</div></details>
+
+      <p class="q">2. Why prefer <code>page.get(start..end)</code> over <code>&amp;page[start..end]</code>
+      when offsets come from a file you're parsing?</p>
+      <details><summary>Show answer</summary><div class="answer">Indexing/slicing out of bounds panics.
+      <code>.get()</code> returns <code>None</code> instead, so a corrupt or malicious file produces a
+      handled error rather than a crash.</div></details>
+
+      <p class="q">3. What two traits must a type implement to be a <code>HashMap</code> key?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>Eq</code> and <code>Hash</code>
+      (both derivable).</div></details>
+
+      <p class="q">4. You have a <code>u32</code> page number and a mutable page buffer. How do you
+      write it at offset 8?</p>
+      <details><summary>Show answer</summary><div class="answer">Pick an endianness and
+      <code>buf[8..12].copy_from_slice(&amp;n.to_le_bytes())</code> (or <code>to_be_bytes</code>). Read
+      it back with <code>u32::from_le_bytes</code>.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> Ch.8 (collections), Ch.4.3 (slices), Ch.13 (iterators &amp; closures).</li>
+      <li><strong>Doc:</strong> <code>std::primitive::u32</code> for <code>to_le_bytes</code>/
+      <code>from_le_bytes</code>, and <code>slice</code> methods. <span class="verify-tag">⚠️VERIFY</span>
+      exact method names if you quote them in code comments.</li>
+      <li><strong>Hands-on:</strong> Rustlings <code>vecs</code>, <code>hashmaps</code>, <code>slices</code>.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

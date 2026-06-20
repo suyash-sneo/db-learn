@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>1.5 Byte buffers &amp; memory ownership</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1:1.5", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.5</div>
+  <h1>1.5 — Byte buffers across the boundary; ownership &amp; the free function</h1>
+  <div class="goal"><b>Goal:</b> Master the single most important data transfer in your whole project:
+  moving a buffer of bytes (a serialized document) between Rust and Dart, with rock-solid rules about
+  <em>who allocated it</em> and <em>who frees it</em>. Get this wrong and you leak or crash; get it
+  right and the engine's data path is trivial.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Recall the design: documents cross the FFI boundary as serialized byte buffers (BSON/MessagePack).
+  So every meaningful operation — insert a document, return a found document — is a byte-buffer
+  transfer. There are exactly two directions, and each has one correct ownership rule. This lesson is
+  those two rules.</p>
+
+  <h2>A buffer on the C ABI = pointer + length</h2>
+  <p>There's no <code>Vec</code> in C. A byte buffer crosses as two values: a pointer to the first byte
+  (<code>*const u8</code> / <code>*mut u8</code>) and a length (<code>usize</code>). Length-prefixed,
+  <em>not</em> null-terminated — because document bytes can legitimately contain <code>0x00</code>, so a
+  C-string terminator would corrupt them. Always carry the length explicitly.</p>
+
+  <h2>Direction 1: Dart → Rust (caller owns)</h2>
+  <p>Dart has the document bytes and wants Rust to read them. Dart allocates the buffer, passes
+  pointer+len, Rust <em>borrows</em> it for the duration of the call, and Dart frees it afterward. Rust
+  must <strong>not</strong> hold the pointer past the call or free it.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-c">/// Rust reads `len` bytes that Dart owns. Returns 0 on success.</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_insert</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, ptr: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() || (ptr.<span class="tok-f">is_null</span>() &amp;&amp; len != 0) { <span class="tok-k">return</span> 1; }
+    <span class="tok-c">// Borrow Dart's bytes as a Rust slice for THIS CALL ONLY.</span>
+    <span class="tok-k">let</span> bytes: &amp;[<span class="tok-f">u8</span>] = <span class="tok-k">unsafe</span> { std::slice::<span class="tok-f">from_raw_parts</span>(ptr, len) };
+    <span class="tok-c">// … deserialize &amp; store a COPY; never keep `bytes` after returning …</span>
+    0
+}</code></pre>
+  <div class="box warn">
+    <div class="box-title">⚠️ The borrow is only valid during the call</div>
+    <p><code>slice::from_raw_parts</code> creates a Rust slice <em>view</em> over memory Rust doesn't own.
+    The moment <code>db_insert</code> returns, Dart may free that memory. So if you need to keep the
+    bytes (you do — they go into a page), <code>.to_vec()</code> them into Rust-owned memory <em>before</em>
+    returning. Stashing the raw slice/pointer is a dangling-pointer bug waiting to fire.</p>
+  </div>
+
+  <h2>Direction 2: Rust → Dart (Rust owns, Dart must give it back)</h2>
+  <p>This is the tricky direction. Rust produces bytes (a found document) and needs to hand them to
+  Dart. Rust allocates the buffer. But here's the rule that trips everyone:</p>
+  <div class="box warn">
+    <div class="box-title">⚠️ Memory must be freed by the allocator that made it</div>
+    <p>Rust's allocator and the C/Dart allocator are different. If Rust <code>malloc</code>s (well,
+    allocates a <code>Vec</code>) and Dart tries to <code>free</code> it, you get heap corruption. So
+    when Rust hands out a buffer, you must also export a <strong>Rust free function</strong> and require
+    the caller to return the buffer to <em>it</em>. "Whoever allocated it, frees it."</p>
+  </div>
+  <p>The clean pattern: return a small descriptor (ptr + len), keep Rust's ownership "leaked," and
+  provide a matching free:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-m">#[repr(C)]</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">Buf</span> { ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>, cap: <span class="tok-f">usize</span> }  <span class="tok-c">// cap needed to rebuild the Vec</span>
+
+<span class="tok-c">// Hand a Rust-allocated buffer to the caller.</span>
+<span class="tok-k">fn</span> <span class="tok-f">vec_into_buf</span>(<span class="tok-k">mut</span> v: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;) -&gt; <span class="tok-f">Buf</span> {
+    <span class="tok-k">let</span> b = <span class="tok-f">Buf</span> { ptr: v.<span class="tok-f">as_mut_ptr</span>(), len: v.<span class="tok-f">len</span>(), cap: v.<span class="tok-f">capacity</span>() };
+    std::mem::<span class="tok-f">forget</span>(v);   <span class="tok-c">// leak: stop Rust from freeing it now</span>
+    b
+}
+
+<span class="tok-c">// The REQUIRED matching free — caller must call this, not C free().</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_free_buf</span>(b: <span class="tok-f">Buf</span>) {
+    <span class="tok-k">if</span> b.ptr.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span>; }
+    <span class="tok-k">unsafe</span> { <span class="tok-k">let</span> _ = <span class="tok-f">Vec</span>::<span class="tok-f">from_raw_parts</span>(b.ptr, b.len, b.cap); } <span class="tok-c">// rebuilt Vec drops → freed</span>
+}</code></pre>
+  <p>Notice the symmetry with the opaque handle (1.4): <code>mem::forget</code> here plays the role of
+  <code>Box::into_raw</code> (leak ownership out), and <code>Vec::from_raw_parts</code> in the free plays
+  the role of <code>Box::from_raw</code> (reclaim and drop). Same idea, different container.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 220" role="img" aria-label="Two directions of buffer transfer with ownership rules">
+    <rect class="dg-bg" x="0" y="0" width="560" height="220" rx="10"/>
+    <text class="dg-txt" x="20" y="30" font-weight="700">Dart → Rust  (Dart owns)</text>
+    <rect class="dg-box-a" x="20" y="42" width="120" height="40" rx="8"/><text class="dg-txt-s" x="80" y="66" text-anchor="middle">Dart buffer</text>
+    <path class="dg-arrow" d="M142,62 L250,62" marker-end="url(#a15)"/><text class="dg-txt-s" x="196" y="54" text-anchor="middle">ptr+len (borrow)</text>
+    <rect class="dg-box" x="254" y="42" width="150" height="40" rx="8"/><text class="dg-txt-s" x="329" y="66" text-anchor="middle">Rust reads, copies</text>
+    <text class="dg-txt-s" x="414" y="66">Dart frees after</text>
+
+    <text class="dg-txt" x="20" y="128" font-weight="700">Rust → Dart  (Rust owns)</text>
+    <rect class="dg-box" x="20" y="140" width="150" height="40" rx="8"/><text class="dg-txt-s" x="95" y="164" text-anchor="middle">Rust buffer (leaked)</text>
+    <path class="dg-arrow" d="M172,160 L280,160" marker-end="url(#a15)"/><text class="dg-txt-s" x="226" y="152" text-anchor="middle">ptr+len</text>
+    <rect class="dg-box-a" x="284" y="140" width="120" height="40" rx="8"/><text class="dg-txt-s" x="344" y="164" text-anchor="middle">Dart reads</text>
+    <path class="dg-arrow" d="M344,182 C344,205 200,205 130,182" marker-end="url(#a15)"/>
+    <text class="dg-txt-s" x="250" y="214" text-anchor="middle">Dart calls db_free_buf(ptr) → Rust frees</text>
+    <defs><marker id="a15" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Two directions, two rules. Borrow-and-copy in; leak-out-and-free-back out.</figcaption>
+  </figure>
+
+  <h2>An alternative: caller-provides-buffer (out-param style)</h2>
+  <p>SQLite-style APIs often avoid returning allocations by having the caller pass a buffer and a
+  capacity; the function fills it and reports the needed size (call twice if too small). This dodges the
+  cross-allocator problem entirely but is clumsier for variable-size documents. You'll weigh both in
+  Phase 8; for the spike, the leak-out + free-back pattern above is simplest to demonstrate.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>slice::from_raw_parts(ptr, len)</code> = "view these external bytes as <code>&amp;[u8]</code>"
+      (read); <code>from_raw_parts_mut</code> for <code>&amp;mut</code>.</li>
+      <li><code>mem::forget(v)</code> = "drop my responsibility to free <code>v</code>" (no destructor
+      runs). It's the leak primitive; pair it with a matching reclaim.</li>
+      <li><code>Vec::from_raw_parts(ptr, len, cap)</code> rebuilds a <code>Vec</code> — you need the
+      original <em>capacity</em>, not just length, which is why <code>Buf</code> carries <code>cap</code>.</li>
+      <li>On the Dart side you'll copy the bytes into a Dart <code>Uint8List</code> and then call the
+      free function (Lesson 1.9).</li>
+      <li>Read more: <code>std::slice::from_raw_parts</code>, <code>std::mem::forget</code>,
+      <code>Vec::from_raw_parts</code> docs. <span class="verify-tag">⚠️VERIFY</span> signatures/URLs.</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why length-prefixed buffers instead of null-terminated C strings for documents?</p>
+      <details><summary>Show answer</summary><div class="answer">Serialized documents can contain
+      <code>0x00</code> bytes; a null terminator would truncate them. A length is binary-safe.</div></details>
+
+      <p class="q">2. Rust receives Dart's buffer in <code>db_insert</code> and needs to store it. Why
+      must it <code>.to_vec()</code> before returning?</p>
+      <details><summary>Show answer</summary><div class="answer">The slice only borrows Dart's memory,
+      which Dart may free as soon as the call returns. Copying into a Rust-owned <code>Vec</code> keeps the
+      data valid for storage.</div></details>
+
+      <p class="q">3. Why can't Dart just <code>free()</code> a buffer that Rust allocated?</p>
+      <details><summary>Show answer</summary><div class="answer">Rust and C/Dart use different allocators;
+      freeing with the wrong one corrupts the heap. Memory must be freed by the same allocator that made
+      it — hence an exported Rust free function.</div></details>
+
+      <p class="q">4. What two std functions form the "leak out / reclaim" pair for a
+      <code>Vec&lt;u8&gt;</code> crossing to C and back?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>mem::forget</code> (leak it out,
+      after grabbing ptr/len/cap) and <code>Vec::from_raw_parts</code> (rebuild and drop in the free
+      function).</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Doc:</strong> Rustonomicon FFI (passing data, ownership); std docs for
+      <code>from_raw_parts</code> / <code>mem::forget</code>. <span class="verify-tag">⚠️VERIFY</span>.</li>
+      <li><strong>Source:</strong> SQLite's <code>sqlite3_malloc</code>/<code>sqlite3_free</code> pair —
+      the same "library owns its allocations" discipline. <span class="verify-tag">⚠️VERIFY</span></li>
+      <li><strong>Forward link:</strong> 1.9 (the Dart side: read the bytes, call the free fn), the Phase 1
+      Build (a buffer round-trips Rust↔Dart), Phase 6 (the bytes become real serialized documents).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

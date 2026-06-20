@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>0.4 Structs, enums, pattern matching</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p0:0.4", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 0</a> › 0.4</div>
+  <h1>0.4 — Structs, enums, pattern matching</h1>
+  <div class="goal"><b>Goal:</b> Model data the Rust way: <code>struct</code> for "has-a"
+  (a page <em>has</em> a number and bytes), <code>enum</code> for "is-one-of" (a node <em>is</em>
+  a leaf or an internal node), and <code>match</code> to act on which variant you've got.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Almost everything in the engine is a struct or an enum. A <code>Page</code> is a struct. A
+  B+tree <code>Node</code> is an enum (<code>Leaf</code> or <code>Internal</code>). A serialized
+  document field is an enum (string vs int vs nested doc). Pattern matching is how you'll branch on
+  "what kind of node is this" — and Rust forces you to handle every case, which kills a whole class
+  of bugs.</p>
+
+  <h2>Structs — bundling related data</h2>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">struct</span> <span class="tok-f">Page</span> {
+    number: <span class="tok-f">u32</span>,
+    dirty: <span class="tok-f">bool</span>,
+    data: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;,
+}
+
+<span class="tok-k">let</span> p = <span class="tok-f">Page</span> { number: 1, dirty: <span class="tok-k">false</span>, data: <span class="tok-f">vec!</span>[0u8; 4096] };
+<span class="tok-m">println!</span>(<span class="tok-s">"page {} has {} bytes"</span>, p.number, p.data.<span class="tok-f">len</span>());</code></pre>
+
+  <h3>Methods with <code>impl</code></h3>
+  <p>Behavior lives in an <code>impl</code> block. The first parameter is the receiver:
+  <code>&amp;self</code> (read), <code>&amp;mut self</code> (mutate), or <code>self</code> (consume).
+  A function without <code>self</code> is an <em>associated function</em> — like a static
+  constructor; <code>new</code> by convention.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">impl</span> <span class="tok-f">Page</span> {
+    <span class="tok-c">// associated function (constructor); call as Page::new(1)</span>
+    <span class="tok-k">fn</span> <span class="tok-f">new</span>(number: <span class="tok-f">u32</span>) -&gt; <span class="tok-f">Page</span> {
+        <span class="tok-f">Page</span> { number, dirty: <span class="tok-k">false</span>, data: <span class="tok-f">vec!</span>[0u8; 4096] }
+    }
+    <span class="tok-c">// method, reads self</span>
+    <span class="tok-k">fn</span> <span class="tok-f">size</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">usize</span> { <span class="tok-k">self</span>.data.<span class="tok-f">len</span>() }
+    <span class="tok-c">// method, mutates self</span>
+    <span class="tok-k">fn</span> <span class="tok-f">mark_dirty</span>(&amp;<span class="tok-k">mut self</span>) { <span class="tok-k">self</span>.dirty = <span class="tok-k">true</span>; }
+}
+
+<span class="tok-k">let mut</span> p = <span class="tok-f">Page</span>::<span class="tok-f">new</span>(1);
+p.<span class="tok-f">mark_dirty</span>();
+<span class="tok-m">println!</span>(<span class="tok-s">"{}"</span>, p.<span class="tok-f">size</span>());</code></pre>
+  <p>Note <code>number,</code> alone in <code>new</code>: when a field and a local variable share a
+  name, Rust lets you write the shorthand instead of <code>number: number</code>.</p>
+
+  <h2>Enums — "is one of these"</h2>
+  <p>This is where Rust outshines most languages. An enum variant can <em>carry data</em>, and each
+  variant can carry different data. This is a "sum type" / "tagged union."</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">enum</span> <span class="tok-f">Node</span> {
+    <span class="tok-f">Leaf</span> { keys: <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt;, values: <span class="tok-f">Vec</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; },
+    <span class="tok-f">Internal</span> { keys: <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt;, children: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u32</span>&gt; },
+}</code></pre>
+  <p>A <code>Node</code> value is <em>either</em> a <code>Leaf</code> <em>or</em> an
+  <code>Internal</code>, never both, and the compiler knows which. That's exactly a B+tree node.
+  You'll also meet the two most important enums in the standard library next lesson:
+  <code>Option&lt;T&gt;</code> (Some/None) and <code>Result&lt;T,E&gt;</code> (Ok/Err) — both are
+  just enums.</p>
+
+  <h2>Pattern matching with <code>match</code></h2>
+  <p><code>match</code> branches on a value and <em>destructures</em> it — pulls the inner data out —
+  in one step. Critically, it must be <strong>exhaustive</strong>: you handle every variant or the
+  code won't compile. Add a new node type later and the compiler points you at every
+  <code>match</code> you forgot to update.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">fn</span> <span class="tok-f">key_count</span>(node: &amp;<span class="tok-f">Node</span>) -&gt; <span class="tok-f">usize</span> {
+    <span class="tok-k">match</span> node {
+        <span class="tok-f">Node</span>::<span class="tok-f">Leaf</span> { keys, .. }     =&gt; keys.<span class="tok-f">len</span>(),
+        <span class="tok-f">Node</span>::<span class="tok-f">Internal</span> { keys, .. } =&gt; keys.<span class="tok-f">len</span>(),
+    }
+}</code></pre>
+  <p>The <code>..</code> means "ignore the other fields." Each arm is <code>pattern =&gt; expression</code>.
+  <code>match</code> is an expression, so it produces a value you can assign or return.</p>
+
+  <h3>Matching <code>Option</code> — the everyday case</h3>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">fn</span> <span class="tok-f">describe</span>(maybe: <span class="tok-f">Option</span>&lt;<span class="tok-f">i64</span>&gt;) -&gt; <span class="tok-f">String</span> {
+    <span class="tok-k">match</span> maybe {
+        <span class="tok-f">Some</span>(n) <span class="tok-k">if</span> n &gt; 0 =&gt; <span class="tok-f">format!</span>(<span class="tok-s">"positive: {}"</span>, n), <span class="tok-c">// guard</span>
+        <span class="tok-f">Some</span>(n)          =&gt; <span class="tok-f">format!</span>(<span class="tok-s">"non-positive: {}"</span>, n),
+        <span class="tok-f">None</span>             =&gt; <span class="tok-s">"nothing"</span>.<span class="tok-f">to_string</span>(),
+    }
+}</code></pre>
+  <p>The <code>if n &gt; 0</code> is a <em>match guard</em> — an extra condition on an arm. Patterns can
+  also bind (<code>Some(n)</code> binds the inner value to <code>n</code>).</p>
+
+  <h3>Shorthands: <code>if let</code> and <code>while let</code></h3>
+  <p>When you only care about one variant, <code>match</code> is verbose. <code>if let</code> is the
+  shortcut:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">if let</span> <span class="tok-f">Some</span>(n) = maybe {
+    <span class="tok-m">println!</span>(<span class="tok-s">"got {}"</span>, n);
+} <span class="tok-k">else</span> {
+    <span class="tok-m">println!</span>(<span class="tok-s">"empty"</span>);
+}</code></pre>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>#[derive(Debug)]</code> above a struct/enum auto-generates a printable form; then
+      <code>println!("{:?}", x)</code> works. <code>#[derive(Clone)]</code> gives you
+      <code>.clone()</code>. You'll derive these constantly.</li>
+      <li>Tuple structs exist too: <code>struct PageNo(u32);</code> — a named wrapper around one value.</li>
+      <li>An enum variant with no data is a plain tag: <code>enum Color { Red, Green }</code>.</li>
+      <li>Read more: <a href="https://doc.rust-lang.org/book/ch05-00-structs.html">Book Ch.5</a> (structs),
+      <a href="https://doc.rust-lang.org/book/ch06-00-enums.html">Ch.6</a> (enums &amp; match).</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. When do you reach for an <code>enum</code> instead of a <code>struct</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">When a value is <em>one of</em> several
+      alternatives (leaf vs internal node, string vs int field). A struct is for a value that
+      <em>has all of</em> several fields at once.</div></details>
+
+      <p class="q">2. What does "match must be exhaustive" buy you when you add a third node variant
+      later?</p>
+      <details><summary>Show answer</summary><div class="answer">The compiler errors on every
+      <code>match</code> that doesn't handle the new variant, so you can't silently forget a case.
+      Refactors become safe.</div></details>
+
+      <p class="q">3. What's the difference between <code>&amp;self</code>, <code>&amp;mut self</code>,
+      and <code>self</code> as a method receiver?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>&amp;self</code> borrows to read,
+      <code>&amp;mut self</code> borrows to mutate, <code>self</code> takes ownership (consumes the
+      value — useful for "convert into" methods).</div></details>
+
+      <p class="q">4. Rewrite this <code>match</code> on an <code>Option</code> that only acts on
+      <code>Some</code> using a shorter form.</p>
+      <details><summary>Show answer</summary><div class="answer">Use <code>if let Some(x) = opt { … }</code>.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> Ch.5 (structs &amp; methods), Ch.6 (enums, <code>Option</code>,
+      <code>match</code>, <code>if let</code>), Ch.18 (the full pattern syntax).</li>
+      <li><strong>Hands-on:</strong> Rustlings <code>structs</code>, <code>enums</code>, <code>options</code>.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

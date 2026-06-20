@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Build — byte-buffer echo across Rust → C ABI → Dart</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1:build", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › Build</div>
+  <span class="pill">Build · AI off</span>
+  <h1>Build: a byte buffer round-tripping Rust → C ABI → Dart</h1>
+  <div class="goal"><b>Goal:</b> Retire the project's biggest risk. Prove a <code>Uint8List</code> can
+  travel from a real Flutter app, into your Rust library through a C ABI, get transformed, and come back
+  — with correct memory ownership and no leaks. When this works, the scariest unknown is gone and the
+  engine has a safe place to land.</div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ The rule</div>
+    <p>AI off. You may use the Rust Book, the Rustonomicon, the dart:ffi/cbindgen docs, and the
+    <em>Stuck?</em> ladder. You may not have AI write the FFI glue — that boundary code is exactly the
+    skill this spike builds. Build pages give you stubs and tests; the implementation is yours.</p>
+  </div>
+
+  <h2>Deliverable spec</h2>
+  <p>A Cargo crate <code>ffi_echo</code> (crate-type <code>cdylib</code>) exposing a C ABI, a generated
+  header, and a minimal Flutter app that calls it. The "echo" deliberately exercises every transfer
+  rule: it takes input bytes and returns a <em>new, Rust-allocated</em> buffer that is the input with
+  each byte incremented by 1 (so you can verify the bytes actually made the round trip and were
+  processed, not just copied).</p>
+  <p>Required C ABI surface (names are fixed so the tests match):</p>
+  <ul>
+    <li><code>echo_transform(in_ptr, in_len, out_ptr, out_cap, out_len) -&gt; i32</code> — the caller
+    passes input (borrowed) and an out-param trio; on success Rust allocates the result buffer, writes
+    its pointer/len through the out-params, returns <code>0</code>. (Use the buffer-descriptor or
+    out-pointer style from Lesson 1.5 — your choice; keep it consistent with the tests below.)</li>
+    <li><code>echo_free(ptr, len, cap)</code> — frees a buffer that <code>echo_transform</code> allocated.</li>
+    <li><code>echo_version() -&gt; i32</code> — returns a constant version int (a trivial warm-up call).</li>
+  </ul>
+
+  <h2>Ordered milestones</h2>
+  <ol>
+    <li><strong>M1 — Library builds &amp; exports.</strong> Crate compiles as <code>cdylib</code>;
+    <code>echo_version</code> is exported. Verify with <code>nm</code>/<code>cargo build</code>. (Lessons 1.2)</li>
+    <li><strong>M2 — Pure-Rust core.</strong> A safe <code>fn transform(input: &amp;[u8]) -&gt; Vec&lt;u8&gt;</code>
+    that increments each byte. Unit-test it directly. (Keep the logic in safe Rust; the boundary fn just
+    calls it.)</li>
+    <li><strong>M3 — The C ABI shim.</strong> Implement <code>echo_transform</code> and
+    <code>echo_free</code>: null-check pointers, borrow the input slice, call <code>transform</code>, hand
+    out the Rust buffer, and free it correctly. Wrap the body in <code>catch_unwind</code>. (Lessons 1.3–1.7)</li>
+    <li><strong>M4 — Header.</strong> Generate <code>ffi_echo.h</code> with cbindgen. (Lesson 1.8)</li>
+    <li><strong>M5 — Flutter app.</strong> Load the library, bind the functions, send a
+    <code>Uint8List</code>, display the returned bytes, free everything. (Lesson 1.9)</li>
+  </ol>
+
+  <h2>Acceptance criteria</h2>
+  <ul>
+    <li><code>cargo test</code> green (core + boundary tests below).</li>
+    <li>The Flutter app, given input <code>[1,2,3]</code>, displays <code>[2,3,4]</code>.</li>
+    <li>No memory leaks: a loop calling <code>echo_transform</code>+<code>echo_free</code> thousands of
+    times shows flat memory. (Manual check / a Rust loop test.)</li>
+    <li>Robustness: a null input pointer with non-zero length returns an error code, doesn't crash; a
+    forced panic inside the boundary returns the panic code, doesn't unwind into the caller.</li>
+    <li>Empty input (<code>len == 0</code>) is handled (returns an empty result, no UB).</li>
+  </ul>
+
+  <h2>Stub: <code>src/lib.rs</code></h2>
+  <span class="code-label">src/lib.rs — implement the todo!()s; the shapes are fixed</span>
+<pre><code><span class="tok-k">use</span> std::panic::catch_unwind;
+
+<span class="tok-k">pub const</span> <span class="tok-f">OK</span>: <span class="tok-f">i32</span> = 0;
+<span class="tok-k">pub const</span> <span class="tok-f">ERR_NULL</span>: <span class="tok-f">i32</span> = 1;
+<span class="tok-k">pub const</span> <span class="tok-f">ERR_PANIC</span>: <span class="tok-f">i32</span> = 99;
+
+<span class="tok-c">// M2: pure, safe core. NO unsafe, NO pointers. Easy to unit-test.</span>
+<span class="tok-k">pub fn</span> <span class="tok-f">transform</span>(input: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"return a new Vec where each byte is input[i].wrapping_add(1)"</span>)
+}
+
+<span class="tok-c">// M3: the C ABI shim. Out-params carry the result buffer back to the caller.</span>
+<span class="tok-c">// On success: *out_ptr = buffer start, *out_len = length, *out_cap = capacity, return OK.</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">echo_transform</span>(
+    in_ptr: *<span class="tok-k">const</span> <span class="tok-f">u8</span>,
+    in_len: <span class="tok-f">usize</span>,
+    out_ptr: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>,
+    out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>,
+    out_cap: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>,
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"null-check; borrow input slice; call transform; hand out the Vec; catch_unwind"</span>)
+}
+
+<span class="tok-c">// M3: free a buffer echo_transform allocated. Must rebuild the Vec to drop it.</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">echo_free</span>(ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>, cap: <span class="tok-f">usize</span>) {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"if non-null, Vec::from_raw_parts(ptr,len,cap) and let it drop"</span>)
+}
+
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">echo_version</span>() -&gt; <span class="tok-f">i32</span> { <span class="tok-n">1</span> }</code></pre>
+
+  <h2>Failing test suite (Rust)</h2>
+  <span class="code-label">tests — drive M2 &amp; M3 from Rust before touching Flutter</span>
+<pre><code><span class="tok-m">#[cfg(test)]</span>
+<span class="tok-k">mod</span> tests {
+    <span class="tok-k">use super</span>::*;
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">core_increments</span>() {
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">transform</span>(&amp;[1, 2, 3]), <span class="tok-f">vec!</span>[2, 3, 4]);
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">transform</span>(&amp;[]), <span class="tok-f">Vec</span>::&lt;<span class="tok-f">u8</span>&gt;::<span class="tok-f">new</span>());
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">transform</span>(&amp;[255]), <span class="tok-f">vec!</span>[0]);   <span class="tok-c">// wrapping_add</span>
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">boundary_round_trip</span>() {
+        <span class="tok-k">let</span> input = [10u8, 20, 30];
+        <span class="tok-k">let mut</span> out_ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span> = std::ptr::<span class="tok-f">null_mut</span>();
+        <span class="tok-k">let mut</span> out_len: <span class="tok-f">usize</span> = 0;
+        <span class="tok-k">let mut</span> out_cap: <span class="tok-f">usize</span> = 0;
+
+        <span class="tok-k">let</span> rc = <span class="tok-f">echo_transform</span>(
+            input.<span class="tok-f">as_ptr</span>(), input.<span class="tok-f">len</span>(),
+            &amp;<span class="tok-k">mut</span> out_ptr, &amp;<span class="tok-k">mut</span> out_len, &amp;<span class="tok-k">mut</span> out_cap,
+        );
+        <span class="tok-m">assert_eq!</span>(rc, <span class="tok-f">OK</span>);
+        <span class="tok-m">assert_eq!</span>(out_len, 3);
+
+        <span class="tok-k">let</span> result = <span class="tok-k">unsafe</span> { std::slice::<span class="tok-f">from_raw_parts</span>(out_ptr, out_len) };
+        <span class="tok-m">assert_eq!</span>(result, &amp;[11u8, 21, 31]);
+
+        <span class="tok-f">echo_free</span>(out_ptr, out_len, out_cap);   <span class="tok-c">// must not crash / double-free</span>
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">null_input_is_error_not_crash</span>() {
+        <span class="tok-k">let mut</span> out_ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span> = std::ptr::<span class="tok-f">null_mut</span>();
+        <span class="tok-k">let mut</span> out_len: <span class="tok-f">usize</span> = 0;
+        <span class="tok-k">let mut</span> out_cap: <span class="tok-f">usize</span> = 0;
+        <span class="tok-k">let</span> rc = <span class="tok-f">echo_transform</span>(std::ptr::<span class="tok-f">null</span>(), 5,
+            &amp;<span class="tok-k">mut</span> out_ptr, &amp;<span class="tok-k">mut</span> out_len, &amp;<span class="tok-k">mut</span> out_cap);
+        <span class="tok-m">assert_eq!</span>(rc, <span class="tok-f">ERR_NULL</span>);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">no_leak_under_load</span>() {        <span class="tok-c">// watch memory stay flat while this runs</span>
+        <span class="tok-k">let</span> input = [0u8; 1024];
+        <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..100_000 {
+            <span class="tok-k">let</span> (<span class="tok-k">mut</span> p, <span class="tok-k">mut</span> l, <span class="tok-k">mut</span> c) = (std::ptr::<span class="tok-f">null_mut</span>(), 0usize, 0usize);
+            <span class="tok-f">echo_transform</span>(input.<span class="tok-f">as_ptr</span>(), input.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> p, &amp;<span class="tok-k">mut</span> l, &amp;<span class="tok-k">mut</span> c);
+            <span class="tok-f">echo_free</span>(p, l, c);
+        }
+    }
+}</code></pre>
+
+  <h2>Flutter side (M5) — what to verify, not how to write it</h2>
+  <p>Build a one-screen app: a button that sends <code>Uint8List.fromList([1,2,3])</code> through your
+  binding and shows the result. Reuse the structure from Lesson 1.9 (load lib, two typedefs per function,
+  allocate input, read output, copy with <code>Uint8List.fromList</code>, then <code>echo_free</code> the
+  Rust buffer and <code>malloc.free</code> your own). Acceptance: the screen shows <code>[2, 3, 4]</code>.</p>
+  <div class="box deeper">
+    <div class="box-title">Smoke-test checklist (Dart)</div>
+    <ul>
+      <li>☐ <code>echo_version()</code> returns 1 (proves the library loads &amp; binds).</li>
+      <li>☐ <code>[1,2,3]</code> → <code>[2,3,4]</code> displayed.</li>
+      <li>☐ Empty input → empty result, no exception.</li>
+      <li>☐ Pressing the button 1000× doesn't grow memory (you freed both sides).</li>
+    </ul>
+  </div>
+
+  <h2>Stuck? — graduated hints</h2>
+  <details><summary>M3: how do I "hand out" the Rust Vec?</summary>
+    <div class="answer"><strong>Nudge:</strong> A <code>Vec</code> knows its pointer, length, and capacity.
+    You need to give all three to the caller and stop Rust from freeing it.
+    <br><strong>Bigger:</strong> Grab <code>v.as_mut_ptr()</code>, <code>v.len()</code>,
+    <code>v.capacity()</code>, write them through the out-params, then prevent the drop.
+    <br><strong>Technique:</strong> <code>std::mem::forget(v)</code> leaks it (Lesson 1.5). The matching
+    reclaim in <code>echo_free</code> is <code>Vec::from_raw_parts(ptr, len, cap)</code> — which is why you
+    must pass <em>capacity</em> back, not just length.</div></details>
+
+  <details><summary>M3: where exactly does catch_unwind go?</summary>
+    <div class="answer"><strong>Nudge:</strong> The whole body that could panic must be inside it; the
+    out-param writes are the risky part if a pointer is bad.
+    <br><strong>Technique:</strong> Null-check first (return <code>ERR_NULL</code>), then put the borrow +
+    transform + hand-out inside <code>catch_unwind(|| { … OK })</code>, and map <code>Err(_)</code> to
+    <code>ERR_PANIC</code> (Lesson 1.6). Writing through a raw out-pointer inside the closure may need
+    <code>AssertUnwindSafe</code> — read its docs.</div></details>
+
+  <details><summary>M5: DynamicLibrary.open can't find my library</summary>
+    <div class="answer"><strong>Nudge:</strong> The path is relative to where the app runs, not where the
+    <code>.dylib</code>/<code>.so</code> is built.
+    <br><strong>Bigger:</strong> For desktop dev, copy the built library next to the executable, or pass an
+    absolute path while iterating.
+    <br><strong>Technique:</strong> confirm the file name per platform (<code>lib*.so</code>/<code>lib*.dylib</code>/
+    <code>*.dll</code>) and that the symbol exists (<code>nm</code>). On iOS/Android you static-link and use
+    <code>DynamicLibrary.process()</code> — that's a Phase 8.7 concern; do desktop first.</div></details>
+
+  <details><summary>M5: the returned bytes are garbage or the app crashes on free</summary>
+    <div class="answer"><strong>Nudge:</strong> Two classic causes — a wrong native typedef, or freeing with
+    the wrong allocator.
+    <br><strong>Bigger:</strong> Re-check the native typedef matches the header exactly (<code>Size</code> vs
+    <code>Uint64</code>, pointer-to-pointer for out-params). And confirm you copy with
+    <code>Uint8List.fromList</code> <em>before</em> calling <code>echo_free</code>.
+    <br><strong>Technique:</strong> Dart frees only what <code>malloc</code> made; the Rust result buffer is
+    freed only by <code>echo_free</code>. Never cross them (Lesson 1.5/1.9).</div></details>
+
+  <h2>Definition of Done</h2>
+  <ul>
+    <li>☐ All four Rust tests pass; the leak test keeps memory flat.</li>
+    <li>☐ <code>ffi_echo.h</code> generated by cbindgen, declaring an opaque-free, length-prefixed API.</li>
+    <li>☐ Flutter app shows <code>[1,2,3]</code> → <code>[2,3,4]</code>.</li>
+    <li>☐ Null input → error code; a forced panic → panic code; neither crashes the caller.</li>
+    <li>☐ You can explain, in your own words, who allocates and who frees in <em>each</em> direction.</li>
+    <li>☐ <strong>You wrote every line yourself.</strong></li>
+  </ul>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Why this is the right thing to have built first</div>
+    <p>You now have a proven, leak-free, panic-safe channel from Flutter to Rust. Every later phase builds
+    the <em>engine</em> behind this channel; you never again have to wonder whether the boundary works. The
+    riskiest unknown in the project is retired — exactly what a spike is for.</p>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

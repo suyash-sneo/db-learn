@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>1.7 Errors across a C ABI: codes + out-params</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p1:1.7", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 1</a> › 1.7</div>
+  <h1>1.7 — Errors across a C ABI: integer codes + out-params</h1>
+  <div class="goal"><b>Goal:</b> Translate Rust's rich <code>Result&lt;T, E&gt;</code> into something C
+  understands: an integer return code plus output values written through pointers. Design a small,
+  stable error-code scheme now so the whole engine speaks it.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>C has no <code>Result</code>, no exceptions, no <code>Option</code>. The universal C convention is:
+  <strong>the function returns an integer status code; any real output is written to caller-provided
+  pointers (out-params).</strong> Every public engine function will follow this, so the caller can write
+  <code>if (rc != 0) handle_error();</code> in any language. Lesson 0.5 built your Rust error enum; this
+  lesson maps it to the wire.</p>
+
+  <h2>The convention: return code, output via pointer</h2>
+  <p>SQLite is the model: nearly every function returns an <code>int</code> result code (<code>0</code> =
+  success, non-zero = a specific error), and produces its actual result through an out-parameter. You'll
+  adopt the same shape:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-c">// Real return = status. Real output (a found document's length) via *out_len.</span>
+<span class="tok-m">#[no_mangle]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">db_find_len</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, id: <span class="tok-f">i64</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() || out_len.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span> <span class="tok-f">ERR_NULL</span>; }
+    <span class="tok-c">// … look up; on success write the length and return OK …</span>
+    <span class="tok-k">unsafe</span> { *out_len = 42; }
+    <span class="tok-f">OK</span>
+}</code></pre>
+  <p>Convention details worth fixing early: <code>0</code> means success; negatives or a numbered scheme
+  for errors; out-params are only valid to read when the code is success.</p>
+
+  <h2>A stable error-code scheme</h2>
+  <p>Define your codes as named constants in one place. Stability matters: once shipped, a code's meaning
+  shouldn't change, or you break every binding. Reserve <code>0</code> for OK.</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">pub const</span> <span class="tok-f">OK</span>: <span class="tok-f">i32</span> = 0;
+<span class="tok-k">pub const</span> <span class="tok-f">ERR_NULL</span>: <span class="tok-f">i32</span> = 1;        <span class="tok-c">// a required pointer was null</span>
+<span class="tok-k">pub const</span> <span class="tok-f">ERR_NOT_FOUND</span>: <span class="tok-f">i32</span> = 2;   <span class="tok-c">// key/doc not found</span>
+<span class="tok-k">pub const</span> <span class="tok-f">ERR_CORRUPT</span>: <span class="tok-f">i32</span> = 3;     <span class="tok-c">// file/data invalid</span>
+<span class="tok-k">pub const</span> <span class="tok-f">ERR_IO</span>: <span class="tok-f">i32</span> = 4;          <span class="tok-c">// underlying I/O failure</span>
+<span class="tok-k">pub const</span> <span class="tok-f">ERR_PANIC</span>: <span class="tok-f">i32</span> = 99;      <span class="tok-c">// a panic was caught (Lesson 1.6)</span></code></pre>
+
+  <h2>The translation layer: Result → code</h2>
+  <p>Keep your engine core returning idiomatic <code>Result&lt;T, DbError&gt;</code>. The <em>shim</em> is
+  the only place that flattens it to a code. Write one mapping function and reuse it:</p>
+  <span class="code-label">rust</span>
+<pre><code><span class="tok-k">fn</span> <span class="tok-f">code_of</span>(e: &amp;<span class="tok-f">DbError</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">match</span> e {
+        <span class="tok-f">DbError</span>::<span class="tok-f">KeyNotFound</span>(_) =&gt; <span class="tok-f">ERR_NOT_FOUND</span>,
+        <span class="tok-f">DbError</span>::<span class="tok-f">Corrupt</span>(_)     =&gt; <span class="tok-f">ERR_CORRUPT</span>,
+        <span class="tok-f">DbError</span>::<span class="tok-f">Io</span>(_)          =&gt; <span class="tok-f">ERR_IO</span>,
+        <span class="tok-f">DbError</span>::<span class="tok-f">BadMagic</span>       =&gt; <span class="tok-f">ERR_CORRUPT</span>,
+    }
+}
+
+<span class="tok-c">// In a boundary fn: run engine logic, then translate.</span>
+<span class="tok-k">match</span> db.<span class="tok-f">insert</span>(&amp;bytes) {            <span class="tok-c">// engine returns Result&lt;(), DbError&gt;</span>
+    <span class="tok-f">Ok</span>(())  =&gt; <span class="tok-f">OK</span>,
+    <span class="tok-f">Err</span>(e) =&gt; <span class="tok-f">code_of</span>(&amp;e),
+}</code></pre>
+  <div class="box deeper">
+    <div class="box-title">The full boundary pattern, assembled</div>
+    <p>Every public function now layers the four ideas you've learned: (1) null-check pointers → return
+    <code>ERR_NULL</code>; (2) wrap the body in <code>catch_unwind</code> → return <code>ERR_PANIC</code>
+    on a caught panic (1.6); (3) call the safe engine core, which returns a <code>Result</code>; (4) map
+    that to a code, writing any output through out-params (1.5 for buffers). The shim is thin and
+    mechanical; the intelligence stays in the safe core.</p>
+  </div>
+
+  <h2>Richer error detail (optional, SQLite-style)</h2>
+  <p>A bare code can't carry a message. SQLite adds <code>sqlite3_errmsg()</code> — a function returning
+  the last error's text. <span class="verify-tag">⚠️VERIFY</span> exact name/semantics. You can do the
+  same: store the last error string on the <code>Db</code> handle and expose
+  <code>db_last_error(db) -&gt; *const c_char</code> (whose buffer the handle owns). Adds richness without
+  bloating every function's signature. This is a Phase 8 refinement; for the spike, codes suffice.</p>
+
+  <h2>Out-params: the rules</h2>
+  <ul>
+    <li><strong>Validate the out pointer</strong> (null-check) before writing — a null out-param is a
+    caller bug; return <code>ERR_NULL</code>.</li>
+    <li><strong>Only write outputs on success.</strong> If you return an error, leave out-params
+    untouched (or zeroed) and document that the caller must not read them.</li>
+    <li><strong>Two-call pattern for sizes:</strong> for variable-size output, one call reports the
+    needed length, the caller allocates, a second call fills it — or use the buffer-descriptor approach
+    from Lesson 1.5. Pick one and be consistent.</li>
+  </ul>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. In the C convention, what does the function's integer return value represent, and
+      where does the actual result go?</p>
+      <details><summary>Show answer</summary><div class="answer">The return value is a status/error code
+      (0 = success). The real result is written through caller-provided out-pointers (out-params).</div></details>
+
+      <p class="q">2. Why keep the engine core returning <code>Result</code> and only translate to codes in
+      the shim?</p>
+      <details><summary>Show answer</summary><div class="answer">The core stays idiomatic, testable, and
+      uses <code>?</code> freely; the lossy flattening to integer codes happens once, at the boundary,
+      where it's required. Separation of concerns.</div></details>
+
+      <p class="q">3. When is it safe for the caller to read an out-param?</p>
+      <details><summary>Show answer</summary><div class="answer">Only when the function returned the
+      success code. On error, out-params should be considered unset.</div></details>
+
+      <p class="q">4. Why must error codes be stable once shipped?</p>
+      <details><summary>Show answer</summary><div class="answer">Bindings in every language compare against
+      specific numbers; changing a code's meaning silently breaks all callers. Treat the code list as part
+      of the ABI.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Source:</strong> SQLite result codes — <a href="https://www.sqlite.org/rescode.html">sqlite.org/rescode.html</a>
+      <span class="verify-tag">⚠️VERIFY</span> — a masterclass in a stable, layered code scheme (primary +
+      extended codes).</li>
+      <li><strong>Doc:</strong> Rustonomicon FFI on returning data/errors. <span class="verify-tag">⚠️VERIFY</span></li>
+      <li><strong>Forward link:</strong> Phase 8.1/8.4 (full public API, versioning, ABI stability), and
+      1.6 which this pairs with (panic net + error codes = total boundary safety).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>
