@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>6.4 CRUD on the engine</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p6:6.4", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 6</a> › 6.4</div>
+  <h1>6.4 — CRUD on the engine</h1>
+  <div class="goal"><b>Goal:</b> Define the create/read/update/delete API of your document store, what
+  each operation must touch to keep heap and indexes consistent, and the document-level atomicity
+  guarantee you can honestly make.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>CRUD is the surface the rest of the world uses. Getting its contract right — what's atomic, what
+  happens to indexes, what an update means for a missing field — is what makes the engine usable and
+  correct. MongoDB's CRUD surface is the model: create with <code>insertOne</code>/<code>insertMany</code>,
+  read with <code>find</code>, update with <code>updateOne</code>/<code>updateMany</code>/<code>replaceOne</code>,
+  delete with <code>deleteOne</code>/<code>deleteMany</code>.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB Manual — CRUD operations</a>]</span></p>
+
+  <h2>Create (insert)</h2>
+  <p>The 6.3 sequence: assign <code>_id</code> if absent → serialize → store bytes → insert
+  <code>_id → RecordId</code> into the primary index → insert into every secondary index (6.5) → commit.
+  In MongoDB, "if the collection doesn't exist, insert operations will create it" and inserting a
+  document without <code>_id</code> auto-generates one.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — Create operations</a>; <a href="https://www.mongodb.com/docs/manual/core/document/">_id auto-generation</a>]</span></p>
+
+  <h2>Read (find / get)</h2>
+  <ul>
+    <li><strong>By <code>_id</code>:</strong> the two-step lookup from 6.3 — primary index then heap.</li>
+    <li><strong>By filter:</strong> a query (6.6) that yields a set of matching documents, served either
+    by scanning the heap or by consulting a secondary index (6.7 decides which). "You can specify query
+    filters or criteria to identify which documents to return … <code>{ field: value }</code> matches
+    documents where field equals the specified value."
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — Read operations &amp; query-filter syntax</a>]</span></li>
+  </ul>
+
+  <h2>Update</h2>
+  <p>Two flavors, mirroring MongoDB:</p>
+  <ul>
+    <li><strong>Replace</strong> (<code>replaceOne</code>): swap the whole document for a new one. Keep
+    the same <code>_id</code>; re-serialize; update in place or relocate (6.3); update any secondary
+    indexes whose indexed field changed.</li>
+    <li><strong>Modify</strong> (<code>updateOne</code> with operators like <code>$set</code>): apply a
+    partial change to specific fields. "Updates use the same filter syntax as read operations to identify
+    target documents, with update operators (like <code>$set</code>) to specify modifications."
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — Update operations</a>]</span>
+    Mechanically: read → apply the change in memory → write back like a replace.</li>
+  </ul>
+  <div class="box warn">
+    <div class="box-title">⚠️ An update must fix every index that points at it</div>
+    <p>If you change an indexed field's value, the old secondary-index entry is now wrong. An update is:
+    remove the old index entries for the fields that changed, write the new document bytes (in place or
+    relocated), repoint the primary index if it moved, then insert the new index entries — all in one
+    transaction. Forgetting to maintain a secondary index on update is the classic source of "the query
+    misses a document that's actually there."</p>
+  </div>
+
+  <h2>Delete</h2>
+  <p>Reverse of insert: look up <code>_id</code> → read the document (to know its indexed field values)
+  → remove every secondary-index entry → remove the primary-index entry → free the heap record (and its
+  overflow chain, Phase 4) → commit. <code>deleteOne</code> removes the first match; <code>deleteMany</code>
+  removes all matches of a filter.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — Delete operations</a>]</span></p>
+
+  <h2>The atomicity guarantee you can make</h2>
+  <p>Because each CRUD operation wraps its multi-structure work in one Phase 5 transaction, you can
+  honestly promise <strong>document-level atomicity</strong>: a single insert/update/delete either fully
+  happens (heap + all indexes) or not at all. This matches MongoDB, where "all write operations in
+  MongoDB are atomic at the document level."
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — write operations are atomic at the document level</a>]</span></p>
+  <div class="box warn">
+    <div class="box-title">⚠️ Document-level ≠ multi-document transactional</div>
+    <p>Atomic <em>per operation</em> is not the same as a multi-document transaction spanning several
+    inserts/updates. A <code>deleteMany</code> touching 100 documents being "atomic at the document
+    level" means each document's removal is atomic, not that all 100 commit together — unless you
+    explicitly open one transaction around the whole batch. Be precise about which you offer; don't imply
+    serializable multi-document isolation. (Concurrency &amp; isolation are Phase 7.)</p>
+  </div>
+
+  <h2>The API shape (you implement it in the build)</h2>
+  <span class="code-label">rust — contract only (no bodies here; AI off on the build)</span>
+<pre><code><span class="tok-c">// insert a document; returns its _id (assigned if absent)</span>
+<span class="tok-c">// fn insert(&amp;mut self, coll: &amp;str, doc: Value) -&gt; Result&lt;i64&gt;;</span>
+<span class="tok-c">// fetch by primary key</span>
+<span class="tok-c">// fn get(&amp;mut self, coll: &amp;str, id: i64) -&gt; Result&lt;Option&lt;Value&gt;&gt;;</span>
+<span class="tok-c">// replace the whole document (same _id)</span>
+<span class="tok-c">// fn replace(&amp;mut self, coll: &amp;str, id: i64, doc: Value) -&gt; Result&lt;()&gt;;</span>
+<span class="tok-c">// delete by primary key</span>
+<span class="tok-c">// fn delete(&amp;mut self, coll: &amp;str, id: i64) -&gt; Result&lt;bool&gt;;</span>
+<span class="tok-c">// find documents matching a filter (6.6)</span>
+<span class="tok-c">// fn find(&amp;mut self, coll: &amp;str, filter: &amp;Filter) -&gt; Result&lt;Vec&lt;(i64, Value)&gt;&gt;;</span></code></pre>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Which structures does an insert touch, and how is consistency guaranteed?</p>
+      <details><summary>Show answer</summary><div class="answer">The heap (document bytes), the primary
+      index (<code>_id</code> → <code>RecordId</code>), and every secondary index — all inside one
+      transaction so the change is atomic.</div></details>
+      <p class="q">2. What's the difference between a replace and an operator update (<code>$set</code>)?</p>
+      <details><summary>Show answer</summary><div class="answer">Replace swaps the whole document for a new
+      one; an operator update modifies specific fields. Mechanically the operator update is read → apply
+      change → write back like a replace.</div></details>
+      <p class="q">3. When an update changes an indexed field, what must happen to the secondary index?</p>
+      <details><summary>Show answer</summary><div class="answer">Remove the old entry for that field's old
+      value and insert a new entry for the new value, in the same transaction; otherwise queries on that
+      field go wrong.</div></details>
+      <p class="q">4. What does "atomic at the document level" guarantee, and what does it not?</p>
+      <details><summary>Show answer</summary><div class="answer">Each single write fully happens or not at
+      all (heap + indexes together). It does not make a multi-document batch commit as one unit unless you
+      wrap it in an explicit transaction.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Docs:</strong> <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB CRUD</a> and <a href="https://www.mongodb.com/docs/manual/reference/operator/update/">update operators</a>.</li>
+      <li><strong>Back-link:</strong> <a href="../05-durability-wal/07-transactions.html">Phase 5.7</a> — the transaction that wraps each CRUD op.</li>
+      <li><strong>Forward link:</strong> 6.5 (secondary indexes), 6.6 (the filter that <code>find</code> evaluates).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

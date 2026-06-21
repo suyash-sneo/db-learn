@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>6.3 Storing documents</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p6:6.3", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 6</a> › 6.3</div>
+  <h1>6.3 — Storing documents</h1>
+  <div class="goal"><b>Goal:</b> Assemble a collection from machinery you already built — serialize a
+  document to bytes (6.2), store those bytes as a record (Phase 4), and key them by <code>_id</code>
+  through a primary index (Phase 3) — and understand the two-step lookup that results.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>This is the lesson where the whole stack clicks together. A collection isn't a new storage engine;
+  it's a thin composition: the record store gives you "put these bytes somewhere, get a stable handle
+  back," the B+tree gives you "map a key to a value in sorted order," and the serializer turns documents
+  into bytes. Storing a document is just chaining those three.</p>
+
+  <h2>The two structures behind a collection</h2>
+  <ul>
+    <li><strong>The heap (record store, Phase 4):</strong> holds the serialized document bytes. Inserting
+    returns a <code>RecordId</code> (page + slot) — a physical handle to where the bytes live. It knows
+    nothing about <code>_id</code> or fields.</li>
+    <li><strong>The primary index (B+tree, Phase 3):</strong> maps the logical key <code>_id</code> →
+    the physical <code>RecordId</code>. This is what makes "fetch document 42" an O(log n) lookup instead
+    of a scan, and it keeps <code>_id</code>s ordered (useful for range scans by id).</li>
+  </ul>
+  <p>This separation — logical key in an index, physical bytes in a heap — is the classic
+  <strong>indirection</strong>: the document can move (compaction relocates its bytes, an update may
+  rewrite it elsewhere) and only the primary index entry changes; references by <code>_id</code> stay
+  valid.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 210" role="img" aria-label="Primary index maps _id to RecordId; record store holds the serialized document bytes">
+    <rect class="dg-bg" x="0" y="0" width="560" height="210" rx="10"/>
+    <text class="dg-txt" x="20" y="26" font-weight="700">primary index (B+tree): _id → RecordId</text>
+    <rect class="dg-box" x="20" y="38" width="110" height="30" rx="4"/><text class="dg-txt-s" x="75" y="58" text-anchor="middle">41 → (p3, s2)</text>
+    <rect class="dg-fill-a" x="140" y="38" width="110" height="30" rx="4"/><text class="dg-txt-s" x="195" y="58" text-anchor="middle">42 → (p7, s0)</text>
+    <rect class="dg-box" x="260" y="38" width="110" height="30" rx="4"/><text class="dg-txt-s" x="315" y="58" text-anchor="middle">43 → (p3, s5)</text>
+
+    <line class="dg-edge-hot" x1="195" y1="68" x2="195" y2="120"/><polygon class="dg-arrow" points="195,128 191,118 199,118"/>
+
+    <text class="dg-txt" x="20" y="150" font-weight="700">record store (heap): RecordId → document bytes</text>
+    <rect class="dg-fill-2" x="140" y="160" width="180" height="36" rx="4"/><text class="dg-txt-s" x="230" y="182" text-anchor="middle">(p7,s0): &lt;serialized {_id:42,…}&gt;</text>
+  </svg>
+  <figcaption>Lookup is two steps: <code>_id</code> → <code>RecordId</code> in the index, then
+  <code>RecordId</code> → bytes in the heap.</figcaption>
+  </figure>
+
+  <h2>Insert, step by step</h2>
+  <ol>
+    <li>If the document has no <code>_id</code>, assign one (e.g. an auto-incrementing counter persisted
+    in the collection header — recall Isar auto-increments when the id is null and never reuses deleted
+    ids <span class="src">[src: <a href="https://isar.dev/schema.html">Isar — auto-increment when id is null; deleted ids are not reused</a>]</span>).</li>
+    <li>Serialize the document to bytes (6.2).</li>
+    <li>Store the bytes in the record store → get a <code>RecordId</code> (Phase 4).</li>
+    <li>Insert <code>_id → RecordId</code> into the primary index (Phase 3). If <code>_id</code> already
+    exists, that's a duplicate-key error (the primary index is unique).</li>
+    <li>Do all of this inside one transaction so a crash can't leave the heap and index disagreeing
+    (Phase 5) — see the warning below.</li>
+  </ol>
+
+  <h2>Read, step by step</h2>
+  <ol>
+    <li>Look up <code>_id</code> in the primary index → <code>RecordId</code> (or "not found").</li>
+    <li>Read the bytes at that <code>RecordId</code> from the record store.</li>
+    <li>Deserialize back into a document.</li>
+  </ol>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ The heap and the index must stay consistent — that's a transaction</div>
+    <p>An insert touches <em>two</em> structures (heap + index); an update or delete may touch three
+    (heap + primary index + secondary indexes, 6.5). If a crash lands between them you get an orphaned
+    record (bytes with no index entry) or a dangling pointer (index entry to freed bytes). This is
+    exactly why Phase 5 exists: wrap the whole multi-structure mutation in <strong>one
+    transaction</strong> so it commits atomically or not at all. The document layer must never write the
+    heap and index in separate, independently-durable steps.</p>
+  </div>
+
+  <h2>Where secondary indexes fit (preview)</h2>
+  <p>The primary index answers "by <code>_id</code>." Querying by any other field (6.5) needs another
+  mapping: <em>field value → the <code>_id</code>(s) of documents that have it</em>. Note it stores
+  <code>_id</code>, not <code>RecordId</code> — so when a document's bytes relocate, only the primary
+  index entry updates and the secondary indexes (which point at the stable <code>_id</code>) don't have
+  to change. That's a deliberate consequence of the indirection above.</p>
+
+  <h2>Updating a document's size</h2>
+  <p>Documents are mutable and updates change their size. Two strategies, both built on Phase 4:</p>
+  <ul>
+    <li><strong>Update in place</strong> if the new bytes fit the existing cell (cheapest).</li>
+    <li><strong>Relocate</strong> if they don't: write the new bytes (possibly a new page / overflow
+    chain), repoint the primary index entry to the new <code>RecordId</code>, and free the old cell. The
+    <code>_id</code> is unchanged, so secondary indexes and external references survive.</li>
+  </ul>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What are the two structures that make up a collection, and what does each store?</p>
+      <details><summary>Show answer</summary><div class="answer">A primary index (B+tree) mapping
+      <code>_id</code> → <code>RecordId</code>, and a record-store heap mapping <code>RecordId</code> →
+      the serialized document bytes.</div></details>
+      <p class="q">2. Why store <code>_id</code> (not <code>RecordId</code>) in secondary indexes?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>_id</code> is stable; the document's
+      physical location can change (relocation/compaction). Pointing secondary indexes at <code>_id</code>
+      means only the primary index updates when bytes move.</div></details>
+      <p class="q">3. Why must an insert run inside a transaction?</p>
+      <details><summary>Show answer</summary><div class="answer">It mutates two structures (heap + primary
+      index); a crash between them leaves an orphan record or a dangling index entry. A transaction makes
+      the whole change atomic.</div></details>
+      <p class="q">4. What happens to references when an update grows a document beyond its cell?</p>
+      <details><summary>Show answer</summary><div class="answer">The bytes relocate to a new
+      <code>RecordId</code> and the primary index entry is repointed; the <code>_id</code> is unchanged,
+      so secondary indexes and external references by <code>_id</code> stay valid.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Back-links:</strong> <a href="../03-btree/index.html">Phase 3 (B+tree)</a> for the primary index, <a href="../04-records-freespace/index.html">Phase 4 (record store)</a> for the heap, <a href="../05-durability-wal/index.html">Phase 5 (transactions)</a> for atomic multi-structure writes.</li>
+      <li><strong>Docs:</strong> <a href="https://www.mongodb.com/docs/manual/core/document/">MongoDB documents</a>; <a href="https://isar.dev/schema.html">Isar id auto-increment behavior</a>.</li>
+      <li><strong>Forward link:</strong> 6.4 turns these steps into a CRUD API.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

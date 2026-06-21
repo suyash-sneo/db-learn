@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>6.8 Source dive: Isar</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p6:6.8", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 6</a> › 6.8</div>
+  <h1>6.8 — Source dive: Isar</h1>
+  <div class="goal"><b>Goal:</b> Study Isar — an embedded, schema-annotated database for Flutter/Dart
+  whose core is written in Rust and exposed over an FFI — because it is the closest existing project to
+  what you're building, and extract the design decisions worth borrowing (while being scrupulous about
+  which version you're describing).</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>Documentation: <a href="https://isar.dev/">isar.dev</a> (the published docs describe the
+    <strong>v3</strong> line). Source: <a href="https://github.com/isar/isar">github.com/isar/isar</a>
+    — the core is Rust; the Dart package is the binding. Confirm the version/branch before quoting any
+    internal detail.
+    <span class="src">[src: <a href="https://isar.dev/">isar.dev</a>; <a href="https://github.com/isar/isar">github.com/isar/isar</a>]</span></p>
+  </div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Version discipline (this is a hard rule for Isar)</div>
+    <p>Isar has materially different generations: the documented stable <strong>v3</strong> and a later
+    <strong>v4</strong> rewrite. They differ in storage engine and internals. The published docs at
+    isar.dev describe v3; the homepage itself does not print a version number
+    <span class="verify-tag">⚠️VERIFY</span> the exact version of any page/commit you cite. <strong>Do
+    not</strong> blend v3, v4, or the underlying storage engine into one description. Treat the
+    docs-confirmed <em>data model</em> facts below as solid; treat any <em>internal architecture</em>
+    claim as ⚠️VERIFY until you read it in the repo at a known commit.</p>
+  </div>
+
+  <h2>Docs-confirmed data model (the part you should emulate)</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Concept</th><th>Isar</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr><td>Collection</td><td>a Dart class annotated <code>@collection</code>; "like a database table … a single type of object"</td><td><span class="src">[src: <a href="https://isar.dev/schema.html">schema</a>]</span></td></tr>
+      <tr><td>Primary key</td><td>an <code>Id</code> field — "an alias for int"; auto-increment when null &amp; non-final; deleted ids not reused</td><td><span class="src">[src: <a href="https://isar.dev/schema.html">schema</a>]</span></td></tr>
+      <tr><td>Persistence</td><td>all public fields by default; <code>@Name</code> to rename, <code>@ignore</code> to skip</td><td><span class="src">[src: <a href="https://isar.dev/schema.html">schema</a>]</span></td></tr>
+      <tr><td>Types</td><td>bool/int/double/String/DateTime/Duration, byte/short/float, lists, <code>@embedded</code> objects, <code>@enumerated</code> enums</td><td><span class="src">[src: <a href="https://isar.dev/schema.html">schema</a>]</span></td></tr>
+      <tr><td>Indexes</td><td><code>@Index</code> — unique, composite, and multi-entry (for lists)</td><td><span class="src">[src: <a href="https://isar.dev/schema.html">schema</a>]</span></td></tr>
+      <tr><td>Transactions</td><td>"ACID compliant and handles transactions automatically"; multi-isolate support</td><td><span class="src">[src: <a href="https://isar.dev/">isar.dev</a>]</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Notice how much of this you've already built: collections = heap + primary index (6.3); the integer
+  <code>Id</code> is exactly the simplification you adopted (6.1); unique/composite/multi-entry indexes
+  are 6.5; "ACID … automatically" is Phase 5 wrapped around each write. Isar validates your architecture.</p>
+
+  <h2>Design decisions worth borrowing</h2>
+  <ul>
+    <li><strong>Compile-time schema from annotations + codegen.</strong> Isar uses a generator to turn an
+    annotated Dart class into (de)serialization and query boilerplate, so queries are statically typed.
+    Your engine is schemaless at the storage layer, but you can still offer a typed convenience layer at
+    the edge.</li>
+    <li><strong>Rust core behind an FFI, Dart as the consumer.</strong> This is precisely your Phase 1 /
+    Phase 8 plan: the heavy logic in Rust, exposed over a C ABI, called from Dart. Isar is proof the
+    shape works in production.</li>
+    <li><strong>Indexes as first-class, declared per field</strong>, with explicit unique/composite/
+    multi-entry variants — the same taxonomy as 6.5.</li>
+    <li><strong>Integer primary keys</strong> with auto-increment and no id reuse — a clean,
+    B+tree-friendly choice you can copy verbatim.</li>
+  </ul>
+
+  <h2>Internal architecture — read, don't assume</h2>
+  <p>The questions worth answering by reading the repo at a pinned commit (each is ⚠️VERIFY until you do):</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Question</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>Which storage engine does each Isar version use (e.g. an embedded key-value/B-tree engine vs a from-scratch core)?</td><td><span class="verify-tag">⚠️VERIFY</span> read the core crate's deps at a known tag</td></tr>
+      <tr><td>How are documents serialized on disk (its own binary layout vs a standard format)?</td><td><span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>How are secondary indexes keyed (composite <code>(value,id)</code> vs posting lists)?</td><td><span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>What exactly crosses the FFI boundary (handles, byte buffers, callbacks)?</td><td><span class="verify-tag">⚠️VERIFY</span> compare against your Phase 1 patterns</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="box warn">
+    <div class="box-title">⚠️ Licensing &amp; attribution when reading Isar</div>
+    <p>Per this repo's rules you may include <em>short, attributed</em> illustrative snippets from Isar in
+    a source-dive, but never paste working database-component logic into your build. Read Isar to
+    understand <em>approaches</em>; write your own code. Check Isar's license before copying anything more
+    than a few lines. <span class="verify-tag">⚠️VERIFY</span> the current license in the repo.</p>
+  </div>
+
+  <h2>How Isar differs from your engine (so you don't over-copy)</h2>
+  <ul>
+    <li>Isar's public model is <strong>typed</strong> (a class per collection); yours is
+    <strong>schemaless</strong> (arbitrary documents). Don't import Isar's codegen assumption into your
+    storage layer.</li>
+    <li>Isar targets Dart/Flutter specifically; your C ABI (Phase 8) aims to be consumable beyond Dart.</li>
+    <li>Isar's exact durability/concurrency guarantees come from <em>its</em> implementation and storage
+    engine — your engine only has the guarantees <em>you</em> built (Phase 5), not whatever Isar provides.
+    Don't claim inherited properties.</li>
+  </ul>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why is version discipline especially important when citing Isar?</p>
+      <details><summary>Show answer</summary><div class="answer">Isar v3 and v4 differ in storage engine and
+      internals; the docs describe v3. Blending versions (or the underlying engine) produces false
+      claims — pin the version/commit for any internal detail.</div></details>
+      <p class="q">2. Which Isar data-model choices map directly onto what you built in Phase 6?</p>
+      <details><summary>Show answer</summary><div class="answer">Collections (heap + primary index),
+      integer <code>Id</code> primary keys with auto-increment, and unique/composite/multi-entry
+      indexes.</div></details>
+      <p class="q">3. What architectural pattern does Isar share with your overall project plan?</p>
+      <details><summary>Show answer</summary><div class="answer">A Rust core exposed over a C/FFI boundary,
+      consumed from Dart/Flutter — exactly the Phase 1 / Phase 8 design.</div></details>
+      <p class="q">4. Why can't you assume your engine inherits Isar's durability/concurrency guarantees?</p>
+      <details><summary>Show answer</summary><div class="answer">Those properties come from Isar's specific
+      implementation and storage engine; your engine only has the guarantees you implemented yourself
+      (Phase 5).</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Docs:</strong> <a href="https://isar.dev/schema.html">Isar schema</a>, <a href="https://isar.dev/queries.html">queries</a>, <a href="https://isar.dev/indexes.html">indexes</a>.</li>
+      <li><strong>Source:</strong> <a href="https://github.com/isar/isar">isar/isar</a> — read the core crate at a pinned tag; record the version next to anything you cite.</li>
+      <li><strong>Back-link:</strong> <a href="../01-ffi-spike/index.html">Phase 1 (FFI)</a> — the boundary pattern Isar also uses.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

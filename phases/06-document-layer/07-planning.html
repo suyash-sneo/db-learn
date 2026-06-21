@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>6.7 Query planning basics</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p6:6.7", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 6</a> › 6.7</div>
+  <h1>6.7 — Query planning basics</h1>
+  <div class="goal"><b>Goal:</b> Understand that planning is choosing <em>how</em> to produce candidate
+  documents for the evaluator — most importantly, when to use a secondary index versus a full scan —
+  and the simple cost intuition (selectivity) that drives that choice.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>6.6 gave you a correct-but-slow baseline: scan everything, filter. The whole point of building
+  secondary indexes (6.5) was to avoid touching documents that can't match. The <strong>query
+  planner</strong> is the component that decides, for a given filter, which access path to use. A
+  good plan can be thousands of times faster than a scan; a bad plan can be slower than a scan. And —
+  the non-negotiable — <em>every</em> plan must return the same documents the predicate accepts.</p>
+
+  <h2>Plan = access path + residual filter</h2>
+  <p>A plan has two parts:</p>
+  <ul>
+    <li><strong>Access path:</strong> how to generate candidate documents. Either a <em>full scan</em>
+    (every document) or an <em>index scan</em> (use a secondary index to fetch only documents in a key
+    range / equal to a value).</li>
+    <li><strong>Residual filter:</strong> the part of the predicate the access path didn't already
+    enforce, applied by the evaluator (6.6) to each candidate.</li>
+  </ul>
+  <p>Example: filter <code>city == "London" AND age &gt; 30</code> with an index on <code>city</code>.
+  Plan: index-scan <code>city = "London"</code> to get candidate <code>_id</code>s; for each, fetch the
+  document and apply the residual <code>age &gt; 30</code>. The index did the selective part; the
+  evaluator finishes the rest. Correctness is preserved because the residual is still the full predicate
+  minus what the access path guaranteed.</p>
+
+  <h2>Which access path? Selectivity</h2>
+  <p><strong>Selectivity</strong> is the fraction of documents a condition keeps. A condition matching 5
+  of 1,000,000 documents is highly selective (great for an index); one matching 800,000 is not (an index
+  would do a huge number of random primary-index lookups — often slower than a straight scan). The core
+  heuristic:</p>
+  <ul>
+    <li>If a filter condition is on an <strong>indexed</strong> field and is <strong>selective</strong>,
+    use that index and apply the rest as a residual.</li>
+    <li>If no useful index exists, or the most selective condition still matches most of the collection,
+    <strong>full scan</strong>.</li>
+    <li>With several usable indexes, prefer the one expected to be most selective (fewest candidates).</li>
+  </ul>
+  <p>Real planners estimate selectivity from <strong>statistics</strong> (histograms, distinct-value
+  counts) and compare estimated <em>costs</em>. That cost-based machinery is large; for your engine a
+  simple rule-based planner is enough and is honestly labeled as such.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 180" role="img" aria-label="Full scan touches all documents; index scan touches only the matching key range">
+    <rect class="dg-bg" x="0" y="0" width="560" height="180" rx="10"/>
+    <text class="dg-txt" x="20" y="24" font-weight="700">full scan: read all, filter</text>
+    <rect class="dg-box" x="20" y="34" width="34" height="26" rx="3"/><rect class="dg-box" x="58" y="34" width="34" height="26" rx="3"/><rect class="dg-box" x="96" y="34" width="34" height="26" rx="3"/><rect class="dg-box" x="134" y="34" width="34" height="26" rx="3"/><rect class="dg-box" x="172" y="34" width="34" height="26" rx="3"/><rect class="dg-fill-2" x="210" y="34" width="34" height="26" rx="3"/>
+    <text class="dg-txt-s" x="20" y="84">touches every document (O(n))</text>
+
+    <text class="dg-txt" x="300" y="24" font-weight="700">index scan: read only matches</text>
+    <rect class="dg-fill-a" x="300" y="34" width="60" height="26" rx="3"/><text class="dg-txt-s" x="330" y="52" text-anchor="middle">key=x</text>
+    <line class="dg-edge-hot" x1="330" y1="60" x2="330" y2="92"/><polygon class="dg-arrow" points="330,100 326,90 334,90"/>
+    <rect class="dg-fill-2" x="312" y="100" width="36" height="26" rx="3"/>
+    <text class="dg-txt-s" x="300" y="150">touches only candidates, then residual filter</text>
+  </svg>
+  <figcaption>The planner trades a guaranteed O(n) scan for an index lookup when the condition is
+  selective enough to be worth it.</figcaption>
+  </figure>
+
+  <h2>A workable rule-based planner for your engine</h2>
+  <ol>
+    <li>Flatten the top-level <code>AND</code> into a list of conditions.</li>
+    <li>Find conditions whose field has an index and whose op is index-usable (<code>Eq</code>, range,
+    <code>In</code>).</li>
+    <li>If any exist, pick one (e.g. an equality over a range; if you have stats, the most selective),
+    use its index to produce candidate <code>_id</code>s, and apply the remaining conditions as a
+    residual filter.</li>
+    <li>Otherwise, full scan with the whole filter as residual.</li>
+  </ol>
+  <p><code>OR</code> across different fields is harder (you may need to union index results or fall back
+  to a scan); it's fine for a first engine to scan on top-level <code>OR</code> and optimize only
+  <code>AND</code>-of-conditions — just say so.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ A plan that changes results is a bug, not an optimization</div>
+    <p>The single rule that must never break: the planned query returns <em>exactly</em> the same set as
+    the full-scan baseline (6.6). Two classic ways to violate it: (1) using an index that omits
+    documents missing the field when the query should include them; (2) forgetting the residual filter so
+    you return everything in the key range, including documents the rest of the predicate rejects. Test
+    every plan against the scan oracle on the same data.</p>
+  </div>
+
+  <h2>Honest scope</h2>
+  <p>This is "planning basics." You are <em>not</em> building a cost-based optimizer with join ordering,
+  statistics, and plan caching. You're building the one decision that matters most for a single-collection
+  document store: <strong>index this condition, or scan</strong> — with everything else handled as a
+  residual filter, verified against the scan.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What two parts make up a query plan?</p>
+      <details><summary>Show answer</summary><div class="answer">An access path (full scan or index scan
+      that generates candidates) and a residual filter (the rest of the predicate applied by the
+      evaluator to each candidate).</div></details>
+      <p class="q">2. What is selectivity, and how does it drive the choice of access path?</p>
+      <details><summary>Show answer</summary><div class="answer">The fraction of documents a condition
+      keeps. Highly selective + indexed → use the index; low selectivity or no index → full scan, since a
+      non-selective index does many lookups for little gain.</div></details>
+      <p class="q">3. Why is a residual filter necessary after an index scan?</p>
+      <details><summary>Show answer</summary><div class="answer">The index only enforced one condition; the
+      remaining conditions of the predicate must still be checked on each candidate to keep the result
+      correct.</div></details>
+      <p class="q">4. What invariant must every plan satisfy?</p>
+      <details><summary>Show answer</summary><div class="answer">It returns exactly the same document set
+      as the full-scan baseline for the same filter and data — same correctness, different cost.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> <em>Database Internals</em> (query planning / cost-based optimization) and <em>Designing Data-Intensive Applications</em> (indexes &amp; access paths).</li>
+      <li><strong>Docs:</strong> <a href="https://www.mongodb.com/docs/manual/core/query-plans/">MongoDB — query plans</a> and <code>explain</code> output, for how a real planner reports its choice.</li>
+      <li><strong>Forward link:</strong> the build implements this rule-based planner and tests it against the scan oracle.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

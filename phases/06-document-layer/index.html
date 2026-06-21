@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 6 — The document layer</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 6</div>
+  <span class="pill">Phase 6</span>
+  <h1>The document layer</h1>
+  <p class="lead">Phases 2–5 built a durable byte store: pages, an ordered index, variable-length
+  records, and crash-safe transactions. Everything so far has been content-agnostic — it stores opaque
+  bytes. Phase 6 gives those bytes <em>meaning</em>. You'll serialize schemaless documents, store them
+  in collections keyed by <code>_id</code>, run CRUD through the engine, add secondary indexes on
+  fields, and evaluate filter queries — with a first taste of query planning (use an index or scan?).
+  This is the layer that turns "a storage engine" into "a document database."</p>
+
+  <div class="box deeper">
+    <div class="box-title">Why this comes after durability</div>
+    <p>A document is just a variable-length record (Phase 4) whose bytes happen to be a serialized
+    object, written inside a transaction (Phase 5) and looked up through an index (Phase 3). The
+    document layer is not a new storage mechanism — it's a <em>meaning</em> layer assembled from the
+    primitives you already built. Doing it last means each new concept (serialization, secondary
+    indexes, query evaluation) rests on machinery you fully understand.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 6</div>
+    <p>Serialize a schemaless document to bytes and back, store it in a collection keyed by a
+    primary <code>_id</code> index, perform insert/find/update/delete, build a secondary index that
+    maps a field's values to documents, evaluate a filter query against documents, and choose between
+    an index lookup and a full scan — then wire it all into a small document store.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p6");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

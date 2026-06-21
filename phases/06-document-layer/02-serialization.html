@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>6.2 BSON vs MessagePack vs JSON</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p6:6.2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 6</a> › 6.2</div>
+  <h1>6.2 — Serialization: BSON vs MessagePack vs JSON</h1>
+  <div class="goal"><b>Goal:</b> Understand how a document becomes bytes, why a <em>self-describing
+  binary</em> format beats text for a database, and the concrete trade-offs between JSON, MessagePack,
+  and BSON — so you can pick one and know what you gave up.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>A document lives in memory as a tree of fields and values; on disk it's a byte string in a record
+  (Phase 4). The <strong>serialization format</strong> is the bidirectional rule that converts between
+  the two. It's not a cosmetic choice: it decides how compact your data is, how fast you can read a
+  single field, whether you can tell a string from binary, and whether you can navigate a document
+  without parsing all of it.</p>
+
+  <h2>What "self-describing" means and why a DB needs it</h2>
+  <p>Because your store is schemaless (6.1), the bytes themselves must say what each value is — there's
+  no external schema to consult. A <strong>self-describing</strong> format tags every value with its
+  type inline. MessagePack is described exactly this way: it "uses a type-prefixed byte format where the
+  first byte determines the data type … This makes it self-describing — deserializers can determine type
+  information from the binary stream itself."
+  <span class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec — format overview</a>]</span>
+  BSON does the same with a one-byte type code before each element.
+  <span class="src">[src: <a href="https://bsonspec.org/spec.html">BSON spec — each element is <code>type_code · name · value</code></a>]</span></p>
+
+  <h2>JSON — the baseline (text)</h2>
+  <ul>
+    <li><strong>Human-readable, ubiquitous</strong>, and self-describing in a loose sense (you can see
+    the structure).</li>
+    <li><strong>But:</strong> numbers are decimal text (slow to parse, lossy for large integers); there's
+    <strong>no binary type</strong> (blobs must be base64-encoded, inflating size ~33%); no length
+    prefixes, so to skip a value you must parse it; every key is repeated as text.</li>
+    <li><strong>Verdict:</strong> great as an interchange/debug format, poor as an on-disk database
+    format. Many engines accept JSON at the edge and store a binary form internally.</li>
+  </ul>
+
+  <h2>MessagePack — compact, self-describing binary</h2>
+  <p>MessagePack is "an object serialization specification like JSON" that encodes the same data model in
+  far fewer bytes by tagging each value with a one-byte format code.
+  <span class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec</a>]</span>
+  Its first-byte families pack small values into a single byte:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>First byte</th><th>Format</th></tr></thead>
+    <tbody>
+      <tr><td><code>0x00</code>–<code>0x7f</code></td><td>positive fixint (small ints in one byte)</td></tr>
+      <tr><td><code>0x80</code>–<code>0x8f</code></td><td>fixmap (maps up to 15 entries)</td></tr>
+      <tr><td><code>0x90</code>–<code>0x9f</code></td><td>fixarray (arrays up to 15 elements)</td></tr>
+      <tr><td><code>0xa0</code>–<code>0xbf</code></td><td>fixstr (strings up to 31 bytes)</td></tr>
+      <tr><td><code>0xc0</code>, <code>0xc2</code>, <code>0xc3</code></td><td>nil, false, true</td></tr>
+      <tr><td><code>0xc4</code>–<code>0xdb</code></td><td>variable-length bin / float / int / str / array / map</td></tr>
+      <tr><td><code>0xe0</code>–<code>0xff</code></td><td>negative fixint</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec — first-byte format families</a>]</p>
+  <p>Unlike JSON it <strong>distinguishes binary (<code>bin</code>) from text (<code>str</code>)</strong>
+  and "encodes type information in the binary format itself," with serializers told they "SHOULD use the
+  format which represents the data in the smallest number of bytes."
+  <span class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec — bin vs str, smallest-format rule</a>]</span>
+  The cost: it's compact but <em>not random-access</em> — to reach the 5th field you generally walk the
+  preceding ones (their length prefixes let you skip quickly, but it's still sequential).</p>
+
+  <h2>BSON — the database-shaped binary format</h2>
+  <p>BSON ("Binary JSON") is what MongoDB stores. A BSON document is <code>int32 · e_list ·
+  0x00</code>: a 4-byte little-endian total length, then a list of elements, then a terminating zero
+  byte.
+  <span class="src">[src: <a href="https://bsonspec.org/spec.html">BSON spec — document = int32 length, element list, trailing 0x00</a>]</span>
+  Each element is a one-byte type code, the field name as a C-string, then the value. Key type codes:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Code</th><th>Type</th></tr></thead>
+    <tbody>
+      <tr><td><code>0x01</code></td><td>64-bit binary floating point (double)</td></tr>
+      <tr><td><code>0x02</code></td><td>UTF-8 string</td></tr>
+      <tr><td><code>0x03</code></td><td>embedded document</td></tr>
+      <tr><td><code>0x04</code></td><td>array</td></tr>
+      <tr><td><code>0x05</code></td><td>binary data</td></tr>
+      <tr><td><code>0x07</code></td><td>ObjectId</td></tr>
+      <tr><td><code>0x08</code></td><td>boolean</td></tr>
+      <tr><td><code>0x09</code></td><td>UTC datetime (int64 ms since Unix epoch)</td></tr>
+      <tr><td><code>0x0A</code></td><td>null</td></tr>
+      <tr><td><code>0x10</code></td><td>32-bit integer</td></tr>
+      <tr><td><code>0x12</code></td><td>64-bit integer</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="src">[src: <a href="https://bsonspec.org/spec.html">BSON spec — element type codes</a>]</p>
+  <p>A BSON string is encoded as an <code>int32</code> giving "the number of bytes … plus one for the
+  trailing null byte," then the UTF-8 bytes, then <code>0x00</code>.
+  <span class="src">[src: <a href="https://bsonspec.org/spec.html">BSON spec — string framing</a>]</span>
+  The defining trait: <strong>BSON length-prefixes documents, arrays, and strings</strong>. That makes
+  it <em>traversable</em> — you can skip an entire embedded document or string by reading its length and
+  jumping, without parsing the contents. That's exactly what a database wants for fast field access and
+  partial reads. The price is size: BSON is often <em>larger</em> than MessagePack (and sometimes larger
+  than the equivalent JSON for small values) because of those length prefixes and richer type tags.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 150" role="img" aria-label="BSON document layout: int32 length, then typed elements, then trailing zero byte">
+    <rect class="dg-bg" x="0" y="0" width="560" height="150" rx="10"/>
+    <rect class="dg-fill-a" x="20" y="44" width="80" height="40" rx="4"/><text class="dg-txt-s" x="60" y="68" text-anchor="middle">int32 len</text>
+    <rect class="dg-box" x="104" y="44" width="150" height="40" rx="4"/><text class="dg-txt-s" x="179" y="62" text-anchor="middle">0x02 "name"</text><text class="dg-txt-s" x="179" y="78" text-anchor="middle">len·"Ada"·00</text>
+    <rect class="dg-box" x="258" y="44" width="150" height="40" rx="4"/><text class="dg-txt-s" x="333" y="62" text-anchor="middle">0x10 "born"</text><text class="dg-txt-s" x="333" y="78" text-anchor="middle">int32 1815</text>
+    <rect class="dg-fill-2" x="412" y="44" width="60" height="40" rx="4"/><text class="dg-txt-s" x="442" y="68" text-anchor="middle">0x00</text>
+    <text class="dg-txt-s" x="20" y="116">length prefix lets you skip the whole doc; each element is self-typed; 0x00 ends the list</text>
+  </svg>
+  <figcaption>BSON trades bytes for traversability: length prefixes mean you can skip without parsing.</figcaption>
+  </figure>
+
+  <h2>Choosing for your engine</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>JSON</th><th>MessagePack</th><th>BSON</th></tr></thead>
+    <tbody>
+      <tr><td>Encoding</td><td>text</td><td>binary</td><td>binary</td></tr>
+      <tr><td>Self-describing</td><td>loosely</td><td>yes</td><td>yes</td></tr>
+      <tr><td>Binary type</td><td>no (base64)</td><td>yes</td><td>yes</td></tr>
+      <tr><td>Length-prefixed (skippable)</td><td>no</td><td>partial</td><td>yes (docs/arrays/strings)</td></tr>
+      <tr><td>Compactness</td><td>worst</td><td>best</td><td>middling</td></tr>
+      <tr><td>Random field access</td><td>no</td><td>no</td><td>good</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>For a document database, a self-describing binary format is the right call; BSON's traversability
+  is the feature that justifies its extra bytes. For <strong>your build</strong> the learning is in the
+  storage/index/query layers, not in hand-rolling a serializer, so you'll lean on Rust's
+  <code>serde</code> (Phase 0.9) with a self-describing format and treat the encoded bytes as the
+  document payload. Picking MessagePack (via a serde codec) keeps documents compact; picking JSON keeps
+  them debuggable. Either is fine for the build as long as it round-trips losslessly — just record which
+  one and why.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <p><code>serde</code> separates the data model from the format: the same
+    <code>#[derive(Serialize, Deserialize)]</code> type can be encoded as JSON (<code>serde_json</code>)
+    or MessagePack (<code>rmp_serde</code>) by swapping the codec. A dynamic document can be modeled as
+    <code>serde_json::Value</code> (an enum of null/bool/number/string/array/object). See the
+    <a href="https://serde.rs/">serde guide</a> and the <a href="https://doc.rust-lang.org/book/ch06-01-defining-an-enum.html">Rust Book ch.6 (enums)</a>.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why must a schemaless store use a self-describing format?</p>
+      <details><summary>Show answer</summary><div class="answer">There's no external schema, so the bytes
+      must carry each value's type inline; both MessagePack and BSON tag every value with a type
+      code.</div></details>
+      <p class="q">2. Name two concrete weaknesses of JSON as an on-disk database format.</p>
+      <details><summary>Show answer</summary><div class="answer">No binary type (blobs become bloated
+      base64) and no length prefixes (you must parse a value to skip it); also numbers are decimal text
+      and keys repeat as text.</div></details>
+      <p class="q">3. What does BSON's length-prefixing of documents/arrays/strings buy you, and at what cost?</p>
+      <details><summary>Show answer</summary><div class="answer">Traversability — you can skip a whole
+      sub-document/string by reading its length and jumping, enabling fast field access — at the cost of
+      extra bytes (BSON is often larger than MessagePack).</div></details>
+      <p class="q">4. Which BSON byte starts a UTF-8 string element, and how is the string framed?</p>
+      <details><summary>Show answer</summary><div class="answer">Type code <code>0x02</code>; the string is
+      an <code>int32</code> (byte count including the trailing null) then the UTF-8 bytes then
+      <code>0x00</code>.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://bsonspec.org/spec.html">BSON specification</a> — full type-code table and grammar.</li>
+      <li><strong>Spec:</strong> <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack specification</a> — format families and rules.</li>
+      <li><strong>Rust:</strong> <a href="https://serde.rs/">serde</a> + <a href="https://docs.rs/rmp-serde/">rmp-serde</a> / <a href="https://docs.rs/serde_json/">serde_json</a>.</li>
+      <li><strong>Forward link:</strong> 6.3 stores the serialized bytes as a record keyed by <code>_id</code>.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

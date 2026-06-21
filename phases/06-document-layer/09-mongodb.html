@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>6.9 MongoDB data model &amp; CRUD</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p6:6.9", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 6</a> › 6.9</div>
+  <h1>6.9 — MongoDB data model &amp; CRUD</h1>
+  <div class="goal"><b>Goal:</b> Use MongoDB — the canonical document database — as the reference for the
+  external behavior your engine emulates: its document model, the <code>_id</code> contract, size limits,
+  dot notation, and the CRUD + filter surface, with the precise facts sourced.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>The MongoDB Manual is the authority for the model your engine imitates.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — Documents</a>; <a href="https://www.mongodb.com/docs/manual/crud/">Manual — CRUD</a>]</span></p>
+  </div>
+
+  <h2>The data model, precisely</h2>
+  <ul>
+    <li><strong>Documents are BSON.</strong> "MongoDB stores data records as BSON documents … a binary
+    representation of JSON documents that contains more data types than JSON." Documents are
+    field-and-value pairs; a value can be another document, an array, or an array of documents.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — Documents</a>]</span></li>
+    <li><strong>Field order is preserved</strong> (BSON documents are ordered, unlike a JS object), and
+    <strong>field names must be unique</strong> within a document; names cannot contain the null
+    character.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — field names &amp; order</a>]</span></li>
+    <li><strong><code>_id</code>:</strong> required, unique, the primary key; "always the first field";
+    auto-generated as an <code>ObjectId</code> if omitted; immutable; may be any BSON type "except arrays,
+    regex, or undefined"; MongoDB creates a unique index on it.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — the _id field</a>]</span></li>
+    <li><strong>Size limit:</strong> "The maximum BSON document size is 16 mebibytes (16 MB)" — to bound
+    per-document RAM and bandwidth; larger blobs use GridFS.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — document size limit</a>]</span></li>
+    <li><strong>Dot notation</strong> reaches into structure: <code>"name.last"</code> for an embedded
+    field, <code>"contribs.2"</code> for the third (zero-based) array element.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — dot notation</a>]</span></li>
+  </ul>
+
+  <h2>The CRUD surface</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Op</th><th>Methods</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Create</td><td><code>insertOne</code>, <code>insertMany</code></td><td>creates the collection if absent; auto-<code>_id</code> if omitted</td></tr>
+      <tr><td>Read</td><td><code>find</code></td><td>query filter selects documents</td></tr>
+      <tr><td>Update</td><td><code>updateOne</code>, <code>updateMany</code>, <code>replaceOne</code></td><td>filter + update operators (<code>$set</code>, …)</td></tr>
+      <tr><td>Delete</td><td><code>deleteOne</code>, <code>deleteMany</code></td><td>filter selects what to remove</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">Manual — CRUD operations</a>]</p>
+  <p>"All write operations in MongoDB are atomic at the document level."
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">Manual — CRUD</a>]</span>
+  — the exact guarantee your Phase 5-wrapped CRUD reproduces (6.4).</p>
+
+  <h2>Query filters</h2>
+  <p>Reads, updates, and deletes share one filter syntax:</p>
+  <ul>
+    <li><strong>Equality:</strong> <code>{ field: value }</code> matches documents where field equals
+    value.</li>
+    <li><strong>Operators:</strong> <code>{ field: { $gt: v } }</code>, with <code>$gt</code> (greater
+    than), <code>$lt</code> (less than), <code>$in</code> (matches any value in an array), and many more.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">Manual — query-filter syntax</a>]</span></li>
+  </ul>
+  <p>This is exactly the filter tree of 6.6: leaves are <code>{field: value}</code> or
+  <code>{field: {$op: value}}</code>, multiple fields imply AND, and <code>$and</code>/<code>$or</code>
+  combine sub-filters.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ MongoDB is the spec to imitate, not a property you inherit</div>
+    <p>Citing the MongoDB Manual establishes the <em>behavior</em> your engine targets — the document
+    model, the <code>_id</code> contract, the filter semantics. It does <strong>not</strong> mean your
+    engine has MongoDB's performance, sharding, replication, or isolation. You are matching an interface,
+    not importing an implementation. Keep your claims to what you actually built (e.g. integer
+    <code>_id</code> not <code>ObjectId</code>; single-node not replicated).</p>
+  </div>
+
+  <h2>What your engine adopts vs simplifies</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Aspect</th><th>MongoDB</th><th>Your engine</th></tr></thead>
+    <tbody>
+      <tr><td>Document format</td><td>BSON</td><td>a self-describing binary (your choice, 6.2)</td></tr>
+      <tr><td><code>_id</code> type</td><td>any BSON type; auto <code>ObjectId</code></td><td>integer, auto-increment (6.1)</td></tr>
+      <tr><td>Atomicity</td><td>document-level (multi-doc txns available)</td><td>document-level via Phase 5</td></tr>
+      <tr><td>Filters</td><td>rich operator set</td><td>Eq/range/In + AND/OR/NOT (6.6)</td></tr>
+      <tr><td>Scale-out</td><td>sharding, replication</td><td>single embedded file</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. State the <code>_id</code> contract MongoDB defines.</p>
+      <details><summary>Show answer</summary><div class="answer">Required, unique primary key; always the
+      first field; auto-generated <code>ObjectId</code> if omitted; immutable; unique index created on it;
+      any BSON type except array/regex/undefined.</div></details>
+      <p class="q">2. What is the maximum BSON document size, and why does the limit exist?</p>
+      <details><summary>Show answer</summary><div class="answer">16 MB (mebibytes), to bound per-document
+      RAM and bandwidth; larger data uses GridFS.</div></details>
+      <p class="q">3. How does MongoDB's filter syntax map to your 6.6 filter tree?</p>
+      <details><summary>Show answer</summary><div class="answer">Leaves are <code>{field: value}</code>
+      (equality) or <code>{field: {$op: value}}</code> (operators); multiple fields are an implicit AND;
+      <code>$and</code>/<code>$or</code> are the connectives.</div></details>
+      <p class="q">4. Citing the MongoDB Manual proves what about your engine — and what does it not?</p>
+      <details><summary>Show answer</summary><div class="answer">It defines the external behavior/interface
+      you target; it does not give your engine MongoDB's performance, replication, sharding, or isolation
+      — you only have what you built.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Docs:</strong> <a href="https://www.mongodb.com/docs/manual/core/document/">Documents</a>, <a href="https://www.mongodb.com/docs/manual/crud/">CRUD</a>, <a href="https://www.mongodb.com/docs/manual/tutorial/query-documents/">query documents</a>.</li>
+      <li><strong>Spec:</strong> <a href="https://bsonspec.org/spec.html">BSON specification</a> (what MongoDB actually stores).</li>
+      <li><strong>Forward link:</strong> the build implements the simplified subset in this table.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>
