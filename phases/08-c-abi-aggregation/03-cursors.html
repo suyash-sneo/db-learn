@@ -50,6 +50,34 @@
   reusable output buffer because that would give the bytes a different lifetime from every other engine
   output. A separate <code>minidb_cursor_last_error</code> copies diagnostic detail from the cursor handle.</p>
 
+  <figure>
+  <svg viewBox="0 0 560 230" role="img" aria-label="cursor_next returns one of three outcomes: a document and loop, end, or error">
+    <rect class="dg-bg" x="0" y="0" width="560" height="230" rx="10"/>
+    <rect class="dg-box-a" x="200" y="20" width="170" height="42" rx="6"/>
+    <text class="dg-txt" x="285" y="39" text-anchor="middle">cursor_next(cur)</text>
+    <text class="dg-txt-s" x="285" y="54" text-anchor="middle">returns i32</text>
+    <path class="dg-arrow" d="M250,62 L150,100" marker-end="url(#a83)"/>
+    <path class="dg-arrow" d="M285,62 L285,100" marker-end="url(#a83)"/>
+    <path class="dg-arrow" d="M320,62 L430,100" marker-end="url(#a83)"/>
+    <rect class="dg-box" x="40" y="102" width="180" height="50" rx="6"/>
+    <text class="dg-txt" x="130" y="122" text-anchor="middle">0 → document</text>
+    <text class="dg-txt-s" x="130" y="139" text-anchor="middle">(ptr,len); free_buf each</text>
+    <rect class="dg-box" x="232" y="102" width="106" height="50" rx="6"/>
+    <text class="dg-txt" x="285" y="122" text-anchor="middle">1 → END</text>
+    <text class="dg-txt-s" x="285" y="139" text-anchor="middle">(NULL,0); stop</text>
+    <rect class="dg-fill-2" x="350" y="102" width="180" height="50" rx="6"/>
+    <text class="dg-txt" x="440" y="122" text-anchor="middle">&lt;0 → error</text>
+    <text class="dg-txt-s" x="440" y="139" text-anchor="middle">last_error; stop</text>
+    <path class="dg-arrow" d="M40,127 L14,127 L14,41 L198,41" marker-end="url(#a83)"/>
+    <text class="dg-txt-s" x="78" y="34" text-anchor="middle">loop</text>
+    <text class="dg-txt-s" x="285" y="200" text-anchor="middle">then cursor_close(cur) exactly once</text>
+    <defs><marker id="a83" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>The three-valued return drives the loop: keep calling <code>next</code> while it yields
+  <code>0</code>; <code>1</code> ends cleanly and a negative code routes to <code>last_error</code>. Either
+  way, close the cursor exactly once.</figcaption>
+  </figure>
+
   <h2>Do not encode the parent lifetime as a raw borrow</h2>
   <p>A cursor that merely stores a borrowed pointer to <code>Db</code> becomes dangling when the caller
   closes the database first. Writing "close cursors first" in documentation does not make that API robust.

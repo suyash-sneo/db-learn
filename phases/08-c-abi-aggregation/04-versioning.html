@@ -120,6 +120,29 @@
     <li>Keep the exported symbol set minimal and prefixed (8.1) — fewer promises to keep.</li>
   </ul>
 
+  <figure>
+  <svg viewBox="0 0 520 180" role="img" aria-label="After loading the library the caller checks minidb_abi_version; on match it uses the API, on mismatch it refuses to call further symbols">
+    <rect class="dg-bg" x="0" y="0" width="520" height="180" rx="10"/>
+    <rect class="dg-box" x="20" y="70" width="130" height="40" rx="6"/>
+    <text class="dg-txt-s" x="85" y="94" text-anchor="middle">load library</text>
+    <rect class="dg-box-a" x="180" y="66" width="150" height="48" rx="6"/>
+    <text class="dg-txt" x="255" y="86" text-anchor="middle">abi_version()</text>
+    <text class="dg-txt-s" x="255" y="102" text-anchor="middle">== expected?</text>
+    <path class="dg-arrow" d="M150,90 L178,90" marker-end="url(#a44)"/>
+    <rect class="dg-box" x="360" y="28" width="140" height="40" rx="6"/>
+    <text class="dg-txt-s" x="430" y="52" text-anchor="middle">match → use the API</text>
+    <path class="dg-arrow" d="M330,80 L358,55" marker-end="url(#a44)"/>
+    <text class="dg-txt-s" x="348" y="56" text-anchor="middle">yes</text>
+    <rect class="dg-fill-2" x="360" y="112" width="140" height="40" rx="6"/>
+    <text class="dg-txt-s" x="430" y="136" text-anchor="middle">mismatch → refuse</text>
+    <path class="dg-arrow" d="M330,100 L358,125" marker-end="url(#a44)"/>
+    <text class="dg-txt-s" x="348" y="126" text-anchor="middle">no</text>
+    <defs><marker id="a44" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>New callers verify the loaded ABI version <em>before</em> looking up any other symbol; an
+  incompatible library is rejected rather than called with mismatched signatures or struct layouts.</figcaption>
+  </figure>
+
   <h2>Symbol &amp; layout stability</h2>
   <p>The ABI includes exported symbol names, calling conventions, parameter/return types, integer widths,
   and the memory layout of any exposed <code>#[repr(C)]</code> type. It also has behavioral contracts that

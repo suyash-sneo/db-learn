@@ -55,6 +55,29 @@
   success. That ordering — log the change durably first, declare victory second — is the heart of every
   mechanism in this phase.</p>
 
+  <figure>
+  <svg viewBox="0 0 560 180" role="img" aria-label="Commit logs the whole change durably before reporting success; a crash before the fsync barrier loses the transaction, after it the transaction survives">
+    <rect class="dg-bg" x="0" y="0" width="560" height="180" rx="10"/>
+    <text class="dg-txt" x="20" y="26" font-weight="700">commit protocol (time →)</text>
+    <rect class="dg-box" x="20" y="40" width="190" height="40" rx="6"/>
+    <text class="dg-txt-s" x="115" y="64" text-anchor="middle">log whole change durably</text>
+    <rect class="dg-box-a" x="230" y="34" width="34" height="52" rx="4"/>
+    <text class="dg-txt-s" x="247" y="100" text-anchor="middle">fsync</text>
+    <text class="dg-txt-s" x="247" y="114" text-anchor="middle">barrier</text>
+    <rect class="dg-box" x="284" y="40" width="190" height="40" rx="6"/>
+    <text class="dg-txt-s" x="379" y="64" text-anchor="middle">return "committed"</text>
+    <path class="dg-arrow" d="M210,60 L228,60" marker-end="url(#a51)"/>
+    <path class="dg-arrow" d="M266,60 L282,60" marker-end="url(#a51)"/>
+    <text class="dg-txt-s" x="115" y="150" text-anchor="middle">crash here → transaction gone</text>
+    <text class="dg-txt-s" x="115" y="165" text-anchor="middle">(atomicity preserved)</text>
+    <text class="dg-txt-s" x="379" y="150" text-anchor="middle">crash here → transaction survives</text>
+    <text class="dg-txt-s" x="379" y="165" text-anchor="middle">(durability)</text>
+    <defs><marker id="a51" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>The fsync of the log is the single instant the transaction becomes durable. Reporting
+  success before that barrier would break the atomicity-and-durability pair.</figcaption>
+  </figure>
+
   <div class="box warn">
     <div class="box-title">⚠️ "Write returned" is not "committed"</div>
     <p>From Phase 2 you already know <code>write()</code> only hands bytes to the OS page cache, and even

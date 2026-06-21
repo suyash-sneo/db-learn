@@ -47,6 +47,34 @@
   for an embedded library because it kills the host application.
   <span class="src">[src: <a href="https://doc.rust-lang.org/nomicon/ffi.html#ffi-and-unwinding">Rustonomicon: FFI and unwinding</a>]</span></p>
 
+  <figure>
+  <svg viewBox="0 0 560 200" role="img" aria-label="A Rust panic either aborts the process at extern C or is caught and returned as an error code">
+    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
+    <rect class="dg-box" x="18" y="78" width="150" height="44" rx="6"/>
+    <text class="dg-txt" x="93" y="96" text-anchor="middle">Rust panic</text>
+    <text class="dg-txt-s" x="93" y="113" text-anchor="middle">unwrap · OOB · panic!</text>
+    <path class="dg-arrow" d="M168,90 L208,52" marker-end="url(#a16)"/>
+    <rect class="dg-box-a" x="210" y="34" width="150" height="38" rx="6"/>
+    <text class="dg-txt" x="285" y="51" text-anchor="middle">catch_unwind</text>
+    <text class="dg-txt-s" x="285" y="66" text-anchor="middle">wraps the body</text>
+    <path class="dg-arrow" d="M360,53 L398,53" marker-end="url(#a16)"/>
+    <rect class="dg-box-a" x="400" y="34" width="148" height="38" rx="6"/>
+    <text class="dg-txt-s" x="474" y="51" text-anchor="middle">return ERR_PANIC</text>
+    <text class="dg-txt-s" x="474" y="66" text-anchor="middle">Dart sees an error</text>
+    <path class="dg-arrow" d="M168,110 L208,148" marker-end="url(#a16)"/>
+    <rect class="dg-fill-2" x="210" y="130" width="150" height="38" rx="6"/>
+    <text class="dg-txt" x="285" y="147" text-anchor="middle">reaches extern "C"</text>
+    <text class="dg-txt-s" x="285" y="162" text-anchor="middle">(no catch)</text>
+    <path class="dg-arrow" d="M360,149 L398,149" marker-end="url(#a16)"/>
+    <rect class="dg-fill-2" x="400" y="130" width="148" height="38" rx="6"/>
+    <text class="dg-txt" x="474" y="147" text-anchor="middle">process aborts</text>
+    <text class="dg-txt-s" x="474" y="162" text-anchor="middle">host app dies</text>
+    <defs><marker id="a16" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Same panic, two boundary policies: contain it as <code>ERR_PANIC</code>, or let it reach a
+  non-unwind <code>extern "C"</code> and abort the whole process.</figcaption>
+  </figure>
+
   <h2>Option A: catch an unwinding panic and return a code</h2>
   <p><code>std::panic::catch_unwind</code> executes a closure and returns <code>Err</code> if that
   closure unwinds. Put the entire fallible boundary body inside it, then translate the result:</p>

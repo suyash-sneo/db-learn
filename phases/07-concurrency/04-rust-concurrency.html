@@ -72,6 +72,28 @@
   <code>RwLock</code> priority policy to the operating system, so do not promise writer fairness.
   <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch16-03-shared-state.html">Rust Book ch. 16.3 — Shared-State Concurrency</a>; <a href="https://doc.rust-lang.org/std/sync/struct.RwLock.html">std::sync::RwLock</a>]</span></p>
 
+  <figure>
+  <svg viewBox="0 0 520 200" role="img" aria-label="Two threads each hold an Arc clone of one Mutex that wraps the shared lock table; only one thread holds the guard at a time">
+    <rect class="dg-bg" x="0" y="0" width="520" height="200" rx="10"/>
+    <rect class="dg-box" x="40" y="24" width="150" height="40" rx="6"/>
+    <text class="dg-txt" x="115" y="48" text-anchor="middle">thread A</text>
+    <rect class="dg-box" x="330" y="24" width="150" height="40" rx="6"/>
+    <text class="dg-txt" x="405" y="48" text-anchor="middle">thread B</text>
+    <path class="dg-arrow" d="M115,64 L235,104" marker-end="url(#a74)"/>
+    <path class="dg-arrow" d="M405,64 L285,104" marker-end="url(#a74)"/>
+    <text class="dg-txt-s" x="150" y="92" text-anchor="middle">Arc::clone</text>
+    <text class="dg-txt-s" x="370" y="92" text-anchor="middle">Arc::clone</text>
+    <rect class="dg-box-a" x="170" y="106" width="180" height="40" rx="6"/>
+    <text class="dg-txt" x="260" y="130" text-anchor="middle">Mutex&lt;LockTable&gt;</text>
+    <rect class="dg-box" x="190" y="156" width="140" height="30" rx="4"/>
+    <text class="dg-txt-s" x="260" y="175" text-anchor="middle">one guard at a time</text>
+    <defs><marker id="a74" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption><code>Arc</code> gives both threads shared ownership of one <code>Mutex</code>; the
+  <code>Mutex</code> serializes access so only one holds the guard at a time. Neither prevents a logically
+  wrong lock scope.</figcaption>
+  </figure>
+
   <pre><code><span class="tok-c">// Toy shared value: demonstrates the wrapper shape, not database isolation.</span>
 <span class="tok-k">use</span> std::sync::{Arc, RwLock};
 
