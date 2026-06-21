@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>7.2 File locking &amp; SQLite lock states</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p7:7.2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 7</a> › 7.2</div>
+  <h1>7.2 — File locking &amp; SQLite lock states</h1>
+  <div class="goal"><b>Goal:</b> Learn the classic locking solution by studying SQLite's rollback-journal
+  mode precisely: its five lock states, the order a reader and a writer move through them, and the rule
+  that makes "many readers or one writer" work without starving or corrupting anyone.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>SQLite documents its rollback-journal locking model in "File Locking And Concurrency In SQLite
+    Version 3." The lock-state names and the quoted definitions below are from that page.
+    <span class="src">[src: <a href="https://www.sqlite.org/lockingv3.html">sqlite.org — lockingv3</a>]</span></p>
+  </div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Locking is the oldest and most direct answer to 7.1: before you touch shared data, acquire a lock
+  that excludes the actors who would conflict with you; release it when done. The whole art is in
+  choosing lock <em>modes</em> so that operations which don't conflict (two reads) can proceed together,
+  while operations that do conflict (a write vs. anything) are serialized. SQLite's rollback-journal
+  scheme is a compact, battle-tested example you can study end to end, and its single-writer rule is the
+  exact model your build implements.</p>
+
+  <h2>The five lock states</h2>
+  <p>SQLite's rollback-journal mode defines five states a connection can hold on the database file. They
+  are an escalation ladder: a writer climbs from a read lock toward exclusivity in stages, so that it can
+  do as much preparatory work as possible before it has to shut readers out.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>State</th><th>Definition (quoted)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>UNLOCKED</strong></td><td>"No locks are held on the database. The database may be neither read nor written."</td></tr>
+      <tr><td><strong>SHARED</strong></td><td>"The database may be read but not written. Any number of processes can hold SHARED locks at the same time, hence there can be many simultaneous readers."</td></tr>
+      <tr><td><strong>RESERVED</strong></td><td>"A RESERVED lock means that the process is planning on writing … at some point in the future but … is currently just reading. Only a single RESERVED lock may be active at one time, though multiple SHARED locks can coexist with a single RESERVED lock."</td></tr>
+      <tr><td><strong>PENDING</strong></td><td>"A PENDING lock means that the process holding the lock wants to write … as soon as possible and is just waiting on all current SHARED locks to clear … No new SHARED locks are permitted … if a PENDING lock is active, though existing SHARED locks are allowed to continue."</td></tr>
+      <tr><td><strong>EXCLUSIVE</strong></td><td>"An EXCLUSIVE lock is needed in order to write … Only one EXCLUSIVE lock is allowed … and no other locks of any kind are allowed to coexist with an EXCLUSIVE lock."</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="src">[src: <a href="https://www.sqlite.org/lockingv3.html">sqlite.org — lockingv3 §"Database File Locking"</a>]</p>
+
+  <h2>The compatibility rules, distilled</h2>
+  <ul>
+    <li><strong>Many readers:</strong> any number of SHARED locks coexist.</li>
+    <li><strong>One intending writer alongside readers:</strong> a single RESERVED lock can coexist with
+    the SHARED locks. The writer can prepare (build its rollback journal) while readers keep reading.</li>
+    <li><strong>PENDING is the gate:</strong> once a writer escalates to PENDING, no <em>new</em> readers
+    may start, but existing readers drain naturally. This is what stops a steady stream of readers from
+    starving a waiting writer forever.</li>
+    <li><strong>EXCLUSIVE is alone:</strong> the actual write to the database file happens only when no
+    other lock of any kind is held.</li>
+  </ul>
+
+  <figure>
+  <svg viewBox="0 0 560 150" role="img" aria-label="Lock escalation ladder from UNLOCKED to EXCLUSIVE">
+    <rect class="dg-bg" x="0" y="0" width="560" height="150" rx="10"/>
+    <rect class="dg-box" x="14" y="60" width="86" height="34" rx="4"/><text class="dg-txt-s" x="57" y="81" text-anchor="middle">UNLOCKED</text>
+    <rect class="dg-fill-a" x="116" y="60" width="80" height="34" rx="4"/><text class="dg-txt-s" x="156" y="81" text-anchor="middle">SHARED</text>
+    <rect class="dg-box" x="212" y="60" width="86" height="34" rx="4"/><text class="dg-txt-s" x="255" y="81" text-anchor="middle">RESERVED</text>
+    <rect class="dg-box" x="314" y="60" width="84" height="34" rx="4"/><text class="dg-txt-s" x="356" y="81" text-anchor="middle">PENDING</text>
+    <rect class="dg-fill-2" x="414" y="60" width="92" height="34" rx="4"/><text class="dg-txt-s" x="460" y="81" text-anchor="middle">EXCLUSIVE</text>
+    <line class="dg-edge" x1="100" y1="77" x2="114" y2="77"/><polygon class="dg-arrow" points="116,77 108,73 108,81"/>
+    <line class="dg-edge" x1="196" y1="77" x2="210" y2="77"/><polygon class="dg-arrow" points="212,77 204,73 204,81"/>
+    <line class="dg-edge" x1="298" y1="77" x2="312" y2="77"/><polygon class="dg-arrow" points="314,77 306,73 306,81"/>
+    <line class="dg-edge-hot" x1="398" y1="77" x2="412" y2="77"/><polygon class="dg-arrow" points="414,77 406,73 406,81"/>
+    <text class="dg-txt-s" x="57" y="120">read path stops at SHARED</text>
+    <text class="dg-txt-s" x="356" y="120" text-anchor="middle">write path climbs the whole ladder</text>
+  </svg>
+  <figcaption>A reader only needs SHARED. A writer escalates SHARED → RESERVED → PENDING → EXCLUSIVE,
+  staying low as long as possible.</figcaption>
+  </figure>
+
+  <h2>A read transaction's lock sequence</h2>
+  <ol>
+    <li>From UNLOCKED, acquire a <strong>SHARED</strong> lock.</li>
+    <li>If a "hot journal" is present (a previous crash left one), recover first: escalate to PENDING then
+    EXCLUSIVE, roll back, drop back to SHARED. (This is Phase 5's recovery, gated by locks.)</li>
+    <li>Read pages while holding SHARED.</li>
+    <li>Drop SHARED back to UNLOCKED when done.</li>
+  </ol>
+
+  <h2>A write transaction's lock sequence</h2>
+  <ol>
+    <li>Acquire <strong>SHARED</strong> (handling a hot journal if needed).</li>
+    <li>Acquire <strong>RESERVED</strong> to announce the intent to write while still only reading.</li>
+    <li>Create the rollback journal and record original page contents (Phase 5).</li>
+    <li>When ready to write the database file itself, escalate to <strong>PENDING</strong> then
+    <strong>EXCLUSIVE</strong> — waiting for existing SHARED locks to clear.</li>
+    <li>Write the modified pages.</li>
+    <li>Commit (flush + delete the journal — the commit point), then drop EXCLUSIVE and PENDING.</li>
+  </ol>
+  <p>Note how locking and durability interlock: the journal is built under RESERVED (cheap, concurrent
+  with readers), and the database file is mutated only under EXCLUSIVE (expensive, exclusive). The lock
+  ladder exists precisely to minimize how long anyone holds the exclusive state.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ This is OS file locking, with real-world caveats</div>
+    <p>SQLite implements these states using the host operating system's file-locking facilities, and the
+    page is explicit that the guarantees are only as good as the platform's locking. Advisory locks can be
+    ignored by code that doesn't ask for them; some network filesystems implement locking incorrectly or
+    not at all, which can break the scheme across machines. Treat "file locking gives mutual exclusion" as
+    a claim that holds <em>on a correctly behaving local filesystem</em>, not unconditionally.
+    <span class="src">[src: <a href="https://www.sqlite.org/lockingv3.html">sqlite.org — lockingv3</a> (locking relies on OS primitives; network filesystems are called out)]</span></p>
+  </div>
+
+  <h2>What this buys, and its ceiling</h2>
+  <p>Rollback-journal locking gives "many readers OR one writer." That is correct and simple, but a
+  writer ultimately needs EXCLUSIVE, which means <strong>writers block readers and readers block writers</strong>
+  during the write. For workloads with frequent writes, that serialization is the bottleneck — and it is
+  exactly the limitation WAL mode (next lesson, and Phase 5's WAL) was designed to relax.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. How many SHARED locks can coexist, and how many RESERVED?</p>
+      <details><summary>Show answer</summary><div class="answer">Any number of SHARED locks (many simultaneous
+      readers); only one RESERVED lock at a time, and it can coexist with the SHARED locks.</div></details>
+      <p class="q">2. What problem does the PENDING state solve?</p>
+      <details><summary>Show answer</summary><div class="answer">It blocks <em>new</em> readers from starting
+      while letting existing readers finish, so a continuous stream of readers can't starve a waiting writer
+      indefinitely.</div></details>
+      <p class="q">3. Why does a writer build its rollback journal under RESERVED rather than EXCLUSIVE?</p>
+      <details><summary>Show answer</summary><div class="answer">Journal preparation only reads the database,
+      so it can run while readers continue (RESERVED coexists with SHARED). EXCLUSIVE is held only for the
+      brief actual write, minimizing the time readers are shut out.</div></details>
+      <p class="q">4. Why is "file locking gives mutual exclusion" a conditional claim?</p>
+      <details><summary>Show answer</summary><div class="answer">It depends on the OS/filesystem implementing
+      locking correctly; advisory locks can be bypassed and some network filesystems implement locking
+      incorrectly, so the guarantee holds on a correctly behaving local filesystem, not universally.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Docs:</strong> <a href="https://www.sqlite.org/lockingv3.html">SQLite lockingv3</a> (the five states) and <a href="https://www.sqlite.org/atomiccommit.html">Atomic Commit</a> (how locking and the journal interleave).</li>
+      <li><strong>Source dive:</strong> 7.6 reads the actual locking code paths.</li>
+      <li><strong>Forward link:</strong> 7.3 contrasts this lock-based model with MVCC and WAL-mode snapshots.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

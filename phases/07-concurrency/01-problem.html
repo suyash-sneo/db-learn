@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>7.1 The concurrency problem</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p7:7.1", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 7</a> › 7.1</div>
+  <h1>7.1 — The concurrency problem</h1>
+  <div class="goal"><b>Goal:</b> See exactly how two operations running at the same time can corrupt
+  data or produce results that no serial order could, so that the rest of the phase is about
+  <em>preventing specific named failures</em> rather than chasing a vague feeling of "thread safety."</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Your engine so far assumes one actor: one thread opens the file, reads and writes pages, commits.
+  The moment a second actor touches the same file — another thread, another isolate, another process —
+  the interleaving of their individual steps becomes something neither of them controls. The hardware
+  and OS are free to run their instructions in any order consistent with each thread's own sequencing.
+  Most interleavings are fine; a few are catastrophic. Concurrency control is the discipline of
+  forbidding exactly the bad ones while allowing as many good ones as possible.</p>
+
+  <h2>Anatomy of a race: lost update</h2>
+  <p>A "transaction" you think of as atomic is, at the machine level, many steps: read a page, modify
+  bytes in memory, write the page back. Interleave two such sequences and the result depends on timing.
+  Take a counter stored in a document, two transactions each doing "increment by 1":</p>
+
+  <figure>
+  <svg viewBox="0 0 560 210" role="img" aria-label="Two transactions interleave read-modify-write and lose one increment">
+    <rect class="dg-bg" x="0" y="0" width="560" height="210" rx="10"/>
+    <text class="dg-txt" x="20" y="26" font-weight="700">T1</text>
+    <text class="dg-txt" x="300" y="26" font-weight="700">T2</text>
+    <line class="dg-edge" x1="280" y1="36" x2="280" y2="200"/>
+
+    <rect class="dg-box" x="20" y="40" width="150" height="26" rx="3"/><text class="dg-txt-s" x="30" y="58">read count → 41</text>
+    <rect class="dg-box" x="300" y="74" width="150" height="26" rx="3"/><text class="dg-txt-s" x="310" y="92">read count → 41</text>
+    <rect class="dg-box" x="20" y="108" width="150" height="26" rx="3"/><text class="dg-txt-s" x="30" y="126">write 41+1 = 42</text>
+    <rect class="dg-fill-2" x="300" y="142" width="150" height="26" rx="3"/><text class="dg-txt-s" x="310" y="160">write 41+1 = 42</text>
+    <text class="dg-txt-s" x="20" y="194">final value: 42 — but two increments happened. One update is lost.</text>
+  </svg>
+  <figcaption>Both read 41 before either writes, so the second write overwrites the first. The
+  correct serial result is 43; the interleaved result is 42.</figcaption>
+  </figure>
+
+  <p>Nothing here is a "bug" in either transaction. Each one read, added one, and wrote — correct in
+  isolation. The corruption emerges only from the interleaving. This is the <strong>lost update</strong>
+  anomaly, and it is the canonical reason a read-modify-write must be protected as a unit.</p>
+
+  <h2>The catalogue of failures</h2>
+  <p>It helps to name the failures precisely, because isolation levels (7.3) are defined as "which of
+  these may occur." The SQL standard frames concurrency phenomena as things that must not happen:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Phenomenon</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Dirty read</strong></td><td>"A transaction reads data written by a concurrent uncommitted transaction" — data that may be rolled back.</td></tr>
+      <tr><td><strong>Nonrepeatable read</strong></td><td>"A transaction re-reads data it has previously read and finds that data has been modified by another transaction (that committed since the initial read)."</td></tr>
+      <tr><td><strong>Phantom read</strong></td><td>"A transaction re-executes a query returning a set of rows that satisfy a search condition and finds that the set of rows … has changed due to another recently-committed transaction."</td></tr>
+      <tr><td><strong>Serialization anomaly</strong></td><td>"The result of successfully committing a group of transactions is inconsistent with all possible orderings of running those transactions one at a time."</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="src">[src: <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL — Transaction Isolation §13.2</a>, which quotes the SQL-standard phenomena]</p>
+  <p>Lost update is closely related — it is the write-write version of the read anomalies above, and
+  some systems treat it as a distinct phenomenon. The point is not to memorize a taxonomy but to see
+  that "concurrency correctness" decomposes into concrete, testable failures.</p>
+
+  <h2>Corruption vs. anomaly: two different stakes</h2>
+  <p>There are really two levels of damage, and they need different defenses:</p>
+  <ul>
+    <li><strong>Structural corruption.</strong> Two writers updating the same B+tree page or the same
+    freelist simultaneously can leave the on-disk structures themselves invalid — a torn split, a
+    double-freed page, a dangling pointer. After this, even single-threaded reads return garbage or
+    crash. This must be prevented absolutely.</li>
+    <li><strong>Logical anomalies.</strong> The structures stay valid, but a transaction observes a
+    state that no serial execution would have produced (lost update, dirty read, …). The database is
+    not broken, but an application invariant may be.</li>
+  </ul>
+  <p>A single-writer rule (only one transaction may write at a time) is enough to prevent structural
+  corruption from concurrent writers, which is why it is the simplest correct design and the one your
+  build targets. Preventing the full set of logical anomalies is a stronger, separate requirement that
+  needs an isolation policy (7.3).</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ "It worked when I tested it" is not evidence of correctness</div>
+    <p>Concurrency bugs are timing-dependent: a racy program can produce the right answer thousands of
+    times and the wrong answer once, on a different machine, under load. You cannot prove concurrency
+    correctness by running it and observing success. You establish it by <em>argument</em> — showing
+    which interleavings are possible and that each preserves your invariants — and you defend it with
+    primitives whose guarantees are specified. This is also why the in-memory tests in this phase's
+    build validate <em>logic</em>, not real parallel timing.</p>
+  </div>
+
+  <h2>What "doing nothing" actually costs</h2>
+  <p>It is tempting to skip concurrency entirely: "my app is single-threaded." But the embedded target
+  for this curriculum is consumed from Dart/Flutter (Phase 1, Phase 8), where work is commonly offloaded
+  to background isolates (7.5), and a mobile app can be backgrounded, killed, and relaunched while a
+  write is in flight (Phase 5's crash model). Even a "single-threaded" application can end up with two
+  live handles to one file. Deciding your concurrency model explicitly — even if the decision is
+  "single writer, fail fast on conflict" — is part of building a correct engine.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why is a lost update possible even though each transaction's logic is correct?</p>
+      <details><summary>Show answer</summary><div class="answer">Each transaction is internally correct, but
+      a read-modify-write is several steps; if both read the old value before either writes, the second
+      write overwrites the first. The fault is in the unguarded interleaving, not the logic.</div></details>
+      <p class="q">2. Distinguish structural corruption from a logical anomaly.</p>
+      <details><summary>Show answer</summary><div class="answer">Structural corruption leaves the on-disk
+      data structures themselves invalid (torn split, double free) so even serial reads break. A logical
+      anomaly keeps structures valid but lets a transaction observe a state no serial order would produce.</div></details>
+      <p class="q">3. Name three of the standard concurrency phenomena.</p>
+      <details><summary>Show answer</summary><div class="answer">Any three of: dirty read, nonrepeatable
+      read, phantom read, serialization anomaly (and the related lost update).</div></details>
+      <p class="q">4. Why can't you establish concurrency correctness by testing alone?</p>
+      <details><summary>Show answer</summary><div class="answer">Races are timing-dependent; a wrong
+      interleaving may occur rarely and only under specific load/hardware. Correctness comes from reasoning
+      about possible interleavings plus primitives with specified guarantees, not from observed passes.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec/docs:</strong> <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL §13.2</a> for the standard phenomena in precise wording.</li>
+      <li><strong>Book:</strong> <em>Designing Data-Intensive Applications</em> (weak isolation &amp; race conditions) and <em>Database Internals</em> (concurrency control).</li>
+      <li><strong>Forward link:</strong> 7.2 (locking) and 7.3 (isolation/MVCC) are the two ways to forbid the failures named here.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

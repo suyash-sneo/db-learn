@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 7 — Concurrency</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p7", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 7</div>
+  <span class="pill">Phase 7</span>
+  <h1>Concurrency</h1>
+  <p class="lead">Phase 5 gave you the <em>A</em> and <em>D</em> of ACID. This phase is about the
+  <em>I</em>: what two or more transactions are allowed to observe about each other. You'll see why
+  uncontrolled concurrent access corrupts data, study the two dominant families of solution — locking
+  and multi-version concurrency control (MVCC) — using SQLite as the concrete reference, then map them
+  onto the tools you actually have: Rust's ownership-based concurrency and Dart's isolate model across
+  the FFI boundary. The build is deliberately modest: a correct single-writer locking layer for one
+  embedded file, with an honest account of what it does and does not guarantee.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Why concurrency comes after durability</div>
+    <p>Isolation is only meaningful once atomic, durable commits exist (Phase 5): you cannot reason
+    about "what a concurrent transaction sees" until "a transaction" is a well-defined, all-or-nothing
+    unit. Concurrency control then decides which interleavings of those units are permitted. Putting it
+    here means every rule in this phase is layered on a commit protocol you already built and
+    understand.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 7</div>
+    <p>Name the concrete anomalies uncontrolled concurrency causes; explain SQLite's five rollback-journal
+    lock states and how WAL mode changes the reader/writer story; describe the SQL isolation levels and
+    where MVCC and snapshot isolation sit among them; choose the right Rust synchronization primitive for
+    a shared handle and justify it with <code>Send</code>/<code>Sync</code>; reason about calling your
+    engine from multiple Dart isolates across the FFI; and implement a single-writer/multi-reader locking
+    layer with tests that are honest about their limits.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p7");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

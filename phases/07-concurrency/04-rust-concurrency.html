@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>7.4 Rust concurrency for this</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p7:7.4", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 7</a> › 7.4</div>
+  <h1>7.4 — Rust concurrency for this</h1>
+  <div class="goal"><b>Goal:</b> Pick the right Rust primitive for sharing your engine across threads —
+  <code>Arc</code>, <code>Mutex</code>, <code>RwLock</code> — and understand precisely what the
+  <code>Send</code>/<code>Sync</code> marker traits do and do not guarantee, so the locking layer you
+  build rests on the compiler's checks rather than hope.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Phase 1 wrapped the engine in an opaque handle and noted that boundary code creating <code>&amp;mut
+  Db</code> is not concurrently usable. To support more than one actor you need a deliberate
+  synchronization design. Rust is unusually well-suited here: its type system rejects data races at
+  compile time, so "did I forget a lock?" becomes a build error rather than a once-in-a-million
+  corruption. But the compiler protects <em>memory</em> safety, not your <em>database</em> invariants —
+  you must still choose the locking granularity and the isolation model. This lesson is about using the
+  language's guarantees without overclaiming them.</p>
+
+  <h2>What Rust guarantees: data-race freedom</h2>
+  <p>Rust's ownership and borrowing rules extend to threads. The core guarantee, in the Rust Book's
+  framing, is that safe Rust prevents <strong>data races</strong> — concurrent unsynchronized access to
+  the same memory where at least one access is a write — at compile time.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch16-00-concurrency.html">The Rust Programming Language, ch. 16 "Fearless Concurrency"</a>]</span>
+  Two marker traits encode the rules:</p>
+  <ul>
+    <li><strong><code>Send</code></strong>: a type is safe to <em>transfer ownership</em> to another
+    thread.</li>
+    <li><strong><code>Sync</code></strong>: a type is safe to <em>share by reference</em>
+    (<code>&amp;T</code>) across threads — equivalently, <code>&amp;T</code> is <code>Send</code>.</li>
+  </ul>
+  <p>These are auto-derived for types built entirely from <code>Send</code>/<code>Sync</code> parts, and
+  the compiler refuses to move a non-<code>Send</code> value across a thread boundary or share a
+  non-<code>Sync</code> value. <code>Rc</code> is neither (non-atomic refcount); <code>Arc</code> is both
+  (atomic refcount).
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch16-04-extensible-concurrency-sync-and-send.html">Rust Book ch. 16.4 — <code>Send</code> and <code>Sync</code></a>]</span></p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Data-race freedom is not database consistency</div>
+    <p>The compiler guarantees you won't have two threads scribbling the same bytes unsynchronized. It
+    does <strong>not</strong> guarantee your transactions are isolated, that you took the lock at the right
+    granularity, or that two well-synchronized writers can't still produce a lost update at the
+    <em>logical</em> level. Memory safety and logical correctness are different layers; Rust gives you the
+    first for free in safe code and leaves the second to your design.</p>
+  </div>
+
+  <h2>The shared-state toolkit</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Primitive</th><th>What it gives</th><th>Use for</th></tr></thead>
+    <tbody>
+      <tr><td><code>Arc&lt;T&gt;</code></td><td>thread-safe shared ownership (atomic refcount)</td><td>handing the same engine handle to multiple threads</td></tr>
+      <tr><td><code>Mutex&lt;T&gt;</code></td><td>mutual exclusion: one accessor at a time, read or write</td><td>the single-writer model; simplest correct choice</td></tr>
+      <tr><td><code>RwLock&lt;T&gt;</code></td><td>many readers <em>or</em> one writer</td><td>read-heavy access where reads must not block each other</td></tr>
+      <tr><td><code>atomics</code> (<code>AtomicU64</code>, …)</td><td>lock-free single-value updates</td><td>counters, flags (e.g. an id allocator)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The combination <code>Arc&lt;Mutex&lt;Engine&gt;&gt;</code> is the standard "share one mutable thing
+  across threads" pattern: <code>Arc</code> for shared ownership, <code>Mutex</code> for safe mutation.
+  <code>RwLock</code> swaps the mutex for the "many readers or one writer" policy — which maps directly
+  onto SQLite's SHARED-vs-EXCLUSIVE distinction (7.2).
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch16-03-shared-state.html">Rust Book ch. 16.3 — Shared-State Concurrency</a>; <a href="https://doc.rust-lang.org/std/sync/struct.RwLock.html">std::sync::RwLock</a>]</span></p>
+
+  <pre><code><span class="tok-c">// The canonical shared-handle shape (illustrative — not your engine's logic).</span>
+<span class="tok-k">use</span> std::sync::{Arc, RwLock};
+
+<span class="tok-k">let</span> engine = Arc::<span class="tok-f">new</span>(RwLock::<span class="tok-f">new</span>(open_engine()?));
+
+<span class="tok-c">// reader thread:</span>
+<span class="tok-k">let</span> r = Arc::<span class="tok-f">clone</span>(&amp;engine);
+<span class="tok-k">let</span> guard = r.<span class="tok-f">read</span>().<span class="tok-f">unwrap</span>();   <span class="tok-c">// many readers may hold this at once</span>
+
+<span class="tok-c">// writer thread:</span>
+<span class="tok-k">let</span> w = Arc::<span class="tok-f">clone</span>(&amp;engine);
+<span class="tok-k">let mut</span> guard = w.<span class="tok-f">write</span>().<span class="tok-f">unwrap</span>(); <span class="tok-c">// exclusive; waits for readers to drain</span></code></pre>
+
+  <h2>The guard pattern and poisoning</h2>
+  <p>Locking returns an RAII <em>guard</em>; the lock is released when the guard is dropped, so you cannot
+  forget to unlock. Two precise caveats for a database:</p>
+  <ul>
+    <li><strong>Poisoning.</strong> If a thread panics while holding a <code>Mutex</code>/<code>RwLock</code>,
+    the lock becomes <em>poisoned</em>; subsequent <code>lock()</code>/<code>write()</code> calls return an
+    <code>Err</code>. This is std's way of warning that the protected data may be in a half-updated state —
+    which is exactly the situation AGENTS calls out: do not keep using a handle whose invariants a panic may
+    have broken. Decide deliberately whether to propagate the error or treat the engine as failed.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/std/sync/struct.Mutex.html#poisoning">std::sync::Mutex — Poisoning</a>]</span></li>
+    <li><strong>Deadlock is still possible.</strong> The borrow checker prevents data races, not deadlocks:
+    acquiring two locks in inconsistent orders, or re-locking a non-reentrant <code>Mutex</code> on the same
+    thread, can hang. Lock ordering is your responsibility.</li>
+  </ul>
+
+  <h2>How this maps onto the build</h2>
+  <p>The build implements a <strong>single-writer, multi-reader</strong> policy in-process. A
+  <code>RwLock</code> (or an explicit lock-state field guarded by a <code>Mutex</code>) models the SHARED
+  vs. EXCLUSIVE distinction; <code>Arc</code> lets multiple threads hold the handle. Because the tests run
+  in one process with in-memory state, they exercise the <em>policy logic</em> — who is allowed in when —
+  not real cross-process OS file locking or true hardware parallelism. The build page states this limit
+  explicitly.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>Arc::clone(&amp;x)</code> bumps the refcount and is cheap; it does not deep-copy the data.
+      Prefer it over <code>x.clone()</code> to make the intent ("another owner") obvious.</li>
+      <li><code>lock()</code>/<code>read()</code>/<code>write()</code> return a <code>Result</code> because
+      of poisoning — handle it, don't blanket-<code>unwrap()</code> in engine code.</li>
+      <li>A guard borrows the lock; keep its scope as small as possible so you hold the lock briefly
+      (mirrors SQLite holding EXCLUSIVE only for the write).</li>
+      <li>Read more in <a href="https://doc.rust-lang.org/book/ch16-00-concurrency.html">Rust Book ch. 16</a>.</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What exactly do <code>Send</code> and <code>Sync</code> mean?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>Send</code>: ownership can be transferred
+      to another thread. <code>Sync</code>: <code>&amp;T</code> can be shared across threads (i.e.
+      <code>&amp;T</code> is <code>Send</code>). The compiler enforces both at the type level.</div></details>
+      <p class="q">2. What does Rust's data-race freedom <em>not</em> protect?</p>
+      <details><summary>Show answer</summary><div class="answer">Logical database consistency, correct lock
+      granularity, isolation, and deadlock freedom. It prevents unsynchronized memory access, not bad
+      concurrency design.</div></details>
+      <p class="q">3. Why might <code>RwLock</code> fit this engine better than <code>Mutex</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">It allows many concurrent readers while still
+      giving the writer exclusivity — directly modeling SQLite's SHARED-vs-EXCLUSIVE policy, which a plain
+      <code>Mutex</code> (one accessor of any kind) does not.</div></details>
+      <p class="q">4. What is lock poisoning and why does it matter for a database handle?</p>
+      <details><summary>Show answer</summary><div class="answer">If a thread panics while holding the lock, later
+      lock attempts return <code>Err</code> to signal the protected data may be half-updated. For a DB it's a
+      cue not to keep using a possibly-inconsistent handle — handle the error deliberately.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Language ref:</strong> <a href="https://doc.rust-lang.org/book/ch16-00-concurrency.html">Rust Book ch. 16</a>; <a href="https://doc.rust-lang.org/nomicon/send-and-sync.html">Rustonomicon — Send/Sync</a> for the unsafe details.</li>
+      <li><strong>Std:</strong> <a href="https://doc.rust-lang.org/std/sync/index.html">std::sync</a> (Arc, Mutex, RwLock, atomics).</li>
+      <li><strong>Forward link:</strong> 7.5 moves from in-process threads to Dart isolates calling across the FFI.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

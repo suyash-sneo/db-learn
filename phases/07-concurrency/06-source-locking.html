@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>7.6 Source dive: SQLite locking</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p7:7.6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 7</a> › 7.6</div>
+  <h1>7.6 — Source dive: SQLite locking</h1>
+  <div class="goal"><b>Goal:</b> Connect the locking <em>model</em> of 7.2 to the actual SQLite code that
+  implements it — where the lock states are defined, where they map onto OS calls, and the clever
+  byte-range trick that encodes five logical states on a file — reading the source at a pinned version
+  rather than trusting memory.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>SQLite ships as one amalgamation but is developed as separate files. The locking logic of interest:
+    the VFS-level OS locking in <code>os_unix.c</code> (and <code>os_win.c</code>), the lock-state
+    constants in <code>sqliteInt.h</code>, and the page-cache layer that requests locks in
+    <code>pager.c</code>. The documentation page <a href="https://www.sqlite.org/lockingv3.html">lockingv3</a>
+    is the prose companion to this code. Read at a specific release/check-in, not "trunk."
+    <span class="src">[src: <a href="https://www.sqlite.org/lockingv3.html">sqlite.org — lockingv3</a>; source browsable at <a href="https://sqlite.org/src">sqlite.org/src</a>]</span></p>
+  </div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Version &amp; platform discipline</div>
+    <p>SQLite's locking is per-VFS and per-platform: the Unix path (<code>os_unix.c</code>) and the Windows
+    path (<code>os_win.c</code>) are different implementations of the same logical states, and Unix has
+    multiple locking styles (POSIX advisory, dot-file, flock, etc.) selectable at build/runtime. Any claim
+    about a specific function name, byte offset, or syscall below is tagged <span class="verify-tag">⚠️VERIFY</span>
+    and must be confirmed against the exact file at the exact check-in you read — do not blend versions or
+    platforms into one description.</p>
+  </div>
+
+  <h2>What the docs establish (solid)</h2>
+  <p>From 7.2, treat as confirmed by <a href="https://www.sqlite.org/lockingv3.html">lockingv3</a>: the five
+  states (UNLOCKED, SHARED, RESERVED, PENDING, EXCLUSIVE); many SHARED coexist; one RESERVED; PENDING
+  blocks new readers; EXCLUSIVE is alone. The source dive is about <em>how</em> these are realized.</p>
+
+  <h2>The byte-range locking trick (read this carefully in the source)</h2>
+  <p>SQLite encodes its logical lock states using locks on specific byte ranges of the database file,
+  rather than one OS lock per state. There is a reserved region of the file (historically near a fixed
+  offset) where distinct bytes/ranges represent the PENDING byte, the RESERVED byte, and a SHARED range.
+  Holding a read lock means a shared lock somewhere in the SHARED range; an EXCLUSIVE lock means an
+  exclusive lock over the whole region. This lets several logical states be expressed through the OS's
+  single advisory-locking mechanism.</p>
+  <ul>
+    <li>Constants such as the names for the lock states and the special byte offsets are defined in a
+    header. <span class="verify-tag">⚠️VERIFY</span> the exact macro names (e.g. the lock-level constants
+    and the <code>PENDING_BYTE</code>/<code>SHARED_FIRST</code>/<code>SHARED_SIZE</code> region) and their
+    values in <code>sqliteInt.h</code> at your check-in.</li>
+    <li>The function that escalates/de-escalates a connection's lock translates a requested logical state
+    into the corresponding byte-range lock/unlock syscalls. <span class="verify-tag">⚠️VERIFY</span> the
+    function name (e.g. the <code>unixLock</code>/<code>unixUnlock</code> family) and which syscall it uses
+    (<code>fcntl</code> with POSIX advisory locks on the default Unix VFS) in <code>os_unix.c</code>.</li>
+  </ul>
+  <p>Why a trick at all? OS advisory locking gives you shared/exclusive on byte ranges; SQLite needs five
+  graded states. Mapping states onto distinct ranges is how it gets RESERVED and PENDING — "I intend to
+  write" and "I'm waiting to write" — out of primitives that only offer shared/exclusive.</p>
+
+  <h2>Where the pager asks for locks</h2>
+  <p>The lock <em>policy</em> (when to escalate) lives above the OS layer, in the pager/transaction code:
+  beginning a read takes SHARED; beginning a write takes RESERVED; spilling/committing escalates to
+  EXCLUSIVE. <span class="verify-tag">⚠️VERIFY</span> the specific functions in <code>pager.c</code> that
+  request each transition (the "begin read", "begin write", and "commit phase" paths) against your
+  check-in. This is the same ordering you read as prose in 7.2 — now you can see the policy and the
+  mechanism are cleanly separated, exactly as your build should separate them.</p>
+
+  <h2>WAL mode is a different file</h2>
+  <p>Everything above is rollback-journal locking. WAL mode uses the shared-memory wal-index (the
+  <code>-shm</code> file) and a different concurrency scheme (7.3); its locking lives in
+  <code>wal.c</code>. Don't describe WAL concurrency using rollback-journal lock states — they are
+  separate mechanisms. <span class="verify-tag">⚠️VERIFY</span> any specific <code>wal.c</code> claim
+  against your check-in.
+  <span class="src">[src: <a href="https://www.sqlite.org/wal.html">sqlite.org — WAL</a> for the model; <code>wal.c</code> for the code]</span></p>
+
+  <h2>What to take back to your build</h2>
+  <ul>
+    <li><strong>Separate policy from mechanism.</strong> SQLite keeps "when to lock" (pager) apart from
+    "how to lock" (VFS). Your build should keep its lock-state policy separate from whatever primitive
+    (an in-process <code>RwLock</code>, an OS file lock) enforces it.</li>
+    <li><strong>Express graded states explicitly.</strong> The five-state ladder exists to maximize
+    concurrency; even your simplified single-writer layer benefits from naming its states rather than
+    using one boolean.</li>
+    <li><strong>Respect the platform boundary.</strong> Real file locking is platform-specific and
+    fallible; your in-process build sidesteps that, and you should say so rather than imply OS-grade
+    cross-process locking you didn't build.</li>
+  </ul>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. How does SQLite get five logical lock states out of shared/exclusive OS locks?</p>
+      <details><summary>Show answer</summary><div class="answer">By locking distinct byte ranges of the file
+      (a PENDING byte, a RESERVED byte, and a SHARED range), so different logical states correspond to
+      different range locks rather than one OS lock per state.</div></details>
+      <p class="q">2. Which layer decides <em>when</em> to escalate locks, and which decides <em>how</em>?</p>
+      <details><summary>Show answer</summary><div class="answer">The pager/transaction layer decides when
+      (begin read → SHARED, begin write → RESERVED, commit → EXCLUSIVE); the VFS (e.g. <code>os_unix.c</code>)
+      decides how, translating states into syscalls.</div></details>
+      <p class="q">3. Why must WAL-mode locking be described separately?</p>
+      <details><summary>Show answer</summary><div class="answer">WAL mode uses the shared-memory wal-index and
+      a different concurrency scheme (<code>wal.c</code>), not the rollback-journal five-state ladder. Mixing
+      them produces false claims.</div></details>
+      <p class="q">4. Why is every code-level claim here tagged ⚠️VERIFY?</p>
+      <details><summary>Show answer</summary><div class="answer">Function names, macro names, byte offsets, and
+      syscalls are platform- and version-specific; they must be confirmed against the exact file at the exact
+      check-in rather than asserted from memory.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Docs:</strong> <a href="https://www.sqlite.org/lockingv3.html">lockingv3</a>, <a href="https://www.sqlite.org/atomiccommit.html">Atomic Commit</a>, <a href="https://www.sqlite.org/wal.html">WAL</a>, <a href="https://www.sqlite.org/vfs.html">VFS</a>.</li>
+      <li><strong>Source:</strong> <a href="https://sqlite.org/src">sqlite.org/src</a> — read <code>sqliteInt.h</code>, <code>os_unix.c</code>, <code>pager.c</code>, <code>wal.c</code> at a pinned check-in; record the version next to anything you cite.</li>
+      <li><strong>Forward link:</strong> the build turns the policy half of this into a small, testable lock layer.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>
