@@ -106,29 +106,9 @@
   </ul>
 
   <h2>Start here</h2>
-  <div class="cardgrid">
-    <a class="card" href="phases/00-rust-warmup/index.html">
-      <span class="ph">Phase 0 · authored</span>
-      <h3>Just-enough Rust + re-anchor</h3>
-      <p>Ownership, errors, traits, files, serde — taught from a beginner's footing, then a
-      from-scratch file-backed key-value store to reset your focus.</p>
-      <div class="meta">10 lessons · 1 build</div>
-    </a>
-    <a class="card" href="phases/01-ffi-spike/index.html">
-      <span class="ph">Phase 1 · authored</span>
-      <h3>FFI spike — de-risk the scary part</h3>
-      <p>C ABI, opaque handles, byte buffers, <code>catch_unwind</code>, cbindgen, dart:ffi.
-      Prove a byte buffer can round-trip Rust → C → Dart before building anything big.</p>
-      <div class="meta">11 lessons · 1 build</div>
-    </a>
-    <a class="card" href="outline.html">
-      <span class="ph">The full plan</span>
-      <h3>See the whole outline</h3>
-      <p>All nine phases as a clickable map — pager, B+tree, records, WAL, the document layer,
-      concurrency, and the public C ABI + aggregation.</p>
-      <div class="meta">All 9 phases authored · 70+ lessons · 9 builds</div>
-    </a>
-  </div>
+  <p>Begin at Phase 0 and read in order — each phase builds on the last. All nine are authored;
+  tap any one to open its lessons, or see the <a href="outline.html">full lesson-by-lesson outline</a>.</p>
+  <div class="cardgrid" id="phasecards"></div>
 
   <div class="box deeper">
     <div class="box-title">📚 Where this comes from</div>
@@ -142,5 +122,23 @@
   B+tree core, BSON/MessagePack buffers across FFI). The curriculum teaches <em>toward</em> them.</p>
 </main>
 <script src="assets/app.js"></script>
+<script>
+(function () {
+  const mount = document.getElementById("phasecards");
+  if (!mount || typeof PHASES === "undefined") return;
+  let html = "";
+  PHASES.forEach(p => {
+    const builds = p.lessons.filter(l => l[0] === "build").length;
+    const lessons = p.lessons.length - builds;
+    const meta = lessons + " lesson" + (lessons === 1 ? "" : "s") +
+      (builds ? " · " + builds + " build" : "");
+    html += '<a class="card" href="' + p.dir + '/index.html">' +
+      '<span class="ph">Phase ' + p.num + '</span>' +
+      '<h3>' + p.title + '</h3>' +
+      '<div class="meta">' + meta + '</div></a>';
+  });
+  mount.innerHTML = html;
+})();
+</script>
 </body>
 </html>
