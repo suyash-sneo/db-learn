@@ -18,16 +18,18 @@
   <h2>Why this matters to your DB</h2>
   <p>You can't prove a recovery scheme correct without an enemy model: exactly what the crash may have
   done. Build against too weak a model and recovery has real holes; too strong a model and you pay for
-  protection you don't need. The model below is the standard one storage engines assume.</p>
+  protection you don't need. The model below is the explicit contract used by this curriculum; other
+  engines/platforms may document different atomic-write and synchronization assumptions.</p>
 
   <h2>What a crash can do</h2>
   <ol>
     <li><strong>Lose everything in volatile caches.</strong> Any bytes still in the OS page cache (or a
-    disk's volatile write cache) that were never flushed are gone. Only data that reached stable storage
-    via a successful fsync is guaranteed present.</li>
+    device's volatile write cache) that were not covered by the required successful synchronization may
+    be lost.</li>
     <li><strong>Reorder writes.</strong> Without an explicit barrier, the OS and device may commit writes
     to stable storage in a different order than you issued them. So "I wrote A then B" does <em>not</em>
-    guarantee that if B survived, A did too — unless an fsync separated them.</li>
+    establish the required persistence order. This project uses <code>BlockIo::sync</code> as that
+    barrier abstraction.</li>
     <li><strong>Tear a multi-sector write.</strong> A single <code>write()</code> of a 4&nbsp;KiB page is
     not atomic at the hardware level: a crash can leave some sectors of the page updated and others
     holding old bytes — a <em>torn write</em>.</li>
@@ -58,20 +60,19 @@
   <h2>What a crash is assumed <em>not</em> to do</h2>
   <ul>
     <li>It does not corrupt bytes that were never written in this session and were already durably on disk
-    (we assume the media is otherwise reliable; bit-rot detection is a separate concern, handled by
-    checksums — see 5.4/5.8).</li>
-    <li>It does not silently mis-direct a write to the wrong location (again, checksums catch the cases
-    that matter).</li>
-    <li>fsync, when it returns, is assumed to mean the data is durable. This is an assumption, not a
-    theorem — some hardware has historically lied — but every mechanism here is built on it.
-    <span class="verify-tag">⚠️VERIFY</span> the fsync behavior of your target platform/filesystem if
-    durability is safety-critical.</li>
+    (we assume the media is otherwise reliable; checksums can help detect bit rot but do not repair it —
+    see 5.4/5.8).</li>
+    <li>It does not silently redirect a write to an unrelated location. Checksums can detect many
+    corrupt/torn log records; they do not repair arbitrary storage faults.</li>
+    <li>A successful <code>BlockIo::sync</code> is assumed to provide the ordering/persistence contract
+    documented for the target OS, filesystem, and device. This assumption must be part of deployment
+    documentation, not inferred from Rust alone.</li>
   </ul>
 
   <div class="box warn">
     <div class="box-title">⚠️ The barrier is the whole game</div>
-    <p>Because writes can be reordered and caches can vanish, the only tool that gives ordering is the
-    durability barrier (<code>sync_all</code> / fsync). Every correct commit protocol is fundamentally a
+    <p>Because writes can be reordered and caches can vanish, this design uses explicit durability
+    barriers (<code>BlockIo::sync</code>, backed by the target's file synchronization API). The protocol is a
     sequence of "write these bytes, <strong>barrier</strong>, then write those bytes, <strong>barrier</strong>."
     Remove a barrier and you reintroduce a crash window. Memorize where the barriers go — that's what 5.3
     and 5.4 are really teaching.</p>
@@ -87,9 +88,10 @@
       <details><summary>Show answer</summary><div class="answer">Detect an incomplete write: if a
       written-last field (e.g. journal page count) is torn, it reads as not-yet-committed, so the partial
       record is ignored.</div></details>
-      <p class="q">3. What is the only mechanism that gives you ordering guarantees across a crash?</p>
-      <details><summary>Show answer</summary><div class="answer">The durability barrier (fsync /
-      <code>sync_all</code>). Writes between barriers may be reordered or lost.</div></details>
+      <p class="q">3. What abstraction does this project use to establish persistence ordering?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>BlockIo::sync</code>, backed by the
+      target platform's file-synchronization operation. Writes not separated by the required successful
+      barrier may be reordered or lost under this crash model.</div></details>
       <p class="q">4. Why is "fsync means durable" called an assumption?</p>
       <details><summary>Show answer</summary><div class="answer">Because some hardware/firmware has
       historically acknowledged fsync before data was truly on stable media; correctness depends on the
@@ -101,7 +103,6 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Spec:</strong> <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §2</a> — the hardware assumptions (sectors, atomicity, ordering).</li>
-      <li><strong>Background:</strong> the "Files are hard" / fsync-reliability literature — useful but verify specifics before quoting. <span class="verify-tag">⚠️VERIFY</span></li>
       <li><strong>Forward link:</strong> 5.3 (journal places barriers to roll back), 5.4 (WAL places barriers to roll forward).</li>
     </ul>
   </div>

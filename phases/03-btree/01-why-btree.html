@@ -16,17 +16,17 @@
   not "number of comparisons."</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>Without an index, finding a record means scanning every page — O(pages). With the right index,
-  it's O(height of a very shallow tree). The choice of index structure determines whether your engine
-  is usable on real data. And because disk is slow, the metric that matters is how many <em>pages</em>
-  a lookup reads, not how many CPU comparisons it does.</p>
+  <p>Without an index, finding a record may require scanning every data page—O(pages). With a B+tree,
+  point lookup follows one root-to-leaf path. For data not already cached, page transfers usually
+  dominate the handful of CPU comparisons inside each node, so the first cost to minimize is the
+  number of distinct pages visited.</p>
 
   <h2>The disk cost model</h2>
-  <p>In RAM, the cost of a search is roughly the number of comparisons. On disk, one access to a page
-  that isn't cached can be many thousands of times slower than a comparison. So the design goal flips:
-  <strong>minimize the number of distinct pages a lookup must read.</strong> A structure with one key
-  per node forces one page read per level; a structure with hundreds of keys per node collapses many
-  levels into one page.</p>
+  <p>In RAM, comparison count and cache behavior matter. In a disk-oriented index, a cache miss may
+  also require a storage read, so the design packs many routing keys into each page:
+  <strong>minimize page visits while keeping the work inside a page cheap.</strong> A structure with
+  one key per page wastes most of the transfer; a wide node performs many comparisons after one page
+  has arrived.</p>
 
   <figure>
   <svg viewBox="0 0 560 200" role="img" aria-label="A tall binary tree versus a shallow wide B+tree">
@@ -48,8 +48,8 @@
   </figure>
 
   <h2>Why "ordered" matters too</h2>
-  <p>A hash index gives O(1) point lookups but stores keys in no useful order. Many real queries are
-  not point lookups:</p>
+  <p>A hash index can provide expected O(1) point lookup, but hash order is not key order. Many queries
+  are not point lookups:</p>
   <ul>
     <li>Range: "all orders between two dates."</li>
     <li>Ordering: "list users sorted by name."</li>
@@ -62,8 +62,8 @@
 
   <h2>The two properties an index for your DB must have</h2>
   <ol>
-    <li><strong>Shallow on disk.</strong> Height grows logarithmically with a very large base (keys
-    per page), so even billions of keys are a few levels deep — few page reads per lookup.</li>
+    <li><strong>Shallow on disk.</strong> Height grows logarithmically with the branching factor
+    (children per internal page), so a large fanout means few page visits.</li>
     <li><strong>Ordered.</strong> Supports range, sort, prefix, and min/max, not just equality.</li>
   </ol>
   <p>The B+tree has both. The next lessons build it; the rest of this one is the "why" that justifies
@@ -72,20 +72,21 @@
   <div class="box deeper">
     <div class="box-title">A note on logarithms with a big base</div>
     <p>Tree height is roughly <code>log<sub>b</sub>(N)</code> where <code>b</code> is the branching
-    factor (keys per node) and <code>N</code> is the number of keys. With <code>b = 2</code> (a binary
-    tree) and a billion keys, height ≈ 30. With <code>b</code> in the hundreds (a page full of keys),
-    height drops to about 3–4. Each level is potentially one page read, so the high branching factor is
-    the whole game. The exact <code>b</code> depends on key size and page size — you'll compute it in
-    3.3. <span class="verify-tag">⚠️VERIFY</span> any specific fanout number against your chosen page
-    and key sizes.</p>
+    factor and <code>N</code> is the number of reachable entries. As an illustration,
+    <code>2<sup>30</sup></code> is about one billion, while
+    <code>256<sup>4</sup></code> is over four billion. That does not predict your exact tree height:
+    leaf capacity, root occupancy, variable key sizes, and fill policy all matter. It shows why a
+    page-sized fanout changes the scale. In 3.3 you calculate one explicit layout instead of trusting
+    a round fanout claim.</p>
   </div>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
       <p class="q">1. Why is "pages touched" the right cost metric on disk, not "comparisons"?</p>
-      <details><summary>Show answer</summary><div class="answer">A non-cached page read can be thousands
-      of times slower than a comparison, so the dominant cost is the number of distinct page reads.</div></details>
+      <details><summary>Show answer</summary><div class="answer">A cache miss may require a storage
+      transfer, while many comparisons can run after that page is already in memory. Page visits are
+      therefore the first-order disk-oriented cost, though CPU/cache costs still exist.</div></details>
       <p class="q">2. Why does a high branching factor make the tree shallow?</p>
       <details><summary>Show answer</summary><div class="answer">Height ≈ log base (keys-per-node) of N;
       a large base shrinks the exponent, so many keys fit in few levels.</div></details>
@@ -102,7 +103,9 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Book:</strong> <em>Database Internals</em> (Petrov), Ch.2 "B-Tree Basics" — the disk cost argument.</li>
-      <li><strong>Course:</strong> CMU 15-445 "Tree Indexes / B+Trees" lectures. <span class="verify-tag">⚠️VERIFY</span> the exact lecture number before citing.</li>
+      <li><strong>Course:</strong> CMU 15-445/645 Spring 2026,
+      <a href="https://15445.courses.cs.cmu.edu/spring2026/slides/08-indexes1.pdf">Lecture 8:
+      Indexes &amp; Filters I</a> — B+tree structure, lookup, insertion, and deletion.</li>
       <li><strong>Forward link:</strong> 3.2 (B-tree vs B+tree), 3.3 (fanout from page+key size), Phase 6 (range queries need this order).</li>
     </ul>
   </div>

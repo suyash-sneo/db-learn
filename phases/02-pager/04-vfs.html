@@ -22,13 +22,14 @@
   almost entirely from this one idea.</p>
 
   <h2>What a VFS is</h2>
-  <p>A VFS ("virtual file system") is a small interface for the handful of OS operations a database
-  actually needs: open, read at an offset, write at an offset, flush/sync, truncate, and report size.
-  SQLite calls this object an <code>sqlite3_vfs</code> and ships several implementations (unix, win32,
-  in-memory). Swapping the VFS swaps how the database touches storage without changing any engine
-  logic. <span class="src">[src: <a href="https://www.sqlite.org/vfs.html">SQLite: The VFS — "an abstraction layer on the bottom of the SQLite stack"</a>]</span>
-  <span class="verify-tag">⚠️VERIFY</span> the exact method set of <code>sqlite3_vfs</code> against
-  the linked page; treat the list here as the conceptual minimum, not SQLite's exact struct.</p>
+  <p>A VFS ("virtual file system") is the boundary between database logic and platform I/O. SQLite
+  divides that boundary into two interfaces: <code>sqlite3_vfs</code> handles operations such as
+  opening/deleting files, path names, dynamic loading, time, and randomness; each opened file then
+  exposes <code>sqlite3_io_methods</code> for close, read, write, truncate, sync, size, locking, and
+  related file controls. Unix and Windows VFS implementations sit behind the same interface.
+  <span class="src">[src: <a href="https://www.sqlite.org/vfs.html">SQLite VFS overview and method
+  tables</a>]</span> This curriculum's <code>BlockIo</code> is deliberately narrower: it models one
+  already-open byte store, not SQLite's complete VFS contract.</p>
 
   <h2>A minimal block-device trait in Rust</h2>
   <p>In Rust this maps naturally onto a trait. The pager is generic over "something I can read and
@@ -42,6 +43,7 @@
     <span class="tok-c">/// Request that previously written bytes reach durable storage.</span>
     <span class="tok-k">fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; std::io::Result&lt;()&gt;;
     <span class="tok-k">fn</span> <span class="tok-f">len</span>(&amp;<span class="tok-k">self</span>) -&gt; std::io::Result&lt;<span class="tok-f">u64</span>&gt;;
+    <span class="tok-k">fn</span> <span class="tok-f">set_len</span>(&amp;<span class="tok-k">mut self</span>, len: <span class="tok-f">u64</span>) -&gt; std::io::Result&lt;()&gt;;
 }</code></pre>
   <p>A file-backed implementation is just the 0.8 seek/read/write code behind these methods; an
   in-memory implementation is a <code>Vec&lt;u8&gt;</code> you index into. The pager never knows which
@@ -52,9 +54,12 @@
     <p><code>read_at</code> should loop or use <code>read_exact</code> so a short read is an error, not
     silent truncation; <code>write_at</code> should use <code>write_all</code>. On Unix,
     <code>std::os::unix::fs::FileExt</code> offers <code>read_exact_at</code>/<code>write_all_at</code>
-    that take an explicit offset and don't disturb the file's seek cursor — convenient for a block
-    device but platform-specific. <span class="verify-tag">⚠️VERIFY</span> availability per target; the
-    portable fallback is <code>seek</code> + <code>read_exact</code>/<code>write_all</code>.</p>
+    that take an explicit offset and do not change the file's cursor.
+    <span class="src">[src: Rust standard library
+    <a href="https://doc.rust-lang.org/std/os/unix/fs/trait.FileExt.html"><code>std::os::unix::fs::FileExt</code></a>]</span>
+    That trait is Unix-specific. A portable single-threaded fallback is
+    <code>seek</code> + <code>read_exact</code>/<code>write_all</code>; concurrent access then needs
+    synchronization around the shared cursor.</p>
   </div>
 
   <h2>Where durability lives</h2>
@@ -97,7 +102,8 @@
       <p class="q">1. What problem does putting a VFS trait under the pager solve?</p>
       <details><summary>Show answer</summary><div class="answer">It decouples engine logic from the
       storage backend, enabling in-memory testing, crash injection, and portability without changing
-      higher layers.</div></details>
+      higher layers. The narrow trait also makes the exact semantics—full transfer or error, length
+      changes, and synchronization—part of the project's own contract.</div></details>
       <p class="q">2. Why does <code>sync</code> belong in the VFS rather than scattered through the
       engine?</p>
       <details><summary>Show answer</summary><div class="answer">Durability is platform-dependent and
@@ -107,8 +113,8 @@
       <details><summary>Show answer</summary><div class="answer">A test VFS can simulate partial writes
       or dropped syncs, reproducing crash states deterministically without a real power cut.</div></details>
       <p class="q">4. Why prefer <code>read_exact</code>/<code>write_all</code> inside the backend?</p>
-      <details><summary>Show answer</summary><div class="answer">They guarantee the full block is
-      transferred or report an error, instead of silently moving fewer bytes than a fixed-size page
+      <details><summary>Show answer</summary><div class="answer">Their method contract is complete
+      transfer or an error, instead of silently accepting fewer bytes than a fixed-size page
       requires.</div></details>
     </div>
   </div>

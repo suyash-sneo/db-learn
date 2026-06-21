@@ -18,7 +18,8 @@
   <h2>Why this matters to your DB</h2>
   <p>A document can be larger than your page. Without overflow handling, your engine simply can't store
   it — a fatal limitation for a document database. Overflow pages are how every page-based engine stores
-  arbitrarily large values while keeping fixed-size pages.</p>
+  values larger than one page while keeping fixed-size pages. The maximum is still bounded by the
+  format's length field, page-number space, available storage, and implementation limits.</p>
 
   <h2>What's in a cell</h2>
   <p>A cell is the unit a slot points at. Its contents depend on the page type (3.3), but the recurring
@@ -40,7 +41,7 @@
   <ol>
     <li>Keep up to some threshold of payload inline in the cell.</li>
     <li>Allocate an overflow page; write the next <code>page_size − overflow_header</code> bytes of
-    payload into it; its first bytes are a "next overflow page" pointer (0 = end).</li>
+    payload into it; its header identifies the page type and stores a next-page pointer (0 = end).</li>
     <li>Repeat, chaining pages, until all payload is written.</li>
     <li>Store the first overflow page number in the cell.</li>
   </ol>
@@ -58,7 +59,7 @@
     <text class="dg-txt-s" x="20" y="130">read: inline prefix ++ page1 ++ page2 (stop at next = 0)</text>
     <defs><marker id="a43" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
   </svg>
-  <figcaption>Inline prefix + a singly-linked chain of overflow pages holds an arbitrarily large value.</figcaption>
+  <figcaption>Inline prefix + a singly-linked chain stores a value larger than one page, within format limits.</figcaption>
   </figure>
 
   <h2>How SQLite does it (your reference)</h2>
@@ -66,10 +67,10 @@
   pages; each overflow page begins with a 4-byte big-endian pointer to the next overflow page (zero on
   the last), followed by payload bytes.
   <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6 "Cell payload overflow pages"</a>]</span>
-  SQLite computes how much stays inline from the page size and usable size to balance fanout against
-  overflow I/O; the exact thresholds are spelled out in §1.6. <span class="verify-tag">⚠️VERIFY</span>
-  the precise inline-payload formula against §1.6 before copying numbers — it is subtle and version-stable
-  but easy to misquote.</p>
+  SQLite computes local payload using formulas based on usable page size and cell type; those exact
+  formulas are in §1.6 and belong to SQLite's format, not this project's simpler threshold.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6,
+  local payload formulas and overflow pages</a>]</span></p>
 
   <div class="box warn">
     <div class="box-title">⚠️ Overflow pages must be freed too</div>
@@ -79,10 +80,14 @@
   </div>
 
   <h2>Keeping it tractable in your build</h2>
-  <p>A simple, correct policy for your engine: choose a fixed inline threshold (e.g. keep the cell within
-  ¼ of usable page space); if the value exceeds it, store a small inline prefix (or none) plus a 4-byte
-  first-overflow-page pointer, and chain the rest. Document the threshold. This is enough to store
-  documents of any size while keeping nodes high-fanout.</p>
+  <p>The build fixes a self-describing cell header:
+  <code>flags:u8 | total_len:u32 | inline_len:u16 | first_overflow:u32</code>, followed by
+  <code>inline_len</code> bytes. The 11-byte header uses big-endian integers. A set overflow flag
+  requires a nonzero first page; a clear flag requires zero. The <code>u32 total_len</code> bounds one
+  record to at most <code>u32::MAX</code> bytes. Keep the complete cell—including its 4-byte slot—at
+  or below one quarter of usable page bytes; spill the remainder. A project overflow page has an
+  8-byte header: <code>type:u8 | reserved:[u8;3] | next:u32</code>, then payload. This differs from
+  SQLite's 4-byte-only overflow header and makes page scanning/type validation simpler.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
@@ -91,7 +96,7 @@
       <details><summary>Show answer</summary><div class="answer">A small inline prefix avoids an extra page
       read for short-ish values and keeps the cell self-locating, while still bounding inline size to
       protect fanout.</div></details>
-      <p class="q">2. How is an arbitrarily large value reassembled on read?</p>
+      <p class="q">2. How is a multi-page value reassembled on read?</p>
       <details><summary>Show answer</summary><div class="answer">Read the inline prefix, then follow the
       overflow-page chain, concatenating each page's payload until the next-pointer is 0.</div></details>
       <p class="q">3. What must happen to overflow pages when a record is deleted?</p>

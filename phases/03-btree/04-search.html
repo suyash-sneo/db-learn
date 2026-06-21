@@ -28,15 +28,21 @@
     <li>If it's <strong>internal</strong>, binary-search the separator keys to pick the correct child
     pointer, load that child page, and repeat.</li>
   </ol>
-  <p>Each step reads exactly one page, so a lookup reads <em>height</em> pages — the shallow tree pays
-  off here.</p>
+  <p>Each level visits one node page, so a lookup visits <em>height</em> pages. Some or all may already
+  be in the buffer pool; “height pages” is a logical visit count, not a promise of height physical
+  reads.</p>
 
   <h2>The separator convention (pin it down once)</h2>
   <p>An internal node with separators <code>[k₀, k₁, …, kₙ₋₁]</code> has children
-  <code>[c₀, c₁, …, cₙ]</code>. A common convention: child <code>cᵢ</code> holds keys
-  <code>&lt; kᵢ</code>, and child <code>cₙ</code> (the rightmost) holds keys <code>≥ kₙ₋₁</code>. To
-  route a search key <code>K</code>: find the first separator <code>kᵢ</code> with <code>K &lt; kᵢ</code>
-  and descend into <code>cᵢ</code>; if none, descend into the rightmost child.</p>
+  <code>[c₀, c₁, …, cₙ]</code>. This project defines the intervals exactly:</p>
+  <ul>
+    <li><code>c₀</code> contains <code>K &lt; k₀</code>.</li>
+    <li>For <code>0 &lt; i &lt; n</code>, <code>cᵢ</code> contains
+    <code>kᵢ₋₁ ≤ K &lt; kᵢ</code>.</li>
+    <li><code>cₙ</code> contains <code>K ≥ kₙ₋₁</code>.</li>
+  </ul>
+  <p>Therefore choose the first separator <em>strictly greater</em> than <code>K</code>; if none is
+  greater, choose the rightmost child. Equal keys route right.</p>
   <div class="box warn">
     <div class="box-title">⚠️ Off-by-one here corrupts every query</div>
     <p>Whether a separator means "&lt;" or "≤", and whether equal keys go left or right, must be one
@@ -76,11 +82,12 @@
 <span class="tok-c">//    }</span></code></pre>
 
   <h2>Binary search within a node</h2>
-  <p>Within a node, entries are sorted, so use binary search, not a linear scan — it turns per-node cost
-  from O(entries) to O(log entries). Rust's slices give you <code>binary_search_by</code> which returns
-  <code>Ok(index)</code> on a match or <code>Err(insertion_point)</code> otherwise — the
-  <code>Err</code> case is exactly the child index / insert position you want.
-  <span class="src">[src: <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.binary_search_by"><code>slice::binary_search_by</code></a>]</span></p>
+  <p>Within a leaf, <code>binary_search_by</code> finds an exact key or its insertion point. For this
+  internal-node convention, the child index is the number of separators less than or equal to
+  <code>K</code>; Rust's <code>partition_point(|sep| sep &lt;= K)</code> expresses that rule directly.
+  <span class="src">[src: Rust slice
+  <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.binary_search_by"><code>binary_search_by</code></a>
+  and <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.partition_point"><code>partition_point</code></a>]</span></p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
@@ -95,16 +102,19 @@
       <p class="q">3. Why don't range scans return to the root for each result?</p>
       <details><summary>Show answer</summary><div class="answer">Leaves are linked in key order, so the
       scan follows next-leaf pointers after a single initial descent.</div></details>
-      <p class="q">4. What does <code>binary_search_by</code>'s <code>Err</code> value give you?</p>
-      <details><summary>Show answer</summary><div class="answer">The insertion point — the index where the
-      key would go — which is the child index to descend into or the slot to insert at.</div></details>
+      <p class="q">4. Under this convention, how do you compute an internal child index?</p>
+      <details><summary>Show answer</summary><div class="answer">Count the separators that are
+      <code>≤ K</code>, equivalently use <code>partition_point(|sep| sep &lt;= K)</code>. Equal
+      separator keys route to the child on their right.</div></details>
     </div>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Doc:</strong> <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.binary_search_by"><code>slice::binary_search_by</code></a>.</li>
+      <li><strong>Doc:</strong> Rust slice
+      <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.binary_search_by"><code>binary_search_by</code></a>
+      and <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.partition_point"><code>partition_point</code></a>.</li>
       <li><strong>Book:</strong> <em>Database Internals</em>, "B-Tree Lookup" and "Iterating over leaves."</li>
       <li><strong>Forward link:</strong> 3.5 (insert reuses descend), 3.6 (delete reuses descend), Phase 6 (query evaluator drives range scans).</li>
     </ul>

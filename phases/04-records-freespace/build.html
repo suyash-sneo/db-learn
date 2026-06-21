@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Build — slotted pages + freelist</title>
+<title>Build — slotted records, overflow, and freelist</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p4:build", root: "../../" };</script>
 </head>
@@ -11,223 +11,355 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 4</a> › Build</div>
   <span class="pill">Build · AI off</span>
-  <h1>Build: a slotted record store with overflow &amp; a freelist</h1>
-  <div class="goal"><b>Goal:</b> Store variable-length records of any size in slotted pages on your
-  pager, spill big ones to overflow chains, compact pages to reclaim holes, and recycle whole pages
-  through a freelist.</div>
+  <h1>Build: a slotted record store with overflow and page reuse</h1>
+  <div class="goal"><b>Goal:</b> Store variable-length byte records in self-describing record pages,
+  preserve live record identifiers through compaction, spill large tails into checked overflow
+  chains, and persist a typed singly-linked freelist.</div>
 
   <div class="box warn">
     <div class="box-title">⚠️ AI off</div>
-    <p>Slotted pages, compaction, overflow, and the freelist are core storage components — no worked
-    implementation here, only contracts, stubs, failing tests, and graduated hints. Cite the SQLite
-    file-format spec for layouts; write the code yourself.</p>
+    <p>This page defines formats and contracts, then gives only <code>todo!()</code> stubs, failing
+    tests, and hints. Slotted-page mutation, overflow, compaction, and freelist logic are prohibited
+    solution components; implement them yourself.</p>
   </div>
 
-  <h2>Deliverable</h2>
-  <p>A Rust 2024 module <code>recstore</code> on the Phase 2 <code>pager</code>: insert/get/delete of
-  arbitrary-length byte records, returning a stable <code>RecordId</code> (page number + slot). Pages are
-  slotted; oversized records use overflow chains; freed pages return to a persistent freelist.</p>
+  <h2>Scope and identity rule</h2>
+  <p><code>RecordId { page: PageNo, slot: u16 }</code> is an internal physical identifier. It remains
+  valid while that live record is compacted within the same page. After deletion it is invalid; a
+  later insert may reuse the tombstoned slot, so stale identifiers are not safe public handles. Moving
+  a record to another page would require returning/updating a new identifier and is deferred to the
+  transactional document layer.</p>
 
-  <h2>Fixed design decisions</h2>
+  <h2>Exact page formats</h2>
+  <p>All integers are big-endian. Page numbers use Phase 2's <code>u32 PageNo</code>.</p>
+
+  <h3>Record page</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Offset</th><th>Bytes</th><th>Field</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td>1</td><td><code>PAGE_RECORD = 0x21</code></td></tr>
+      <tr><td>1</td><td>1</td><td>reserved, zero</td></tr>
+      <tr><td>2</td><td>2</td><td>slot count, including tombstones</td></tr>
+      <tr><td>4</td><td>2</td><td>live record count</td></tr>
+      <tr><td>6</td><td>2</td><td>cell-content start</td></tr>
+      <tr><td>8</td><td>2</td><td>fragmented/dead cell bytes</td></tr>
+      <tr><td>10</td><td>2</td><td>reserved, zero</td></tr>
+    </tbody>
+  </table></div>
+  <p>The 12-byte header is followed by 4-byte slots:
+  <code>offset:u16 | length:u16</code>. <code>(0, 0)</code> is a tombstone. Other zero combinations
+  are corruption. Cells grow backward from the page end. Insertion may reuse a tombstone slot;
+  compaction keeps every slot index fixed and changes only live offsets.</p>
+
+  <h3>Record cell</h3>
+  <p><code>flags:u8 | total_len:u32 | inline_len:u16 | first_overflow:u32 | inline_bytes</code>.
+  Header size is 11 bytes. Flag bit 0 means an overflow tail exists; all other bits must be zero.
+  <code>inline_len ≤ total_len</code>. If the flag is clear,
+  <code>inline_len == total_len</code> and <code>first_overflow == 0</code>. If set,
+  <code>inline_len &lt; total_len</code> and the first overflow page is a valid data page.</p>
+
+  <h3>Overflow and free pages</h3>
+  <p>Both have an 8-byte header:
+  <code>type:u8 | reserved:[u8;3] | next:u32</code>. Types are
+  <code>PAGE_OVERFLOW = 0x22</code> and <code>PAGE_FREE = 0x23</code>. Overflow payload begins at
+  byte 8. The record's <code>total_len</code> determines how many payload bytes are meaningful in the
+  final page. A free page's remaining bytes are zero.</p>
+
+  <h2>Required validation</h2>
   <ul>
-    <li>Slot = 2-byte big-endian offset into the page; the slot array is at the front (after the page
-    header), cells grow from the back.</li>
-    <li>Page header (this phase): 1-byte type, 2-byte cell count, 2-byte cell-content-start, 2-byte
-    fragmented-bytes counter.</li>
-    <li>Inline threshold: a record larger than ¼ usable page space overflows. Inline portion = a 4-byte
-    first-overflow-page pointer plus whatever prefix you choose (document the choice).</li>
-    <li>Overflow page: first 4 bytes = next overflow page (0 = last), rest = payload.</li>
-    <li>Freelist: singly-linked (header holds first free page; each free page's first 4 bytes = next).
-    Head stored in the file header.</li>
-    <li><code>RecordId</code> is stable across compaction (slot index does not change when cells move).</li>
+    <li>Every header, slot, cell, and chain range is checked before slicing.</li>
+    <li>Overflow/freelist traversal rejects page 0, page 1, out-of-range pages, wrong page types,
+    cycles, early termination, and a nonzero tail after the requested byte count is complete.</li>
+    <li>Record length is at most <code>u32::MAX</code>. Practical allocation limits may be lower.</li>
+    <li>The complete inline cell plus one 4-byte slot may use at most one quarter of
+    <code>page_size − 12</code>; larger tails overflow.</li>
+    <li>A record page with <code>live_count == 0</code> may be returned to the freelist after its last
+    record and overflow chain are deleted.</li>
   </ul>
 
   <h2>Ordered milestones</h2>
   <ol>
-    <li><strong>M1 — Slotted page.</strong> Insert/read/delete a cell within one page; maintain the
-    header counters and the gap invariant.</li>
-    <li><strong>M2 — Compaction.</strong> <code>defragment</code> packs live cells; an insert that
-    doesn't fit triggers it before failing.</li>
-    <li><strong>M3 — Freelist.</strong> <code>alloc_page</code> pops the freelist or grows; <code>free_page</code>
-    pushes; head persisted in the header.</li>
-    <li><strong>M4 — Overflow.</strong> Write/read records larger than the inline threshold across an
-    overflow chain; freeing a record frees its chain.</li>
-    <li><strong>M5 — Record store API.</strong> <code>insert(bytes) -&gt; RecordId</code>,
-    <code>get(id) -&gt; Vec&lt;u8&gt;</code>, <code>delete(id)</code>, gluing M1–M4 together.</li>
+    <li><strong>M1 — Record page primitives.</strong> Initialize, validate, insert, read, tombstone,
+    and reuse slots without changing other live slot indices.</li>
+    <li><strong>M2 — Compaction.</strong> Rebuild a page in scratch, preserving slot indices and
+    tombstones; retry an insert once when total free space is sufficient.</li>
+    <li><strong>M3 — Typed freelist.</strong> Pop/push <code>PAGE_FREE</code> pages using the pager's
+    persisted freelist head; reject double-free and cycles.</li>
+    <li><strong>M4 — Overflow.</strong> Write/read/free typed overflow chains and enforce exact total
+    length.</li>
+    <li><strong>M5 — Record API.</strong> Scan existing record pages for space, allocate/initialize a
+    new one when needed, and implement insert/get/delete/sync/reopen.</li>
   </ol>
 
   <h2>Acceptance criteria</h2>
   <ul>
-    <li>All Rust tests below pass.</li>
-    <li>Insert/get round-trips records of varied sizes, including ones that overflow multiple pages.</li>
-    <li>After many delete+insert cycles, a page still accepts inserts thanks to compaction (no premature
-    "page full" while total free space suffices).</li>
-    <li>Freeing records returns their pages (including overflow pages) to the freelist; subsequent
-    allocations reuse them instead of growing the file (assert file/page count doesn't grow when reuse is
-    possible).</li>
-    <li>A <code>RecordId</code> obtained before a compaction still resolves to the same record after it.</li>
+    <li>All supplied tests pass unchanged.</li>
+    <li>Empty, inline, and multi-page records round-trip.</li>
+    <li>Deleting one record does not change another record's identifier.</li>
+    <li>Compaction preserves all live identifiers and permits insertion when total free bytes suffice.</li>
+    <li>Freed record/overflow pages are reused before <code>page_count</code> grows.</li>
+    <li>Malformed and cyclic chains return typed errors rather than hanging or panicking.</li>
+    <li>Sync and reopen preserve live records and the freelist.</li>
+    <li>Manual integration check: repeat reopen and reuse with <code>FileBlock</code>. Atomic
+    insert/delete across several pages is not claimed until Phase 5 transactions.</li>
   </ul>
 
-  <h2>Stub: <code>src/recstore.rs</code></h2>
+  <h2>Stubs: <code>src/recstore.rs</code></h2>
   <span class="code-label">src/recstore.rs — implement every todo!()</span>
-<pre><code><span class="tok-k">use</span> pager::{Pager, BlockIo};
+<pre><code><span class="tok-k">use</span> std::collections::HashSet;
+<span class="tok-k">use</span> pager::{BlockIo, PageNo, Pager};
+
+<span class="tok-k">const</span> <span class="tok-f">PAGE_RECORD</span>: <span class="tok-f">u8</span> = 0x21;
+<span class="tok-k">const</span> <span class="tok-f">PAGE_OVERFLOW</span>: <span class="tok-f">u8</span> = 0x22;
+<span class="tok-k">const</span> <span class="tok-f">PAGE_FREE</span>: <span class="tok-f">u8</span> = 0x23;
+<span class="tok-k">const</span> <span class="tok-f">RECORD_HEADER_LEN</span>: <span class="tok-f">usize</span> = 12;
+<span class="tok-k">const</span> <span class="tok-f">SLOT_LEN</span>: <span class="tok-f">usize</span> = 4;
+<span class="tok-k">const</span> <span class="tok-f">CELL_HEADER_LEN</span>: <span class="tok-f">usize</span> = 11;
+<span class="tok-k">const</span> <span class="tok-f">CHAIN_HEADER_LEN</span>: <span class="tok-f">usize</span> = 8;
 
 <span class="tok-m">#[derive(Clone, Copy, Debug, PartialEq, Eq)]</span>
-<span class="tok-k">pub struct</span> <span class="tok-f">RecordId</span> { <span class="tok-k">pub</span> page: <span class="tok-f">u64</span>, <span class="tok-k">pub</span> slot: <span class="tok-f">u16</span> }
+<span class="tok-k">pub struct</span> <span class="tok-f">RecordId</span> {
+    <span class="tok-k">pub</span> page: <span class="tok-f">PageNo</span>,
+    <span class="tok-k">pub</span> slot: <span class="tok-f">u16</span>,
+}
 
 <span class="tok-m">#[derive(Debug)]</span>
 <span class="tok-k">pub enum</span> <span class="tok-f">RecError</span> {
     Pager(pager::PagerError),
     Corrupt(&amp;<span class="tok-k">'static</span> <span class="tok-f">str</span>),
     NotFound,
+    RecordTooLarge(<span class="tok-f">usize</span>),
+    OverflowCycle(<span class="tok-f">PageNo</span>),
+    FreelistCycle(<span class="tok-f">PageNo</span>),
+    DoubleFree(<span class="tok-f">PageNo</span>),
 }
 <span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;pager::PagerError&gt; <span class="tok-k">for</span> <span class="tok-f">RecError</span> {
-    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: pager::PagerError) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">RecError</span>::<span class="tok-f">Pager</span>(e) }
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: pager::PagerError) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">Self</span>::<span class="tok-f">Pager</span>(e) }
 }
-<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">RecError</span>&gt;;
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; =
+    std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">RecError</span>&gt;;
 
-<span class="tok-k">pub struct</span> <span class="tok-f">RecStore</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; { pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt; }
+<span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">struct</span> <span class="tok-f">Cell</span> {
+    total_len: <span class="tok-f">u32</span>,
+    inline: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;,
+    first_overflow: <span class="tok-f">PageNo</span>,
+}
+
+<span class="tok-k">fn</span> <span class="tok-f">init_record_page</span>(page: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: zero page; write type/counts/cell_start"</span>)
+}
+<span class="tok-k">fn</span> <span class="tok-f">validate_record_page</span>(page: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: validate header, slot region, live count, cells, overlap, fragmented count"</span>)
+}
+<span class="tok-k">fn</span> <span class="tok-f">page_insert_cell</span>(page: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>], cell: &amp;[<span class="tok-f">u8</span>])
+    -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Option</span>&lt;<span class="tok-f">u16</span>&gt;&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1/M2: reuse tombstone or append slot; compact/retry once; None if page cannot fit"</span>)
+}
+<span class="tok-k">fn</span> <span class="tok-f">page_read_cell</span>(page: &amp;[<span class="tok-f">u8</span>], slot: <span class="tok-f">u16</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: validate slot; reject tombstone; copy exact offset/length"</span>)
+}
+<span class="tok-k">fn</span> <span class="tok-f">page_delete_cell</span>(page: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>], slot: <span class="tok-f">u16</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: mark (0,0); decrement live; add old length to fragmented; do not shift slots"</span>)
+}
+<span class="tok-k">fn</span> <span class="tok-f">defragment</span>(page: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: scratch rebuild; preserve every slot index/tombstone; reset fragmentation"</span>)
+}
+<span class="tok-k">fn</span> <span class="tok-f">encode_cell</span>(cell: &amp;<span class="tok-f">Cell</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M4: exact 11-byte header and invariant checks"</span>)
+}
+<span class="tok-k">fn</span> <span class="tok-f">decode_cell</span>(bytes: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Cell</span>&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M4: validate flags, lengths, pointer relationship, exact cell length"</span>)
+}
+
+<span class="tok-k">pub struct</span> <span class="tok-f">RecStore</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; {
+    pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;,
+}
 
 <span class="tok-k">impl</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; <span class="tok-f">RecStore</span>&lt;<span class="tok-f">B</span>&gt; {
-    <span class="tok-c">// ---- slotted page primitives (M1/M2) ----</span>
-    <span class="tok-k">fn</span> <span class="tok-f">page_insert_cell</span>(&amp;<span class="tok-k">mut self</span>, page: <span class="tok-f">u64</span>, cell: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Option</span>&lt;<span class="tok-f">u16</span>&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: place cell if gap fits (after M2 compaction if needed); return slot, or None if full"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(<span class="tok-k">mut</span> pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3/M5: validate known page types and the complete freelist chain"</span>)
     }
-    <span class="tok-k">fn</span> <span class="tok-f">page_read_cell</span>(&amp;<span class="tok-k">mut self</span>, page: <span class="tok-f">u64</span>, slot: <span class="tok-f">u16</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: slot -&gt; offset -&gt; cell bytes"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">into_pager</span>(<span class="tok-k">self</span>) -&gt; <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt; { <span class="tok-k">self</span>.pager }
+
+    <span class="tok-k">fn</span> <span class="tok-f">alloc_page</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">PageNo</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: pop typed free head or pager.allocate_page; clear before reuse"</span>)
     }
-    <span class="tok-k">fn</span> <span class="tok-f">page_delete_cell</span>(&amp;<span class="tok-k">mut self</span>, page: <span class="tok-f">u64</span>, slot: <span class="tok-f">u16</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: remove slot, bump fragmented counter; keep RecordId stable for others"</span>)
+    <span class="tok-k">fn</span> <span class="tok-f">free_page</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">PageNo</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: reject reserved/double free; write PAGE_FREE + old head; publish new head"</span>)
     }
-    <span class="tok-k">fn</span> <span class="tok-f">defragment</span>(&amp;<span class="tok-k">mut self</span>, page: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: pack live cells in a scratch buffer, rewrite the whole page"</span>)
+    <span class="tok-k">fn</span> <span class="tok-f">write_overflow</span>(&amp;<span class="tok-k">mut self</span>, payload: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">PageNo</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: allocate typed chain; fill payload; link; return first (0 only for empty payload)"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">read_overflow</span>(&amp;<span class="tok-k">mut self</span>, first: <span class="tok-f">PageNo</span>, needed: <span class="tok-f">usize</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: checked traversal with HashSet cycle detection and exact final length"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">free_overflow</span>(&amp;<span class="tok-k">mut self</span>, first: <span class="tok-f">PageNo</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: validate/cycle-check; read next before free_page"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">compact_page</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">PageNo</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: pager.modify_page and defragment"</span>)
     }
 
-    <span class="tok-c">// ---- freelist (M3) ----</span>
-    <span class="tok-k">fn</span> <span class="tok-f">alloc_page</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">u64</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: pop freelist head if any, else pager.allocate_page()"</span>)
-    }
-    <span class="tok-k">fn</span> <span class="tok-f">free_page</span>(&amp;<span class="tok-k">mut self</span>, page: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: write old head into page's first 4 bytes; set header head = page"</span>)
-    }
-
-    <span class="tok-c">// ---- overflow (M4) ----</span>
-    <span class="tok-k">fn</span> <span class="tok-f">write_overflow</span>(&amp;<span class="tok-k">mut self</span>, payload: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">u64</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: chain alloc_page()s; first 4 bytes = next (0 last); return first page"</span>)
-    }
-    <span class="tok-k">fn</span> <span class="tok-f">read_overflow</span>(&amp;<span class="tok-k">mut self</span>, first: <span class="tok-f">u64</span>, total_len: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: follow chain, concatenate, stop at next = 0"</span>)
-    }
-    <span class="tok-k">fn</span> <span class="tok-f">free_overflow</span>(&amp;<span class="tok-k">mut self</span>, first: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: walk chain, free_page() each"</span>)
-    }
-
-    <span class="tok-c">// ---- public API (M5) ----</span>
     <span class="tok-k">pub fn</span> <span class="tok-f">insert</span>(&amp;<span class="tok-k">mut self</span>, bytes: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">RecordId</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: build a cell (inline or overflow), find/allocate a page with room, insert slot"</span>)
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: length/threshold; overflow tail; scan record pages; initialize new page if needed"</span>)
     }
     <span class="tok-k">pub fn</span> <span class="tok-f">get</span>(&amp;<span class="tok-k">mut self</span>, id: <span class="tok-f">RecordId</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: read cell; if overflow flag, read_overflow and join with prefix"</span>)
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: read/decode cell; append exactly total_len-inline_len overflow bytes"</span>)
     }
     <span class="tok-k">pub fn</span> <span class="tok-f">delete</span>(&amp;<span class="tok-k">mut self</span>, id: <span class="tok-f">RecordId</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: free overflow chain if any; delete the cell"</span>)
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: decode first; free overflow; tombstone slot; free page if live_count becomes zero"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: delegate to pager.sync; no multi-page atomicity claim"</span>)
     }
 }</code></pre>
 
   <h2>Failing tests</h2>
-  <span class="code-label">append to src/recstore.rs (uses pager::MemBlock)</span>
+  <span class="code-label">append as an inline unit-test module in src/recstore.rs</span>
 <pre><code><span class="tok-m">#[cfg(test)]</span>
 <span class="tok-k">mod</span> tests {
     <span class="tok-k">use super</span>::*;
-    <span class="tok-k">use</span> pager::{Pager, MemBlock};
+    <span class="tok-k">use</span> pager::MemBlock;
 
     <span class="tok-k">fn</span> <span class="tok-f">fresh</span>() -&gt; <span class="tok-f">RecStore</span>&lt;<span class="tok-f">MemBlock</span>&gt; {
-        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() }, 4096, 64).<span class="tok-f">unwrap</span>();
-        <span class="tok-f">RecStore</span> { pager: p }
+        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, 8).<span class="tok-f">unwrap</span>();
+        <span class="tok-f">RecStore</span>::<span class="tok-f">open</span>(p).<span class="tok-f">unwrap</span>()
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">small_records_roundtrip</span>() {
+    <span class="tok-k">fn</span> <span class="tok-f">empty_small_and_large_records_roundtrip</span>() {
         <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
-        <span class="tok-k">let</span> a = s.<span class="tok-f">insert</span>(b<span class="tok-s">"hello"</span>).<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let</span> b = s.<span class="tok-f">insert</span>(b<span class="tok-s">""</span>).<span class="tok-f">unwrap</span>(); <span class="tok-c">// empty record</span>
-        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(a).<span class="tok-f">unwrap</span>(), b<span class="tok-s">"hello"</span>);
-        <span class="tok-m">assert!</span>(s.<span class="tok-f">get</span>(b).<span class="tok-f">unwrap</span>().<span class="tok-f">is_empty</span>());
+        <span class="tok-k">let</span> empty = s.<span class="tok-f">insert</span>(b<span class="tok-s">""</span>).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> small = s.<span class="tok-f">insert</span>(b<span class="tok-s">"hello"</span>).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> big = (0..20_000).<span class="tok-f">map</span>(|i| (i % 251) <span class="tok-k">as</span> <span class="tok-f">u8</span>).<span class="tok-f">collect</span>::&lt;<span class="tok-f">Vec</span>&lt;_&gt;&gt;();
+        <span class="tok-k">let</span> large = s.<span class="tok-f">insert</span>(&amp;big).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert!</span>(s.<span class="tok-f">get</span>(empty).<span class="tok-f">unwrap</span>().<span class="tok-f">is_empty</span>());
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(small).<span class="tok-f">unwrap</span>(), b<span class="tok-s">"hello"</span>);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(large).<span class="tok-f">unwrap</span>(), big);
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">large_record_uses_overflow</span>() {
+    <span class="tok-k">fn</span> <span class="tok-f">delete_does_not_shift_other_record_ids</span>() {
         <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
-        <span class="tok-k">let</span> big: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; = (0..20_000).<span class="tok-f">map</span>(|i| (i % 251) <span class="tok-k">as</span> <span class="tok-f">u8</span>).<span class="tok-f">collect</span>();
-        <span class="tok-k">let</span> id = s.<span class="tok-f">insert</span>(&amp;big).<span class="tok-f">unwrap</span>();
-        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(id).<span class="tok-f">unwrap</span>(), big);
+        <span class="tok-k">let</span> a = s.<span class="tok-f">insert</span>(b<span class="tok-s">"a"</span>).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> b = s.<span class="tok-f">insert</span>(b<span class="tok-s">"b"</span>).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">delete</span>(a).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(b).<span class="tok-f">unwrap</span>(), b<span class="tok-s">"b"</span>);
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(s.<span class="tok-f">get</span>(a), <span class="tok-f">Err</span>(<span class="tok-f">RecError</span>::<span class="tok-f">NotFound</span>)));
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">compaction_lets_page_keep_accepting</span>() {
+    <span class="tok-k">fn</span> <span class="tok-f">compaction_preserves_live_slot_indices</span>() {
         <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
-        <span class="tok-c">// fill a page with medium records, delete most, insert more:</span>
-        <span class="tok-c">// without compaction this would falsely report "full".</span>
+        <span class="tok-k">let</span> a = s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[1; 600]).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> dead = s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[2; 600]).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> c = s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[3; 600]).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(a.page, c.page);
+        s.<span class="tok-f">delete</span>(dead).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">compact_page</span>(a.page).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(a).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[1; 600]);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(c).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[3; 600]);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">churn_reuses_holes_after_compaction</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
         <span class="tok-k">let mut</span> ids = <span class="tok-f">Vec</span>::<span class="tok-f">new</span>();
-        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0..50 { ids.<span class="tok-f">push</span>(s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[i <span class="tok-k">as</span> <span class="tok-f">u8</span>; 60]).<span class="tok-f">unwrap</span>()); }
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0..40 { ids.<span class="tok-f">push</span>(s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[i <span class="tok-k">as</span> <span class="tok-f">u8</span>; 80]).<span class="tok-f">unwrap</span>()); }
         <span class="tok-k">for</span> id <span class="tok-k">in</span> ids.<span class="tok-f">iter</span>().<span class="tok-f">step_by</span>(2) { s.<span class="tok-f">delete</span>(*id).<span class="tok-f">unwrap</span>(); }
-        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0..20 { s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[200 + i <span class="tok-k">as</span> <span class="tok-f">u8</span>; 60]).<span class="tok-f">unwrap</span>(); }
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0..20 { s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[200 + i <span class="tok-k">as</span> <span class="tok-f">u8</span>; 80]).<span class="tok-f">unwrap</span>(); }
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">freed_pages_are_reused</span>() {
+    <span class="tok-k">fn</span> <span class="tok-f">freed_pages_are_reused_before_growth</span>() {
         <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
-        <span class="tok-k">let</span> big: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; = <span class="tok-f">vec!</span>[7u8; 30_000]; <span class="tok-c">// several overflow pages</span>
+        <span class="tok-k">let</span> big = <span class="tok-f">vec!</span>[7u8; 30_000];
         <span class="tok-k">let</span> id = s.<span class="tok-f">insert</span>(&amp;big).<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let</span> before = s.pager.page_count;
+        <span class="tok-k">let</span> high_water = s.pager.<span class="tok-f">page_count</span>();
         s.<span class="tok-f">delete</span>(id).<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let</span> _ = s.<span class="tok-f">insert</span>(&amp;big).<span class="tok-f">unwrap</span>();
-        <span class="tok-c">// reuse means page_count should not have grown the second time</span>
-        <span class="tok-m">assert_eq!</span>(s.pager.page_count, before);
+        <span class="tok-k">let</span> id2 = s.<span class="tok-f">insert</span>(&amp;big).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(s.pager.<span class="tok-f">page_count</span>(), high_water);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(id2).<span class="tok-f">unwrap</span>(), big);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">overflow_cycle_is_rejected</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let</span> first = s.<span class="tok-f">write_overflow</span>(&amp;<span class="tok-f">vec!</span>[9; 5000]).<span class="tok-f">unwrap</span>();
+        s.pager.<span class="tok-f">modify_page</span>(first, |page| page[4..8].<span class="tok-f">copy_from_slice</span>(&amp;first.<span class="tok-f">to_be_bytes</span>())).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(
+            s.<span class="tok-f">read_overflow</span>(first, 10_000),
+            <span class="tok-f">Err</span>(<span class="tok-f">RecError</span>::<span class="tok-f">OverflowCycle</span>(p)) <span class="tok-k">if</span> p == first
+        ));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">sync_and_reopen_preserve_records_and_freelist</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let</span> keep = s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[4; 12_000]).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> remove = s.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[5; 12_000]).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">delete</span>(remove).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> high_water = s.pager.<span class="tok-f">page_count</span>();
+        s.<span class="tok-f">sync</span>().<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> io = s.<span class="tok-f">into_pager</span>().<span class="tok-f">into_inner</span>();
+        <span class="tok-k">let</span> pager = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(io, 8).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let mut</span> reopened = <span class="tok-f">RecStore</span>::<span class="tok-f">open</span>(pager).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">get</span>(keep).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[4; 12_000]);
+        reopened.<span class="tok-f">insert</span>(&amp;<span class="tok-f">vec!</span>[6; 12_000]).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(reopened.pager.<span class="tok-f">page_count</span>(), high_water);
     }
 }</code></pre>
-  <p class="src">The last test reads <code>pager.page_count</code>; expose it (or a getter) from your
-  Phase 2 crate. The assertion encodes the reuse property: a freed-then-reinserted record must not grow
-  the file.</p>
 
   <h2>Stuck? — graduated hints</h2>
-  <details><summary>M1: "page full" even though I deleted a lot</summary><div class="answer">
-    <strong>Nudge:</strong> Distinguish contiguous free from total free (4.4).
-    <br><strong>Technique:</strong> when the central gap is too small but total free (gap + fragmented)
-    suffices, call <code>defragment</code> and retry once before reporting full.</div></details>
+  <details><summary>M1: deletion changes another RecordId</summary><div class="answer">
+    <strong>Nudge:</strong> Slot index is identity on a record page.
+    <br><strong>Bigger:</strong> Do not remove or shift the 4-byte slot. Replace it with
+    <code>(0,0)</code> and update counts.
+    <br><strong>Technique:</strong> insertion may reuse a tombstone index; document that a deleted
+    identifier is invalid and may later alias a different record.</div></details>
 
-  <details><summary>M3: a page seems to get allocated twice</summary><div class="answer">
-    <strong>Nudge:</strong> Order of operations on the freelist head matters.
-    <br><strong>Technique:</strong> on alloc, read head → set head = that page's next → return the page;
-    on free, write current head into the page → set head = page. Never reuse a page before updating the
-    head. (Crash-safety of these updates is Phase 5.)</div></details>
+  <details><summary>M2: compaction corrupts overlapping source bytes</summary><div class="answer">
+    <strong>Nudge:</strong> Reading and rewriting the same page in slot order can overwrite a cell not
+    yet copied.
+    <br><strong>Bigger:</strong> Validate first, copy live cells into owned scratch storage, then build
+    a complete new page image.
+    <br><strong>Technique:</strong> preserve the entire slot array shape, including tombstones; only
+    live offsets and <code>cell_start</code> change.</div></details>
 
-  <details><summary>M4: my reassembled big record is wrong length</summary><div class="answer">
-    <strong>Nudge:</strong> Each overflow page carries payload <em>after</em> its 4-byte next-pointer.
-    <br><strong>Technique:</strong> track the total length in the cell; read exactly that many bytes
-    across the chain, not "until the page ends," so the final partial page isn't over-read.</div></details>
+  <details><summary>M3: freelist corruption or double allocation</summary><div class="answer">
+    <strong>Nudge:</strong> Validate the head page before publishing the next head.
+    <br><strong>Bigger:</strong> A free page must have <code>PAGE_FREE</code>, zero reserved bytes, and
+    a next pointer that is 0 or an allocated data-page number.
+    <br><strong>Technique:</strong> use a visited set while validating on open. Read old head → write
+    typed free page → publish new head when freeing; reverse the state change when allocating.</div></details>
 
-  <details><summary>M5: RecordId breaks after compaction</summary><div class="answer">
-    <strong>Nudge:</strong> A <code>RecordId</code> is (page, slot index), not a byte offset.
-    <br><strong>Technique:</strong> compaction may move cell <em>bytes</em> but must keep each live cell's
-    slot index unchanged; only offsets inside slots change.</div></details>
+  <details><summary>M4: final overflow page returns extra zeros</summary><div class="answer">
+    <strong>Nudge:</strong> Page capacity is not payload length.
+    <br><strong>Bigger:</strong> Track the exact remaining byte count from the cell's
+    <code>total_len - inline_len</code>.
+    <br><strong>Technique:</strong> consume <code>min(remaining, page_size - 8)</code> per page; when
+    remaining reaches zero, require <code>next == 0</code>.</div></details>
 
   <h2>Definition of Done</h2>
   <ul>
-    <li>☐ All four tests pass (plus a temp-file integration test if you add one).</li>
-    <li>☐ Records of any size round-trip, including multi-page overflow.</li>
-    <li>☐ Compaction keeps pages usable after churn; the gap invariant holds (debug-asserted).</li>
-    <li>☐ Freed pages (including overflow) are reused before the file grows.</li>
-    <li>☐ <code>RecordId</code> is stable across compaction.</li>
-    <li>☐ You documented the inline threshold and freelist design, citing the spec sections.</li>
+    <li>☐ All seven supplied tests pass unchanged.</li>
+    <li>☐ Slots contain offset+length; record deletion tombstones instead of shifting.</li>
+    <li>☐ Compaction preserves live <code>RecordId</code> values.</li>
+    <li>☐ Overflow/freelist traversal is bounded, type-checked, and cycle-checked.</li>
+    <li>☐ Empty pages and overflow chains return to the persisted freelist and are reused.</li>
+    <li>☐ Sync/reopen passes for memory and a separate file-backed integration check.</li>
+    <li>☐ Multi-page atomicity is explicitly deferred to Phase 5.</li>
     <li>☐ <strong>You wrote every implementation line yourself.</strong></li>
   </ul>
 
   <div class="box deeper">
     <div class="box-title">📚 Source anchors</div>
-    <p>Recheck <a href="https://www.sqlite.org/fileformat2.html">file format §1.5 (freelist), §1.6
-    (slotted pages, overflow)</a> and <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.copy_within"><code>slice::copy_within</code></a>
-    while implementing.</p>
+    <p>Compare with SQLite <a href="https://www.sqlite.org/fileformat2.html">§1.5 freelist and §1.6
+    slotted/overflow layouts</a>, and Rust
+    <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.copy_within"><code>slice::copy_within</code></a>.
+    The typed 8-byte chain pages and 4-byte stable slots above are MiniDB-specific.</p>
   </div>
 
   <div class="pager" id="pager"></div>

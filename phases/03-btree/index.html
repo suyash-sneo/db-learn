@@ -13,15 +13,15 @@
   <span class="pill">Phase 3</span>
   <h1>The index: a disk-oriented B+tree</h1>
   <p class="lead">The pager gives you pages by number. Now you'll organize those pages into the data
-  structure at the heart of almost every disk database: the B+tree. It keeps keys sorted, stays
+  structure used by many disk-oriented databases: the B+tree. It keeps keys sorted, stays
   shallow as it grows so lookups touch few pages, and maps cleanly onto one node per page.</p>
 
   <div class="box deeper">
     <div class="box-title">Why a B+tree (and why not a hash map or a plain BST)?</div>
     <p>An in-memory binary search tree has one key per node and is rebalanced by pointer surgery — fine
     in RAM, terrible on disk where each pointer hop can be a separate slow read. A B+tree packs many
-    keys into each page-sized node, so a tree holding millions of keys is only a handful of levels deep
-    — meaning a lookup reads only a handful of pages. It also keeps keys in sorted order, which a hash
+    keys into each page-sized node, producing a much shallower tree than one-key-per-page layouts.
+    It also keeps keys in sorted order, which a hash
     index does not, so it supports range scans (<code>age &gt; 30</code>), ordering, and prefix
     queries. That ordered-range ability is exactly what a query engine needs later.</p>
   </div>
@@ -29,8 +29,9 @@
   <div class="box rust">
     <div class="box-title">What you'll be able to do after Phase 3</div>
     <p>Explain why B+trees beat BSTs and hashes on disk, lay out internal and leaf nodes inside a page,
-    search the tree, insert with node splits that keep it balanced, delete with merge/rebalance, and
-    weigh B+tree vs LSM trees. You'll build a persistent B+tree on top of your Phase 2 pager.</p>
+    search the tree, insert with node splits that keep it balanced, explain deletion choices, and
+    weigh B+tree vs LSM trees. You'll build persistent search/insert/range behavior on top of your
+    Phase 2 pager; full deletion/rebalancing is deliberately deferred.</p>
   </div>
 
   <div class="cardgrid" id="cards"></div>

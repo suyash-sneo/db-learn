@@ -34,7 +34,9 @@
     though every <code>write</code> returned <code>Ok</code>.</li>
     <li><strong>The device cache.</strong> Drives have their own volatile write caches. Data can be
     "on the drive" in this cache yet still lost on power failure unless flushed to the medium.</li>
-    <li><strong>The physical medium.</strong> Only here is the data truly durable.</li>
+    <li><strong>The storage system's stable-state contract.</strong> The OS, filesystem, device, and
+    hardware together determine what a completed synchronization operation promises. The application
+    cannot directly observe a universal "physical medium" boundary.</li>
   </ol>
 
   <figure>
@@ -46,10 +48,11 @@
     <path class="dg-arrow" d="M264,75 L288,75" marker-end="url(#a26)"/><text class="dg-txt-s" x="276" y="42" text-anchor="middle">fsync</text>
     <rect class="dg-box" x="290" y="50" width="110" height="50" rx="6"/><text class="dg-txt-s" x="345" y="72" text-anchor="middle">device</text><text class="dg-txt-s" x="345" y="90" text-anchor="middle">cache</text>
     <path class="dg-arrow" d="M402,75 L426,75" marker-end="url(#a26)"/><text class="dg-txt-s" x="414" y="42" text-anchor="middle">flush</text>
-    <rect class="dg-box-a" x="428" y="50" width="118" height="50" rx="6"/><text class="dg-txt-s" x="487" y="78" text-anchor="middle">medium (durable)</text>
+    <rect class="dg-box-a" x="428" y="50" width="118" height="50" rx="6"/><text class="dg-txt-s" x="487" y="70" text-anchor="middle">documented</text><text class="dg-txt-s" x="487" y="88" text-anchor="middle">stable state</text>
     <defs><marker id="a26" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
   </svg>
-  <figcaption>Each arrow is a different push; a crash between any two loses everything to the left.</figcaption>
+  <figcaption>The layers are conceptual. Exact caching and persistence behavior depends on the
+  platform and storage stack.</figcaption>
   </figure>
 
   <h2>What <code>fsync</code> / <code>sync_all</code> actually does</h2>
@@ -63,21 +66,20 @@
   <div class="box warn">
     <div class="box-title">⚠️ The directory entry needs syncing too</div>
     <p>Creating, renaming, or deleting a file changes the <em>containing directory</em>, not just the
-    file. After creating a new file (e.g. a journal), you must also sync the directory for the new
-    name to be durable — otherwise a crash can leave the file's data on disk but the directory entry
-    pointing to it lost, or vice versa. SQLite's atomic-commit design treats directory syncing as an
-    explicit step and states its filesystem assumptions rather than assuming one call fixes everything.
+    file. On platforms/filesystems whose documented crash protocol requires it, synchronizing the file
+    is followed by synchronizing the containing directory so the name change is also persistent.
+    SQLite's atomic-commit design explicitly reasons about file deletion and directory updates rather
+    than assuming a file sync covers them.
     <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite: Atomic Commit In SQLite</a>]</span></p>
   </div>
 
   <h2>The cost, and why you can't just sync constantly</h2>
-  <p>A real <code>fsync</code> can be very slow (milliseconds — many orders of magnitude slower than a
-  buffered write) because it may force the device to flush its cache to the medium. If you synced after
-  every page write, throughput would collapse. The art of durability is syncing as <em>rarely</em> as
-  correctness allows — typically once per transaction commit, with careful ordering — which is exactly
-  what the rollback journal and WAL protocols in Phase 5 are designed to achieve. <span
-  class="verify-tag">⚠️VERIFY</span> any specific latency figure against a benchmark on your own
-  hardware; absolute numbers vary enormously by device.</p>
+  <p>A synchronization call can be much more expensive than a buffered write because it may wait for
+  lower storage layers. Its latency varies substantially by device, filesystem, workload, and
+  durability settings, so this curriculum does not attach a universal number. Calling it after every
+  page would also prevent useful batching. Recovery protocols therefore define a small number of
+  ordered synchronization points—often around transaction commit—without weakening the stated crash
+  contract.</p>
 
   <h2>The takeaway for the pager</h2>
   <ul>
@@ -85,7 +87,9 @@
     <li>Durability requires an explicit <code>sync</code> at a defined point.</li>
     <li>Ordering matters: in Phase 5 you'll learn you must sync the log <em>before</em> overwriting the
     real data, or recovery can't work.</li>
-    <li>A correct database never claims a commit succeeded before the relevant sync returns.</li>
+    <li>Under a durability mode that promises crash persistence, the database does not report success
+    until that mode's required synchronization step succeeds. A deliberately relaxed mode must state
+    its weaker guarantee.</li>
   </ul>
   <p>For Phase 2's build, your pager exposes a <code>sync</code> method and you reason about when it's
   called; the full crash-safe protocol is deferred to Phase 5, where it belongs.</p>
@@ -96,18 +100,20 @@
       <p class="q">1. Your <code>write_all</code> returned <code>Ok(())</code> and the process is still
       running fine. Is the data safe across a power cut?</p>
       <details><summary>Show answer</summary><div class="answer">No — it may be only in the OS page
-      cache (and later the device cache). It's durable only after a successful sync reaches the medium.</div></details>
+      cache (and later another cache). It satisfies the database's durability promise only after the
+      required synchronization protocol succeeds under the documented storage assumptions.</div></details>
       <p class="q">2. What's the difference between <code>flush()</code> and <code>sync_all()</code>?</p>
       <details><summary>Show answer</summary><div class="answer"><code>flush</code> pushes your process's
       user-space buffer to the OS; <code>sync_all</code> asks the OS to push the file's content+metadata
       toward the device. They cross different layers.</div></details>
       <p class="q">3. Why might you also need to sync a directory?</p>
       <details><summary>Show answer</summary><div class="answer">File creation/rename/delete updates the
-      containing directory; the new name isn't durable until the directory metadata is synced.</div></details>
+      containing directory. On systems whose documented crash protocol requires it, syncing that
+      directory is a separate step needed to persist the name change.</div></details>
       <p class="q">4. Why not just call <code>fsync</code> after every page write?</p>
-      <details><summary>Show answer</summary><div class="answer">fsync is very expensive (can force a
-      device cache flush); doing it per write destroys throughput. Protocols batch durability to one
-      sync per commit.</div></details>
+      <details><summary>Show answer</summary><div class="answer">A sync may wait on lower storage
+      layers, and per-page synchronization prevents batching. A recovery protocol instead defines the
+      minimum ordered sync points needed for its durability mode.</div></details>
     </div>
   </div>
 
@@ -115,7 +121,6 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Spec:</strong> <a href="https://www.sqlite.org/atomiccommit.html">SQLite: Atomic Commit</a> — the canonical, careful statement of the sync/ordering/directory assumptions.</li>
-      <li><strong>Paper/Article:</strong> "Files are hard" / the "fsync gate" literature on how filesystems and devices handle (or mishandle) sync. <span class="verify-tag">⚠️VERIFY</span> a specific source before citing.</li>
       <li><strong>Doc:</strong> <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>File::sync_all</code></a>.</li>
       <li><strong>Forward link:</strong> Phase 5 builds the whole durability protocol on this lesson.</li>
     </ul>

@@ -83,16 +83,15 @@
     you pass through, guaranteeing the parent always has room for a promoted key. Avoids the back-up
     pass but may split nodes unnecessarily.</li>
   </ul>
-  <p>Bottom-up is the more common teaching approach and is fine for your build. Either way, record the
-  root-to-leaf path so you can update parents. <span class="verify-tag">⚠️VERIFY</span> which strategy a
-  given source (e.g. SQLite) uses before claiming it; this curriculum's build uses bottom-up.</p>
+  <p>This curriculum's build uses bottom-up splitting and records the root-to-leaf path. Do not infer
+  that a production source uses the same strategy merely because its result is a balanced tree.</p>
 
   <h2>Choosing the split point</h2>
-  <p>Splitting "roughly in half" by count is the simple default. With variable-length entries you may
-  split by <em>bytes</em> (balance space, not count) so both halves have similar free space. The only
-  hard requirement: after the split, both nodes are at least minimally full (no node below its minimum
-  occupancy) and the new entry fits. Bound your key/value sizes in the build so a single split always
-  suffices.</p>
+  <p>Splitting by entry count is adequate only when entries are similarly sized. With variable-length
+  cells, choose a boundary near half of the <em>encoded bytes</em>, while preserving key order and
+  ensuring both resulting pages encode successfully. A separate occupancy policy is needed if deletion
+  later promises a minimum fill ratio. The Phase 3 build bounds entry size so one entry cannot consume
+  most of a page.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
@@ -116,7 +115,9 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Book:</strong> <em>Database Internals</em>, "B-Tree Node Splits and Merges" — the copy-up/move-up distinction in detail.</li>
-      <li><strong>Course:</strong> CMU 15-445 B+tree lecture covers split visually. <span class="verify-tag">⚠️VERIFY</span> the lecture/timestamp.</li>
+      <li><strong>Course:</strong> CMU 15-445/645 Spring 2026,
+      <a href="https://15445.courses.cs.cmu.edu/spring2026/slides/08-indexes1.pdf">Lecture 8:
+      Indexes &amp; Filters I</a> — B+tree insertion and split diagrams.</li>
       <li><strong>Forward link:</strong> 3.6 (the inverse: delete/merge), 3.8 (how SQLite's balance routine handles this).</li>
     </ul>
   </div>

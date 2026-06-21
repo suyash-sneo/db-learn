@@ -16,23 +16,24 @@
   and why the WAL can be reset.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>The WAL (5.4) is a staging area that grows forever unless something drains it. Checkpointing is that
+  <p>The WAL (5.4) grows until something drains/recycles it. Checkpointing is that
   drain: it copies committed frames into the main file so the WAL can be truncated/reset and reads stay
   fast. Get the barrier ordering wrong here and you can corrupt the database even though every individual
   transaction was committed correctly.</p>
 
   <h2>What a checkpoint does</h2>
-  <p>"Moving the WAL file transactions back into the database is called a 'checkpoint'." It takes the
-  newest version of each page from the WAL and writes it into the corresponding slot of the database file.
+  <p>"Moving the WAL file transactions back into the database is called a 'checkpoint'." A checkpoint
+  copies the newest committed version of each applicable page up to its checkpoint target into the
+  corresponding database slot.
   <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §3 — definition of checkpoint</a>]</span>
   After a checkpoint has transferred everything and the WAL is no longer needed by any reader, the WAL can
   be rewound and reused from the beginning.</p>
 
   <h2>The barrier ordering (do not reorder)</h2>
-  <p>SQLite states the required syncs precisely: "The WAL must be synced to persistent storage prior to
-  moving content from the WAL into the database and the database file must be synced prior to resetting the
-  WAL." <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §3 — checkpoint sync requirements</a>]</span>
-  So the sequence is:</p>
+  <p>SQLite requires the WAL to be synchronized before its content is copied into the database, and
+  requires the database to be synchronized before the WAL is reset.
+  <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §3 — checkpoint sync
+  requirements</a>]</span> So the sequence is:</p>
   <ol>
     <li><strong>Barrier:</strong> ensure the WAL is fully synced (it must be durable before you trust its
     frames as the source of truth).</li>
@@ -54,19 +55,22 @@
     <text class="dg-txt-s" x="20" y="130">crash before "sync db" → WAL still authoritative, replay it · crash after → db is complete</text>
     <defs><marker id="a55" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
   </svg>
-  <figcaption>Checkpoint is itself crash-safe: until the db is synced, the WAL remains the source of truth.</figcaption>
+  <figcaption>Under the stated ordering, the WAL remains available until copied database pages are synchronized.</figcaption>
   </figure>
 
   <h2>Why this ordering is crash-safe</h2>
   <p>A checkpoint is just another in-place write of the db file — exactly the thing that can be torn (5.2).
   But it's safe because the WAL still holds every committed frame until step 4. If a crash interrupts the
   copy, recovery (5.6) simply replays the WAL again on next open; the partially-copied db pages are
-  overwritten by the authoritative WAL frames. The WAL is only discarded after the db is proven durable.
-  This is why <em>checkpointing never loses a committed transaction</em> no matter when it's interrupted.</p>
+  overwritten by the authoritative WAL frames. The WAL is only discarded after the required database
+  synchronization has succeeded under the storage contract.
+  Under this protocol and its storage assumptions, an interrupted checkpoint can be retried without
+  discarding the committed WAL frames it still needs.</p>
 
   <h2>When checkpoints happen, and WAL reset</h2>
   <p>SQLite checkpoints automatically when the WAL reaches a threshold — by default <strong>1000
-  pages</strong> (about 4&nbsp;MB at a 4&nbsp;KiB page size), after which the WAL is recycled.
+  pages</strong> (about 4&nbsp;MB at a 4&nbsp;KiB page size). Crossing that threshold requests an
+  automatic checkpoint; whether the WAL can also be rewound depends on checkpoint progress and readers.
   <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §4 — "automatically when the WAL file reaches a threshold size of 1000 pages"</a>]</span>
   Resetting the WAL (rewinding to the beginning to overwrite old frames) is only safe when the entire WAL
   has been transferred and synced into the db and no reader still needs those frames; "the writer checks
@@ -84,10 +88,10 @@
 
   <div class="box warn">
     <div class="box-title">⚠️ Never reset the WAL before the db sync completes</div>
-    <p>The single most dangerous bug in a WAL implementation is truncating/rewinding the WAL before the
+    <p>A critical WAL bug is truncating/rewinding the WAL before the
     checkpoint's db-file fsync has returned. If you do, a crash leaves the db half-updated <em>and</em> the
     WAL gone — unrecoverable corruption of committed data. The WAL is your safety net during checkpoint;
-    cut it only after the db is provably durable (step 3 before step 4, always).</p>
+    reset it only after the required database synchronization succeeds and no reader still needs it.</p>
   </div>
 
   <div class="box check">
@@ -99,12 +103,14 @@
       <p class="q">2. State the two checkpoint barriers and their order.</p>
       <details><summary>Show answer</summary><div class="answer">Sync the WAL before copying frames into the
       db; sync the db before resetting/truncating the WAL.</div></details>
-      <p class="q">3. Why can't a crash during checkpoint lose a committed transaction?</p>
-      <details><summary>Show answer</summary><div class="answer">The WAL still holds every committed frame
-      until the db is synced; recovery just replays the WAL, overwriting any partially-copied db pages.</div></details>
+      <p class="q">3. Why is an interrupted checkpoint retryable under this protocol?</p>
+      <details><summary>Show answer</summary><div class="answer">The required committed WAL frames remain
+      available until copied db pages are synchronized and reset is allowed, so recovery/checkpoint can
+      apply them again.</div></details>
       <p class="q">4. What is SQLite's default auto-checkpoint threshold?</p>
       <details><summary>Show answer</summary><div class="answer">1000 WAL pages (~4 MB at a 4 KiB page
-      size), after which the WAL is checkpointed and recycled.</div></details>
+      size). Reaching it triggers an automatic checkpoint attempt; it does not override active-reader
+      constraints on completing or rewinding the WAL.</div></details>
     </div>
   </div>
 

@@ -21,24 +21,39 @@
   obvious by contrast: same problem, opposite direction (undo vs redo).</p>
 
   <h2>The idea: keep an undo copy, modify in place</h2>
-  <p>The main database file always holds the "real" pages. To change them atomically:</p>
+  <p>In this rollback-journal protocol, the main database file holds the current pages. To change them
+  atomically:</p>
   <ol>
     <li>For every page you're about to modify, first write its <strong>original</strong> bytes into a
     separate <em>rollback journal</em> file.</li>
-    <li><strong>Barrier:</strong> fsync the journal so the originals are durable.</li>
+    <li>Finish and synchronize a valid journal before touching the database. SQLite's FULL mode may use
+    more than one journal synchronization: page content is flushed before the page count is made valid,
+    then the updated header is flushed.
+    <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite Atomic Commit
+    §3.7 and §6.1 — rollback journal synchronization</a>]</span></li>
     <li>Now write the modified pages into the main database file in place.</li>
     <li><strong>Barrier:</strong> fsync the database file.</li>
-    <li>Delete the journal. <em>This deletion is the commit point.</em></li>
+    <li>In SQLite's DELETE journal mode, delete the journal. That deletion is the commit point for the
+    protocol described here.</li>
   </ol>
-  <p>SQLite's atomic-commit write describes exactly this sequence, and names the journal deletion as "the
-  instant where the transaction commits."
+  <p>SQLite's atomic-commit document describes this DELETE-mode sequence and names journal deletion as
+  the commit instant.
   <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §3.10 — "the rollback journal file is deleted. This is the instant where the transaction commits."</a>]</span></p>
+  <p>SQLite also supports rollback-journal modes such as TRUNCATE and PERSIST, where the journal is
+  invalidated by truncating it or overwriting its header instead of unlinking the file. The durable
+  invalidation mechanism changes, but it still occurs only after the database writes are safe.
+  <span class="src">[src: SQLite <a href="https://www.sqlite.org/pragma.html#pragma_journal_mode"><code>PRAGMA journal_mode</code></a>]</span></p>
+  <p>Creating or removing a side file also changes directory metadata. Whether that metadata needs a
+  directory synchronization is platform/filesystem specific; a production design must include it in the
+  durability contract rather than assuming that synchronizing the file also persists its directory entry.
+  <span class="src">[src: <a href="https://man7.org/linux/man-pages/man2/fsync.2.html">Linux
+  <code>fsync(2)</code> — file sync does not necessarily persist its directory entry</a>]</span></p>
 
   <figure>
-  <svg viewBox="0 0 560 200" role="img" aria-label="Rollback journal timeline: copy originals, fsync, modify db, fsync, delete journal">
+  <svg viewBox="0 0 560 200" role="img" aria-label="Rollback journal timeline: copy originals, synchronize journal, modify database, synchronize database, delete journal">
     <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
     <rect class="dg-box" x="20" y="30" width="120" height="44" rx="6"/><text class="dg-txt-s" x="80" y="50" text-anchor="middle">copy originals</text><text class="dg-txt-s" x="80" y="66" text-anchor="middle">→ journal</text>
-    <rect class="dg-box-a" x="160" y="30" width="80" height="44" rx="6"/><text class="dg-txt-s" x="200" y="56" text-anchor="middle">fsync ◼</text>
+    <rect class="dg-box-a" x="160" y="30" width="80" height="44" rx="6"/><text class="dg-txt-s" x="200" y="49" text-anchor="middle">finish + sync</text><text class="dg-txt-s" x="200" y="65" text-anchor="middle">journal ◼</text>
     <rect class="dg-box" x="260" y="30" width="120" height="44" rx="6"/><text class="dg-txt-s" x="320" y="50" text-anchor="middle">write new pages</text><text class="dg-txt-s" x="320" y="66" text-anchor="middle">→ db in place</text>
     <rect class="dg-box-a" x="400" y="30" width="80" height="44" rx="6"/><text class="dg-txt-s" x="440" y="56" text-anchor="middle">fsync ◼</text>
     <rect class="dg-fill-2" x="20" y="110" width="180" height="44" rx="6"/><text class="dg-txt-s" x="110" y="136" text-anchor="middle">delete journal = COMMIT</text>
@@ -48,7 +63,7 @@
     <text class="dg-txt-s" x="20" y="184">crash before delete → roll back from journal · crash after delete → changes are in the db</text>
     <defs><marker id="a53" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
   </svg>
-  <figcaption>Undo logging: originals saved first; the journal's existence is what triggers rollback.</figcaption>
+  <figcaption>Undo logging: originals are saved first; a valid hot journal triggers rollback.</figcaption>
   </figure>
 
   <h2>Why this ordering is crash-safe</h2>
@@ -59,27 +74,29 @@
     <li><strong>After journal sync, during the in-place db writes:</strong> the database may be torn, but
     the complete originals are durably in the journal. Recovery copies them back, undoing the partial
     write — back to the start state. Correct (atomic: none applied).</li>
-    <li><strong>After the db is synced but before journal deletion:</strong> the new data is fully in the
-    db, but the journal still exists, so recovery would roll back. To avoid losing a real commit, the
-    deletion/zeroing of the journal header is the single act that flips the outcome — done after the db is
-    durable. Correct.</li>
+    <li><strong>After the db is synced but before journal deletion:</strong> the journal is still hot, so
+    recovery rolls back. The transaction has not reached its commit point yet, making that outcome
+    correct. Deleting or otherwise invalidating the journal is the later act that flips the outcome.</li>
     <li><strong>After journal deletion:</strong> no journal, nothing to recover; the committed state
     stands. Correct (atomic: all applied).</li>
   </ul>
 
   <h2>The journal header and the torn-write defense</h2>
   <p>The journal starts with a header recording the original database size (so recovery can truncate back)
-  and a count of how many page records follow. SQLite writes the page count into the header
-  <em>after</em> the page records are synced; combined with the "sectors are linear" assumption, a journal
-  whose header reads as zero/garbage is treated as not committed and ignored.
+  and a count of how many page records follow. Under SQLite's FULL synchronous mode, SQLite first flushes
+  journal page content while the count is zero, then writes the count and flushes the journal again. The
+  separated header sector, checksums, and documented sector assumptions let recovery reject incomplete
+  journal content rather than applying it as valid undo data.
   <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §3.5–§3.7, §4.2 — journal header, original db size, page-count written last</a>]</span></p>
 
   <h2>The cost: write amplification</h2>
-  <p>Every changed page is written twice to stable storage — once as an original into the journal, once as
-  the new value into the database — with two fsync barriers per transaction. That double write and the
-  in-place modification of the main file (which forces an exclusive lock during the write) are the two
-  drawbacks the WAL was designed to fix.
-  <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL docs — "writing the content once (versus twice for rollback-journal transactions)"</a>]</span></p>
+  <p>Every changed page contributes an original page image to the journal and a new page image to the
+  database. SQLite's FULL rollback-journal path also synchronizes the journal as required by its header
+  protocol and synchronizes the database before commit. WAL mode can make commit I/O more sequential and
+  uses fewer synchronization operations in SQLite, though checkpointing still eventually writes pages
+  into the main database.
+  <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite Atomic Commit §3.7–3.10</a>;
+  <a href="https://www.sqlite.org/wal.html">SQLite WAL §1 — advantages and trade-offs</a>]</span></p>
 
   <div class="box warn">
     <div class="box-title">⚠️ The commit point is a single durable act</div>
@@ -95,17 +112,18 @@
       <p class="q">1. What does the rollback journal store, and in which direction does it recover?</p>
       <details><summary>Show answer</summary><div class="answer">The original (pre-change) content of pages.
       Recovery rolls <em>back</em> by copying originals into the db — undo logging.</div></details>
-      <p class="q">2. Where are the two fsync barriers, and what does each protect?</p>
-      <details><summary>Show answer</summary><div class="answer">One after writing the journal (so originals
-      survive before the db is touched), one after writing the db (so changes are durable before the
-      journal is removed).</div></details>
+      <p class="q">2. What ordering must the synchronization barriers establish?</p>
+      <details><summary>Show answer</summary><div class="answer">A complete, valid journal must be
+      synchronized before the database is modified; the modified database must then be synchronized
+      before the journal is invalidated. SQLite FULL mode may require two journal flushes to make its
+      page-count header valid safely.</div></details>
       <p class="q">3. What single act is the commit point?</p>
       <details><summary>Show answer</summary><div class="answer">Deleting (or zeroing/truncating) the
       journal, performed after the database file is synced.</div></details>
       <p class="q">4. Why is the rollback journal said to write data twice?</p>
       <details><summary>Show answer</summary><div class="answer">Each changed page goes to disk as an
-      original in the journal and again as the new value in the db — double writes plus two syncs per
-      transaction.</div></details>
+      original in the journal and again as the new value in the db. SQLite's exact number of
+      synchronization operations depends on its synchronous mode and journal/header protocol.</div></details>
     </div>
   </div>
 

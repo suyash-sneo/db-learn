@@ -42,8 +42,10 @@
   is why databases use a <strong>slotted page</strong>: a growing array of small offset "pointers" at
   the front of the page, and the actual variable-length cells growing from the back. The slot array
   stays sorted by key even though the cells are placed wherever they fit.</p>
-  <p>This is important enough that Phase 4 is devoted to it. For now, know that a B+tree node is almost
-  always a slotted page, and the "entries" are slots pointing at cells.</p>
+  <p>This is important enough that Phase 4 is devoted to it. Slotted pages are a common way to store
+  variable-size B+tree cells, including SQLite's design; other engines can use fixed arrays, prefix
+  compression, or different page formats. This curriculum chooses slots so logical key order is
+  independent of physical cell placement.</p>
 
   <figure>
   <svg viewBox="0 0 560 180" role="img" aria-label="Slotted node: header, slot array growing right, cells growing left">
@@ -75,10 +77,13 @@
   <span class="code-label">approximate fanout</span>
 <pre><code>usable = page_size − node_header − slot_overhead_per_entry × entries
 fanout ≈ usable_for_cells / (avg_key_size + child_pointer_size)</code></pre>
-  <p>With a 4096-byte page, 4-byte child pointers, and small keys, an internal node can route to on the
-  order of a few hundred children, giving a tree only ~3–4 levels deep for millions of keys. The
-  precise number depends on your exact header and key sizes — <span class="verify-tag">⚠️VERIFY</span>
-  by computing it for your chosen layout rather than trusting a round figure.</p>
+  <p>Here is a transparent illustration, not the Phase 3 variable-key format. Assume a 4096-byte page,
+  a 16-byte header holding the rightmost child, one 2-byte slot per separator, an 8-byte fixed key, and
+  a 4-byte left-child pointer in each cell. Each separator consumes
+  <code>2 + 8 + 4 = 14</code> bytes, so
+  <code>floor((4096 − 16) / 14) = 291</code> separators and at most 292 children fit. Variable keys,
+  length fields, fragmentation, and a chosen fill policy reduce the practical fanout. The method is
+  the lesson: write down every byte before claiming a number.</p>
 
   <div class="box warn">
     <div class="box-title">⚠️ A key+value must fit; otherwise you need overflow</div>
@@ -93,7 +98,7 @@ fanout ≈ usable_for_cells / (avg_key_size + child_pointer_size)</code></pre>
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
-      <p class="q">1. Why is a B+tree node almost always a slotted page?</p>
+      <p class="q">1. Why does this curriculum choose a slotted page for B+tree nodes?</p>
       <details><summary>Show answer</summary><div class="answer">Keys/values are variable-length; a sorted
       slot array plus back-growing cells keeps entries logically sorted without moving the cell bytes.</div></details>
       <p class="q">2. What does an internal cell contain vs a leaf cell?</p>

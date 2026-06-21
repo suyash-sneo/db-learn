@@ -15,8 +15,8 @@
   <p class="lead">Everything so far assumed writes land cleanly. They don't. A power cut mid-write can leave
   a page half-updated, a freelist pointing at a live page, a tree split applied on one side only. This
   phase closes the gap between "I called write" and "the data is safe and consistent after a crash."
-  You'll build the two classic mechanisms — the rollback journal and the write-ahead log — understand
-  the crash model they defend against, and write a recovery routine that runs on every open.</p>
+  You'll study the two classic mechanisms — the rollback journal and the write-ahead log — then build
+  a checksummed WAL, its checkpoint path, and a recovery routine that runs on every open.</p>
 
   <div class="box deeper">
     <div class="box-title">Why this comes after records &amp; free space</div>
@@ -30,8 +30,8 @@
     <div class="box-title">What you'll be able to do after Phase 5</div>
     <p>Reason precisely about what a crash can and cannot do to a file; implement a write-ahead log that
     makes multi-page transactions atomic and durable; checkpoint the log back into the main file; and run
-    a recovery pass on open that leaves the database in a consistent state regardless of when the crash
-    happened.</p>
+    a recovery pass on open that restores the last committed state for crashes covered by the documented
+    storage contract.</p>
   </div>
 
   <div class="cardgrid" id="cards"></div>

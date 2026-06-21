@@ -57,8 +57,9 @@
     <li>Update each slot's offset to the cell's new location.</li>
     <li>Reset <code>cell_content_start</code> and the fragmented-bytes counter; the gap is now one block.</li>
   </ol>
-  <p>This is an O(page) memory shuffle done in a scratch buffer, then written back as one page. It's
-  cheap (one page, RAM-speed) and only triggered when an insert can't otherwise fit.</p>
+  <p>This is O(page-size) work in a scratch buffer. The scratch copy prevents overlap bugs and avoids
+  exposing a half-rearranged page to the rest of the in-memory code; its runtime cost still depends on
+  page size and implementation.</p>
 
   <span class="code-label">rust — compaction shape (toy; rebuild into a scratch buffer)</span>
 <pre><code><span class="tok-c">// Pseudocode shape, not engine logic:</span>
@@ -80,17 +81,18 @@
     <li>If it still fits the page (possibly after compaction), delete the old cell and insert the new one
     — its slot index can stay the same so external references (e.g. the key→slot mapping) survive.</li>
     <li>If it no longer fits the page, the record must <strong>relocate</strong> (in a B+tree, this may
-    trigger a split; in a record store, move it to another page and update the index pointer).</li>
+    trigger a split; in a record store, move it and return/update the new <code>RecordId</code>).</li>
   </ul>
-  <p>This is why a stable logical slot index (not a raw byte offset) is valuable: you can move a cell's
-  bytes around freely as long as the slot keeps pointing at it.</p>
+  <p>This is why a stable logical slot index (not a raw byte offset) is valuable: compaction can move a
+  live cell's bytes while its slot keeps pointing at it. The guarantee ends when the record is deleted
+  or relocated to another page.</p>
 
   <div class="box warn">
-    <div class="box-title">⚠️ Compaction must be all-or-nothing within the page</div>
-    <p>Build the compacted page in a scratch buffer and write it back in one shot, rather than mutating
-    the live page in place mid-shuffle. A crash partway through an in-place compaction could corrupt the
-    page. Writing a fully-formed page is also what the durability layer (Phase 5) expects — it ships
-    whole pages, not partial edits. (Per-page atomicity against torn writes is itself a Phase 5 concern.)</p>
+    <div class="box-title">⚠️ A scratch buffer is not crash atomicity</div>
+    <p>Build the compacted image in scratch, validate it, then replace the pager's in-memory page bytes.
+    That makes the logical mutation easier to reason about, but a later physical page write can still
+    be torn or lost. Phase 5's WAL and synchronization protocol provide crash recovery; “one
+    <code>write</code> call” is not an atomic-page guarantee.</p>
   </div>
 
   <div class="box check">

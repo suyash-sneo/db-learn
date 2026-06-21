@@ -71,12 +71,12 @@
     }
 }</code></pre>
   <div class="box warn">
-    <div class="box-title">⚠️ Use <code>u64</code> for offsets, not <code>usize</code></div>
-    <p>A database file can exceed 4&nbsp;GiB, and <code>usize</code> is 32-bit on some targets. File
-    offsets and page counts should be <code>u64</code> so the math doesn't silently overflow on a
-    32-bit platform. Multiplication of a 32-bit <code>page_no</code> by a 32-bit
-    <code>page_size</code> overflows long before the file does. Convert to a wider type before
-    multiplying.</p>
+    <div class="box-title">⚠️ Widen and check offset arithmetic</div>
+    <p>This curriculum stores page numbers as <code>u32</code> on disk but computes byte offsets as
+    <code>u64</code>. Convert before subtracting and multiplying, and use checked arithmetic. Do not
+    use <code>usize</code> as the file-format type: it changes width across targets. A checked
+    <code>u64</code> offset also lets the pager reject page 0 and arithmetic overflow as ordinary
+    errors instead of relying on a debug-only assertion.</p>
   </div>
 
   <h2>Why this is literally the pager's job</h2>
@@ -99,9 +99,11 @@
       <p class="q">2. Why reserve page number 0 instead of using it for data?</p>
       <details><summary>Show answer</summary><div class="answer">So 0 can act as a null/"no page" sentinel
       in pointers (freelist links, tree child pointers) — there's no real page to confuse it with.</div></details>
-      <p class="q">3. Why compute offsets in <code>u64</code> rather than <code>usize</code>?</p>
-      <details><summary>Show answer</summary><div class="answer">Files can exceed 4&nbsp;GiB and
-      <code>usize</code> may be 32-bit; <code>u64</code> avoids overflow on 32-bit targets.</div></details>
+      <p class="q">3. Why store page numbers as <code>u32</code> but compute offsets as
+      <code>u64</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">The file format needs a fixed-width
+      page identifier, while byte offsets need a wider type. Converting before checked multiplication
+      avoids target-dependent <code>usize</code> behavior and catches overflow cleanly.</div></details>
       <p class="q">4. Which two operations are the irreducible core of the pager?</p>
       <details><summary>Show answer</summary><div class="answer"><code>read_page(n)</code> and
       <code>write_page(n)</code>, each built on the offset formula plus seek + exact read/write.</div></details>

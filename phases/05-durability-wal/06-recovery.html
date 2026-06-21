@@ -12,8 +12,8 @@
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › 5.6</div>
   <h1>5.6 — Recovery on open</h1>
   <div class="goal"><b>Goal:</b> Turn the mechanisms into a concrete routine that runs every time the
-  database is opened: detect an unclean shutdown, decide what's committed, and bring the file to a
-  consistent state — roll back (journal) or roll forward (WAL) — before any normal access is allowed.</div>
+  database is opened: validate recovery state, decide what's committed, and expose a consistent state —
+  roll back a hot journal or reconstruct the committed WAL view — before any normal access is allowed.</div>
 
   <h2>Why this matters to your DB</h2>
   <p>Durability is only real if recovery actually runs and is correct. The recovery routine is the payoff
@@ -37,21 +37,25 @@
   <p>Result: the interrupted transaction is undone; the db is back to its pre-transaction state.</p>
 
   <h2>Recovery for a WAL (your build)</h2>
-  <p>WAL recovery is roll-<em>forward</em> (redo). On open, scan the WAL from the start, validating each
+  <p>WAL contains new page images, so it is a redo log. On open, scan the WAL from the start, validating each
   frame's checksums, and find the position of the last valid <strong>commit frame</strong> — frames after
   it (an interrupted, uncommitted transaction) are ignored. Everything up to and including the last commit
   frame is the committed content.</p>
   <ol>
-    <li>Read the WAL header; if absent/invalid, there's nothing to recover.</li>
+    <li>If the WAL is absent or empty, there is no WAL work. If a nonempty header has the wrong
+    magic/version/page size or a bad header checksum, report corruption/incompatibility rather than
+    silently treating it as empty.</li>
     <li>Walk frames, verifying each frame's checksum against the running checksum; stop trusting frames at
-    the first checksum failure (a torn tail).</li>
+    the first checksum failure. The checksum proves that the frame is invalid, not whether the cause was
+    a torn write, bit flip, or some other fault.</li>
     <li>Record the latest frame for each page, up to the last valid commit frame. (Build the in-memory
     wal-index here.)</li>
     <li>Either leave the WAL in place (reads will merge it) or immediately checkpoint it into the db (5.5)
     and reset it.</li>
   </ol>
-  <p>The checksum-validated, commit-frame-bounded scan is what lets WAL recovery distinguish a fully
-  committed transaction from a torn write at the end of the log.
+  <p>The checksum-validated, commit-frame-bounded scan identifies the valid committed prefix and rejects
+  an invalid or uncommitted tail. Keeping that committed prefix indexed already restores the logical
+  database view; copying it into the main file is a checkpoint, not a prerequisite for opening.
   <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §4 (WAL) — per-frame checksums; commit frame = non-zero db-size field</a>]</span></p>
 
   <figure>
@@ -65,7 +69,7 @@
     <rect class="dg-box" x="420" y="40" width="90" height="44" rx="4" style="stroke-dasharray:4 3"/><text class="dg-txt-s" x="465" y="60" text-anchor="middle">torn ✗</text><text class="dg-txt-s" x="465" y="76" text-anchor="middle">ignored</text>
     <text class="dg-txt-s" x="20" y="120">recover up to the last valid commit frame; discard the uncommitted/torn tail</text>
   </svg>
-  <figcaption>WAL recovery replays forward up to the last checksum-valid commit frame, dropping the tail.</figcaption>
+  <figcaption>Recovery indexes committed frames through the last checksum-valid commit and ignores/truncates the tail.</figcaption>
   </figure>
 
   <h2>Recovery must be idempotent</h2>
@@ -85,9 +89,10 @@
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
-      <p class="q">1. Journal recovery rolls which direction; WAL recovery rolls which direction?</p>
-      <details><summary>Show answer</summary><div class="answer">Journal = roll back (undo originals); WAL =
-      roll forward (redo committed frames).</div></details>
+      <p class="q">1. What does each recovery scheme reconstruct?</p>
+      <details><summary>Show answer</summary><div class="answer">A rollback journal restores original
+      pages (undo). WAL recovery validates and indexes committed new page images (redo); checkpointing may
+      later copy those images into the main database.</div></details>
       <p class="q">2. In WAL recovery, what is the cutoff between recovered and discarded data?</p>
       <details><summary>Show answer</summary><div class="answer">The last checksum-valid commit frame.
       Frames after it (uncommitted or torn) are ignored.</div></details>

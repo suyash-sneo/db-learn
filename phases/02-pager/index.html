@@ -20,10 +20,10 @@
   <div class="box deeper">
     <div class="box-title">Why the pager is the foundation</div>
     <p>A file is just a one-dimensional array of bytes. A database needs random access to structured
-    chunks that it can read, modify, and write back atomically-ish. The pager is the translation
+    chunks that it can read, modify, and write back through one controlled layer. The pager is the translation
     layer: "give me page 42" instead of "seek to byte 172032 and read 4096 bytes." Once it exists,
-    the rest of the engine thinks in <em>page numbers</em>, not byte offsets — which is exactly how
-    SQLite, LMDB, Postgres, and almost every disk-oriented database is organized.</p>
+    the rest of the engine thinks in <em>page numbers</em>, not byte offsets. SQLite is the concrete
+    reference used in this phase; other engines may divide responsibility among different modules.</p>
   </div>
 
   <div class="box rust">

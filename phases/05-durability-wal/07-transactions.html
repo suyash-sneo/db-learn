@@ -12,7 +12,7 @@
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › 5.7</div>
   <h1>5.7 — Transactions at the engine level</h1>
   <div class="goal"><b>Goal:</b> Wrap the WAL mechanism in a clean <code>begin / commit / rollback</code>
-  API so the rest of the engine (B+tree, record store) gets atomicity "for free" — every page mutation
+  API so the rest of the engine (B+tree, record store) uses one atomicity boundary — every page mutation
   routes through the transaction, and the durability barrier lives in exactly one place.</div>
 
   <h2>Why this matters to your DB</h2>
@@ -27,8 +27,9 @@
     WAL frames).</li>
     <li>page edits — instead of writing the db directly, dirty pages are recorded in the transaction (and
     staged as WAL frames or held until commit).</li>
-    <li><code>commit()</code> — append all dirty pages as WAL frames, write the commit frame,
-    <strong>one fsync barrier</strong>, then return success. Now durable.</li>
+    <li><code>commit()</code> — append all dirty pages as WAL frames, mark the final frame as the commit
+    frame, perform the configured synchronization, and only then publish the new in-memory index/page
+    count and return success. In <code>Full</code> mode this includes one WAL sync for the commit.</li>
     <li><code>rollback()</code> — discard the buffered/staged frames without writing a commit frame; nothing
     becomes visible. (On a crash this is automatic: no commit frame ⇒ recovery ignores the tail.)</li>
   </ul>
@@ -42,8 +43,8 @@
   <span class="code-label">rust — the seam (shape only; you implement it in the build)</span>
 <pre><code><span class="tok-c">// pub fn begin(&amp;mut self) -&gt; Txn&lt;'_, B&gt;</span>
 <span class="tok-c">// impl Txn {</span>
-<span class="tok-c">//   fn modify_page(&amp;mut self, pno: u64, f: impl FnOnce(&amp;mut [u8]));  // marks dirty</span>
-<span class="tok-c">//   fn read_page(&amp;mut self, pno: u64) -&gt; &amp;[u8];  // wal-index newest, else db</span>
+<span class="tok-c">//   fn modify_page(&amp;mut self, pno: PageNo, f: impl FnOnce(&amp;mut [u8]));</span>
+<span class="tok-c">//   fn read_page(&amp;mut self, pno: PageNo) -&gt; Vec&lt;u8&gt;;</span>
 <span class="tok-c">//   fn commit(self) -&gt; Result&lt;()&gt;;  // append frames + commit frame + ONE fsync</span>
 <span class="tok-c">//   fn rollback(self);             // drop staged frames; nothing committed</span>
 <span class="tok-c">// }</span></code></pre>
@@ -51,8 +52,9 @@
   <h2>One barrier, one commit point</h2>
   <p>This design concentrates the entire durability story into <code>commit()</code>: the fsync of the WAL
   after the commit frame is <em>the</em> moment the transaction becomes durable, mirroring the rollback
-  journal's "delete the journal" commit point but cheaper (one sequential append + one sync). Everywhere
-  else in the engine is free of durability concerns.</p>
+  journal's invalidation commit point but using an append sequence plus one commit sync. Other engine
+  layers still must route every mutation through this boundary, but they do not implement the WAL
+  protocol themselves.</p>
 
   <h2>Grouping and the durability/throughput trade-off</h2>
   <p>fsync is expensive, so the number of commits dominates write throughput. Two standard levers:</p>
@@ -60,17 +62,17 @@
     <li><strong>Batch logical work into fewer transactions</strong> — one commit's fsync covers many page
     edits.</li>
     <li><strong>Relax the sync</strong> — like SQLite's <code>PRAGMA synchronous=NORMAL</code> in WAL mode,
-    you may skip the per-commit WAL fsync, trading a window of durability (a crash can lose the last few
-    commits) for speed; the database remains <em>consistent</em>, just not maximally durable.
+    SQLite may omit the per-commit WAL sync, trading a window of durability for speed under SQLite's
+    protocol.
     <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL — FULL syncs WAL each commit; NORMAL "omit this sync", sacrificing durability on power loss but not integrity</a>]</span></li>
   </ul>
 
   <div class="box warn">
     <div class="box-title">⚠️ Consistency ≠ durability when you relax sync</div>
-    <p>Skipping the per-commit fsync (NORMAL-style) does <strong>not</strong> risk corruption — recovery
-    still only replays whole, checksum-valid, commit-bounded frames — but it does mean a power loss can
-    lose recently "committed" transactions. Be explicit in your API about which mode a caller chose;
-    silently dropping durability is a footgun. Default to the safe (FULL) mode and make relaxation opt-in.</p>
+    <p>Do not generalize SQLite's NORMAL-mode integrity statement to an arbitrary WAL implementation.
+    Your relaxed mode is safe from structural corruption only if the same checksum, commit-boundary,
+    write-order, and checkpoint assumptions are actually implemented and tested. It may lose recent
+    commits after power loss. Default to <code>Full</code>; make <code>Relaxed</code> explicit.</p>
   </div>
 
   <div class="box check">
@@ -89,8 +91,8 @@
       one unambiguous commit point.</div></details>
       <p class="q">4. What does relaxing the per-commit sync risk, and what does it not?</p>
       <details><summary>Show answer</summary><div class="answer">It risks losing recently committed
-      transactions on power loss (durability), but not corruption/consistency — recovery still replays only
-      whole, valid, commit-bounded frames.</div></details>
+      transactions on power loss. Whether integrity remains protected depends on the implementation's
+      complete protocol; it is not guaranteed merely by naming the mode NORMAL/Relaxed.</div></details>
     </div>
   </div>
 

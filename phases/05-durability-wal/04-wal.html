@@ -16,15 +16,14 @@
   by replaying committed log frames forward (redo). This is the mechanism your build targets.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>The WAL flips the rollback journal around and wins on both speed and concurrency: new data is written
-  <em>once</em> (sequentially, to the log), the main file isn't modified during a transaction (so readers
-  can keep reading it), and only one barrier is needed to commit. It's the design most modern embedded
-  engines and your project use.</p>
+  <p>The WAL flips the rollback journal around. In SQLite WAL mode, writer traffic appends page versions
+  and can use fewer synchronization operations; readers use committed WAL frames plus the database.
+  These are properties of SQLite's protocol and workload, not a universal promise that every WAL is
+  faster. This project selects the same broad architecture.</p>
 
   <h2>The idea: append new versions, never overwrite (yet)</h2>
-  <p>SQLite states the core inversion directly: "The original content is preserved in the database file
-  and the changes are appended into a separate WAL file. A COMMIT occurs when a special record indicating
-  a commit is appended to the WAL."
+  <p>SQLite's WAL keeps the original pages in the database while appending changed page images to the
+  separate WAL; a transaction commits when its commit-marked frame is appended.
   <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §1–2</a>]</span>
   So a write transaction:</p>
   <ol>
@@ -33,7 +32,8 @@
     <li><strong>Barrier:</strong> fsync the WAL (under <code>PRAGMA synchronous=FULL</code>) — after this,
     the transaction is durable. <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL — "Writers sync the WAL on every transaction commit if PRAGMA synchronous is set to FULL"</a>]</span></li>
   </ol>
-  <p>The main database file is not written at all during the transaction. That's the whole trick.</p>
+  <p>The writer does not apply its transaction pages to the main database during commit; a separate
+  checkpoint may write the database at another time.</p>
 
   <figure>
   <svg viewBox="0 0 560 200" role="img" aria-label="WAL: database file unchanged, frames appended to WAL, commit frame marks durable point">
@@ -46,7 +46,8 @@
     <rect class="dg-box-a" x="200" y="90" width="80" height="36" rx="4"/><text class="dg-txt-s" x="240" y="112" text-anchor="middle">fsync ◼</text>
     <text class="dg-txt-s" x="200" y="160">reader: for each page, use newest WAL frame ≤ end-mark, else db page</text>
   </svg>
-  <figcaption>Frames append to the WAL; the commit frame plus an fsync make the transaction durable.</figcaption>
+  <figcaption>Under FULL synchronization and the stated storage contract, the commit frame plus a
+  successful WAL sync make the transaction durable.</figcaption>
   </figure>
 
   <h2>How readers see a consistent view</h2>
@@ -57,8 +58,10 @@
   a single point-in-time snapshot.
   <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §2.2 — end mark &amp; reader snapshot</a>]</span></p>
   <p>Scanning the whole WAL per page would be slow, so SQLite keeps a <strong>wal-index</strong> in shared
-  memory mapping each page to its latest frame; it "rarely exceeds 32 KiB" and "is never synced" because
-  it can always be rebuilt from the WAL. <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §2.3 — wal-index, shared memory, ~32 KiB, not synced</a>]</span>
+    memory mapping pages to frames; the WAL documentation says the wal-index is transient, normally small,
+    and need not be synchronized because it can be reconstructed from the WAL.
+  <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §2.3 — wal-index purpose,
+  shared memory, size, and reconstruction</a>]</span>
   For a single-process embedded engine you can keep this index as an ordinary in-memory hash map rebuilt on
   open.</p>
 
@@ -69,12 +72,15 @@
   salt and checksums. <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §4 (WAL): 32-byte WAL header, 24-byte frame header, "db size in pages after commit" non-zero ⇒ commit frame</a>]</span>
   You'll mirror a simplified version of this in the build (5.8 dives into the exact bytes).</p>
 
-  <h2>Why only one barrier, and why it's faster</h2>
+  <h2>Why SQLite WAL can reduce commit work</h2>
   <ul>
-    <li><strong>One write per page:</strong> the new content goes to the WAL once; it isn't separately
-    written as an "original" anywhere.</li>
-    <li><strong>Sequential I/O:</strong> appends are sequential, which devices handle far better than the
-    scattered in-place writes of the rollback journal. <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL — "writes are all sequential"; "fewer fsync() operations"</a>]</span></li>
+    <li><strong>No undo copy on the commit path:</strong> the transaction appends each new page image to
+    the WAL rather than first saving the old page and then overwriting the database. A later checkpoint
+    still writes the selected page image into the main database.</li>
+    <li><strong>More sequential commit I/O:</strong> WAL appends are sequential, which can be favorable
+    compared with scattered in-place writes; the benefit remains device- and workload-dependent.
+    <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §1 — I/O tends to be
+    more sequential and uses fewer <code>fsync()</code> operations</a>]</span></li>
     <li><strong>Readers don't block the writer and vice versa:</strong> the writer appends to the WAL while
     readers read the db + earlier WAL frames. There is still only one writer at a time (one WAL).
     <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL — "readers do not block writers and a writer does not block readers"; "only one writer at a time"</a>]</span></li>
@@ -82,19 +88,20 @@
 
   <div class="box warn">
     <div class="box-title">⚠️ The WAL grows until you checkpoint</div>
-    <p>Because the db file is never updated during transactions, the WAL accumulates every change. Without
-    a checkpoint it grows unbounded and reads get slower (more frames to consider). The WAL is not a
+    <p>Because transaction pages accumulate in the WAL until checkpointing, an unchecked WAL keeps
+    growing and can increase read work. The WAL is not a
     permanent home for data — it's a fast staging area that must periodically be folded back into the db
-    (5.5). A "committed" WAL frame is durable, but the system isn't <em>done</em> until checkpointing
-    catches up.</p>
+    (5.5). Under FULL synchronization, a committed WAL transaction can already satisfy durability;
+    checkpointing is maintenance, not an additional condition for that commit to count.</p>
   </div>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
       <p class="q">1. During a WAL write transaction, is the main database file modified? What is?</p>
-      <details><summary>Show answer</summary><div class="answer">No — the db file is untouched. New page
-      versions are appended as frames to the WAL; a commit frame + fsync makes them durable.</div></details>
+      <details><summary>Show answer</summary><div class="answer">The writer appends new page versions to
+      the WAL rather than applying them to the db during commit. A separate checkpoint may modify the
+      db. Under FULL mode, commit includes the WAL synchronization step.</div></details>
       <p class="q">2. How does a reader get a consistent snapshot with data split across db and WAL?</p>
       <details><summary>Show answer</summary><div class="answer">It fixes an end mark (last valid commit
       record) at start; per page it uses the newest WAL frame ≤ end mark, else the db page — a single
@@ -102,10 +109,11 @@
       <p class="q">3. What marks a frame as a commit frame in SQLite's format?</p>
       <details><summary>Show answer</summary><div class="answer">A non-zero "database size in pages after
       commit" field in the 24-byte frame header (zero on non-commit frames).</div></details>
-      <p class="q">4. Why is the WAL faster than the rollback journal?</p>
-      <details><summary>Show answer</summary><div class="answer">One sequential write per page (not two),
-      fewer fsyncs, and the db file isn't modified during the transaction so readers and the writer don't
-      block each other.</div></details>
+      <p class="q">4. Why can SQLite WAL mode make commits faster than rollback journaling?</p>
+      <details><summary>Show answer</summary><div class="answer">The commit path avoids writing undo
+      copies and modifying scattered database pages, uses append-oriented I/O, and generally uses fewer
+      synchronization operations. Checkpoint work still exists, and the result depends on workload and
+      storage.</div></details>
     </div>
   </div>
 
@@ -113,7 +121,6 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Spec:</strong> <a href="https://www.sqlite.org/wal.html">SQLite WAL</a> (overview) and <a href="https://www.sqlite.org/fileformat2.html">file format §4</a> (byte layout).</li>
-      <li><strong>Theory:</strong> ARIES (Mohan et al.) is the canonical redo/undo WAL recovery algorithm — read for the general theory. <span class="verify-tag">⚠️VERIFY</span> specifics before quoting.</li>
       <li><strong>Forward link:</strong> 5.5 (checkpoint folds WAL → db), 5.6 (recovery replays committed frames), 5.8 (exact frame bytes).</li>
     </ul>
   </div>

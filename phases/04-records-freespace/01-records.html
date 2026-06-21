@@ -26,10 +26,12 @@
   <code>i</code> lives at offset <code>header + i × R</code> — the same O(1) addressing trick as pages
   within a file. Deletion is trivial (mark the slot free; any record fits any slot). The cost:</p>
   <ul>
-    <li><strong>Wasted space.</strong> Every record must be padded to the largest possible size. A
-    schema with one rare long field bloats every row.</li>
-    <li><strong>No variable data.</strong> Strings, blobs, and documents have no natural fixed size;
-    forcing one means truncation or huge padding.</li>
+    <li><strong>Wasted space when variable maxima are reserved inline.</strong> A naive design that
+    reserves each field's maximum width pads small values. More sophisticated fixed-layout records can
+    keep only fixed fields and pointers/offsets inline while variable bytes live elsewhere.</li>
+    <li><strong>Extra indirection for variable data.</strong> Strings, blobs, and documents have no
+    natural fixed size, so a fixed record needs an out-of-line area, a length/pointer pair, or a
+    separate variable region.</li>
     <li><strong>Schema rigidity.</strong> Changing <code>R</code> means rewriting every record.</li>
   </ul>
   <p>Fixed-length layouts still appear <em>inside</em> databases — for fixed-width columns, for the slot
@@ -58,14 +60,15 @@
   </figure>
 
   <h2>What "a record" is in your schemaless engine</h2>
-  <p>Your engine stores documents serialized to bytes (BSON/MessagePack, Phase 6). A document is a
+  <p>Your engine stores documents serialized to bytes (the format is chosen in Phase 6). A document is a
   variable-length blob: <code>{}</code> is a few bytes; a document with arrays and nested objects can be
   kilobytes. There is no fixed <code>R</code>. Therefore:</p>
   <ul>
     <li>Records are variable-length → you need slotted pages (4.2).</li>
     <li>Some records exceed a page → you need overflow pages (4.3).</li>
     <li>Updates change a record's size → you need in-page compaction and possibly relocation (4.4).</li>
-    <li>Deletes free whole pages → you need a freelist (4.5).</li>
+    <li>Some deletes make overflow pages, empty record pages, or tree pages unreachable → you need a
+    freelist (4.5).</li>
   </ul>
   <p>This lesson is the "why"; the next four are the "how."</p>
 
@@ -75,8 +78,8 @@
     column values, and stores that record as the payload of a b-tree cell.
     <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §2 "Record Format"</a>]</span>
     The key idea you'll reuse: a record is a self-describing, variable-length byte string, and the page
-    layer treats it as opaque payload. <span class="verify-tag">⚠️VERIFY</span> the exact serial-type
-    encoding against §2 if you cite specific type codes.</p>
+    layer treats it as opaque payload. The linked specification contains the serial-type table if you
+    later need exact codes; this lesson does not reproduce them.</p>
   </div>
 
   <div class="box check">
@@ -84,7 +87,8 @@
     <div class="checks">
       <p class="q">1. What's the addressing advantage of fixed-length records, and its main cost?</p>
       <details><summary>Show answer</summary><div class="answer">O(1) offset = header + i×R, but every
-      record is padded to the maximum size, wasting space and forbidding truly variable data.</div></details>
+      a naive all-inline design pads to reserved widths. Variable data instead requires indirection or
+      a separate area, so the layout is no longer just one uniform payload array.</div></details>
       <p class="q">2. Why do variable-length records lose direct index addressing?</p>
       <details><summary>Show answer</summary><div class="answer">Records have different sizes, so you can't
       compute record i's position; you need a stored offset (the slot array).</div></details>

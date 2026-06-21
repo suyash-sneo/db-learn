@@ -17,10 +17,14 @@
 
   <div class="box source">
     <div class="box-title">📂 Where to read</div>
-    <p>SQLite's pager lives in <code>src/pager.c</code> with its interface in <code>src/pager.h</code>,
-    in the public-domain SQLite source tree. Read the amalgamation or the canonical repo. The file
-    opens with an extensive comment block describing the pager's job and state machine — start there.
-    <span class="src">[src: <a href="https://www.sqlite.org/src/file/src/pager.c">sqlite.org/src · src/pager.c</a>; design overview at <a href="https://www.sqlite.org/atomiccommit.html">Atomic Commit</a>]</span></p>
+    <p>SQLite's pager lives in <code>src/pager.c</code> with its interface in <code>src/pager.h</code>.
+    This lesson pins its source links to SQLite 3.53.2, commit
+    <code>ccc132c5be20ab5c755c97a08d06b1b592fef330</code>, so later source changes do not silently
+    invalidate the names below. The file opens with an extensive comment describing the rollback-mode
+    state machine—start there.
+    <span class="src">[src: SQLite 3.53.2
+    <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.c"><code>src/pager.c</code></a>;
+    <a href="https://www.sqlite.org/atomiccommit.html">Atomic Commit</a>]</span></p>
     <p><strong>How to verify any claim below:</strong> open <code>pager.c</code>, search for the symbol
     in monospace, and read its surrounding comment. SQLite is unusually well-commented; the file's own
     header comments are the authority, not this page.</p>
@@ -35,32 +39,47 @@
   you'll build incrementally across Phases 2 and 5.</p>
 
   <h2>Concepts → symbols you can grep</h2>
-  <p>These are anchors to <em>look up</em>, each tagged because the exact current name/signature should
-  be confirmed against the file rather than trusted from this page:</p>
+  <p>These are verified anchors in the pinned revision. Search the linked files for each symbol, then
+  read its callers and surrounding comments; a matching name alone is not an explanation of its full
+  contract.</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Concept (from 2.1–2.6)</th><th>Look for</th></tr></thead>
     <tbody>
-      <tr><td>The pager object holding state</td><td><code>struct Pager</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>An in-memory page handle</td><td><code>PgHdr</code> / <code>DbPage</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Fetch a page (our <code>get_page</code>)</td><td><code>sqlite3PagerGet</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Mark a page modified (our "dirty")</td><td><code>sqlite3PagerWrite</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Release a pinned page (our "unpin")</td><td><code>sqlite3PagerUnref</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>The separate page-cache module</td><td><code>src/pcache.c</code> / <code>pcache1.c</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>The pager object holding state</td><td><code>struct Pager</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.c"><code>pager.c</code></a>]</span></td></tr>
+      <tr><td>An in-memory page handle</td><td><code>PgHdr</code>; <code>DbPage</code> is its typedef
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.h"><code>pager.h</code></a>]</span></td></tr>
+      <tr><td>Fetch a page (our <code>read_page</code>)</td><td><code>sqlite3PagerGet</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.c"><code>pager.c</code></a>]</span></td></tr>
+      <tr><td>Make a page writable under the pager protocol</td><td><code>sqlite3PagerWrite</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.c"><code>pager.c</code></a>]</span></td></tr>
+      <tr><td>Release a page reference</td><td><code>sqlite3PagerUnref</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.c"><code>pager.c</code></a>]</span></td></tr>
+      <tr><td>The separate page-cache modules</td><td><code>src/pcache.c</code> and
+      <code>src/pcache1.c</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pcache.c"><code>pcache.c</code></a> /
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pcache1.c"><code>pcache1.c</code></a>]</span></td></tr>
     </tbody>
   </table>
   </div>
   <p>The split between <code>pager.c</code> (transactions/journaling) and <code>pcache.c</code> (the
   buffer pool itself) mirrors the separation this curriculum draws between 2.5 (cache) and Phase 5
-  (durability). <span class="verify-tag">⚠️VERIFY</span> the file split against the current tree.</p>
+  (durability). <code>pcache.c</code> is the pager-facing cache layer; <code>pcache1.c</code> is the
+  default page-cache implementation. That is a useful separation to study, but it is not identical to
+  this curriculum's smaller Rust API.</p>
 
   <h2>The state machine is the interesting part</h2>
-  <p>The pager is essentially a state machine over the file's lock and journal state: no transaction →
-  read transaction → write transaction → committing → done. The header comment in <code>pager.c</code>
-  enumerates these states and the legal transitions; this is the single most valuable thing to read,
-  because it shows how caching, locking (Phase 7), and durability (Phase 5) are coordinated by one
-  component. Read it before you design your own — you will recognize the same states emerging in your
-  build.</p>
+  <p>In rollback-journal mode, the pinned source names seven pager states:
+  <code>PAGER_OPEN</code>, <code>PAGER_READER</code>, <code>PAGER_WRITER_LOCKED</code>,
+  <code>PAGER_WRITER_CACHEMOD</code>, <code>PAGER_WRITER_DBMOD</code>,
+  <code>PAGER_WRITER_FINISHED</code>, and <code>PAGER_ERROR</code>. The opening comment states the
+  lock/journal invariants for each. WAL mode follows different locking details, which is why the
+  comment explicitly limits this state description to rollback mode.
+  <span class="src">[src: pinned SQLite 3.53.2
+  <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.c"><code>src/pager.c</code> opening state-machine comment</a>]</span>
+  Read this section to see how caching, locking, and recovery are coordinated; do not copy all seven
+  states into the Phase 2 exercise, which has no transaction protocol yet.</p>
 
   <div class="box warn">
     <div class="box-title">⚠️ Read for ideas, not to copy</div>
@@ -82,7 +101,8 @@
       them?</p>
       <details><summary>Show answer</summary><div class="answer"><code>pcache.c</code> (with
       <code>pcache1.c</code>) — separating the cache from transaction/journal logic keeps each concern
-      independently testable, mirroring 2.5 vs Phase 5. <span class="verify-tag">⚠️VERIFY</span></div></details>
+      independently understandable and replaceable. <code>pcache.c</code> presents the cache
+      interface while <code>pcache1.c</code> supplies its default implementation.</div></details>
       <p class="q">3. What's the most valuable section of <code>pager.c</code> to read first?</p>
       <details><summary>Show answer</summary><div class="answer">The header comment describing the
       pager's state machine and legal transitions.</div></details>
@@ -95,7 +115,11 @@
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Source:</strong> <a href="https://www.sqlite.org/src/file/src/pager.c">src/pager.c</a>, <a href="https://www.sqlite.org/src/file/src/pcache.c">src/pcache.c</a> (public domain).</li>
+      <li><strong>Source:</strong> pinned SQLite 3.53.2
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.c"><code>pager.c</code></a>,
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pager.h"><code>pager.h</code></a>,
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pcache.c"><code>pcache.c</code></a>,
+      and <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/pcache1.c"><code>pcache1.c</code></a>.</li>
       <li><strong>Doc:</strong> <a href="https://www.sqlite.org/arch.html">SQLite Architecture</a> and <a href="https://www.sqlite.org/atomiccommit.html">Atomic Commit</a> for the pager's role.</li>
       <li><strong>Forward link:</strong> the build (next) is your own minimal pager; Phase 5 revisits this file for journaling.</li>
     </ul>

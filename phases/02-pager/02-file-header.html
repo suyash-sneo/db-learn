@@ -21,7 +21,7 @@
   silently corrupting old databases. Get it wrong and you can't even safely detect "this isn't my
   file."</p>
 
-  <h2>What every header needs</h2>
+  <h2>What this engine's header needs</h2>
   <ul>
     <li><strong>A magic number / signature.</strong> A fixed byte string at offset 0 that identifies
     the file as yours. On open you compare the first bytes; a mismatch means "not my file, refuse to
@@ -54,7 +54,8 @@
   </div>
   <p class="src">[src: all rows above from <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.3, header field table</a>; the 16-byte magic is the hex sequence <code>53 51 4c 69 74 65 20 66 6f 72 6d 61 74 20 33 00</code>]</p>
   <p>Notice the pattern: a signature, a self-describing page size, a count of pages, and a pointer into
-  the free-space structure. Those four ideas are the backbone of almost any single-file format.</p>
+    the free-space structure. They are useful design patterns, not mandatory fields for every
+    possible single-file format.</p>
 
   <figure>
   <svg viewBox="0 0 560 170" role="img" aria-label="Header occupies the start of page 1, followed by content">
@@ -64,10 +65,11 @@
     <text class="dg-txt-s" x="95" y="78" text-anchor="middle">header</text>
     <text class="dg-txt-s" x="95" y="98" text-anchor="middle">(fixed bytes)</text>
     <rect class="dg-box" x="174" y="40" width="366" height="100" rx="6"/>
-    <text class="dg-txt-s" x="357" y="94" text-anchor="middle">rest of page 1 = first tree content / catalog</text>
+    <text class="dg-txt-s" x="357" y="94" text-anchor="middle">rest of page 1: format-defined</text>
     <text class="dg-txt-s" x="20" y="160">byte 0</text>
   </svg>
-  <figcaption>A common layout: header at the very front, then ordinary page content fills the rest.</figcaption>
+  <figcaption>SQLite uses the remainder of page 1 for a B-tree page. This curriculum instead reserves
+  all of page 1 for metadata, avoiding two independent layouts in one page.</figcaption>
   </figure>
 
   <h2>Endianness: pick one and write it down</h2>
@@ -103,9 +105,11 @@
     <li>Read the page size; sanity-check it (power of two, within range).</li>
     <li>Read page count, freelist head, root page for later use.</li>
   </ol>
-  <p>A brand-new (empty) file is the special case: there's no header to read, so the engine
-  <em>initializes</em> one — write the magic, version, page size, and zeroed counters, then sync — before
-  treating the file as a database.</p>
+  <p>A brand-new (empty) file is the special case: there is no header to read, so an explicit
+  <code>create</code> operation initializes page 1, writes the magic, version, page size, and initial
+  counters, then calls the storage synchronization operation. If creation of the directory entry must
+  survive a system crash, the platform-specific creation protocol may also need to synchronize the
+  containing directory; syncing the file alone is not a universal creation guarantee.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>

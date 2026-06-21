@@ -12,7 +12,7 @@
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.2</div>
   <h1>3.2 — B-tree vs B+tree; internal vs leaf nodes</h1>
   <div class="goal"><b>Goal:</b> Learn the precise difference between a B-tree and a B+tree, why
-  databases overwhelmingly choose the B+ variant, and the distinct jobs of internal and leaf nodes.</div>
+  disk-oriented systems commonly use the B+ variant, and the distinct jobs of internal and leaf nodes.</div>
 
   <h2>Why this matters to your DB</h2>
   <p>"B-tree" gets used loosely, but the variant you build changes the layout, the scan behavior, and
@@ -27,12 +27,14 @@
       <tr><td>Where values live</td><td>In <em>every</em> node (internal and leaf)</td><td>Only in <strong>leaf</strong> nodes</td></tr>
       <tr><td>Internal nodes hold</td><td>Keys + values + child pointers</td><td>Keys + child pointers only (no values)</td></tr>
       <tr><td>Keys in leaves</td><td>Each key appears once, anywhere</td><td>All keys appear in leaves; internal keys are <em>copies</em> used only as routers</td></tr>
-      <tr><td>Range scans</td><td>Need tree traversal between leaves</td><td>Leaves are linked in order → scan by following the links</td></tr>
+      <tr><td>Range scans</td><td>Use in-order tree navigation unless another link structure is added</td><td>Commonly use ordered leaf links</td></tr>
     </tbody>
   </table>
   </div>
-  <p>The B+tree's defining move: <strong>keep all data in the leaves, use internal nodes purely as a
-  routing layer, and link the leaves together in key order.</strong></p>
+  <p>The B+tree's defining move is to <strong>keep record payloads in leaves and use internal nodes as
+  routing pages.</strong> Linking leaves is a common implementation choice, and it is part of this
+  curriculum's format because it makes range scans direct; do not treat that link as a universal
+  requirement of every structure called a B+tree.</p>
 
   <h2>Why databases prefer B+trees</h2>
   <ul>
@@ -67,9 +69,9 @@
   <p>You'll implement two on-page formats:</p>
   <ul>
     <li><strong>Internal node:</strong> an ordered list of separator keys and one more child pointer
-    than keys. For <code>n</code> keys there are <code>n+1</code> children; key <code>k<sub>i</sub></code>
-    separates child <code>i</code> (keys &lt; k<sub>i</sub>) from child <code>i+1</code> (keys ≥
-    k<sub>i</sub>, depending on your convention).</li>
+    than keys. For separators <code>k₀…kₙ₋₁</code>, this project uses:
+    <code>c₀: K&lt;k₀</code>; middle child <code>cᵢ: kᵢ₋₁≤K&lt;kᵢ</code>; and
+    <code>cₙ: K≥kₙ₋₁</code>.</li>
     <li><strong>Leaf node:</strong> an ordered list of (key, value) entries plus a pointer to the next
     leaf (the sibling link for range scans).</li>
   </ul>

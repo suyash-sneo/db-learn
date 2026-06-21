@@ -18,8 +18,9 @@
   <h2>Why this matters to your DB</h2>
   <p>Within a page, compaction (4.4) reclaims space. But when an entire page becomes empty — a merged
   B+tree node, a deleted record's overflow chain — that whole page must go somewhere reusable, or the
-  file only ever grows. The freelist is the engine's "recycle bin" for pages and is the difference
-  between a database that stays compact and one that bloats endlessly.</p>
+  allocator forgets reusable capacity below the file's high-water mark. The freelist is the engine's
+  persistent recycle bin. It reduces avoidable growth; it does not itself compact live pages or shrink
+  the file.</p>
 
   <h2>The allocation contract</h2>
   <p>Page allocation now has two sources, checked in order:</p>
@@ -59,10 +60,10 @@
   <h2>A simpler freelist for your build</h2>
   <p>You don't need SQLite's exact two-level structure to start. Two valid simpler designs:</p>
   <ul>
-    <li><strong>Singly-linked free pages:</strong> the header stores the first free page number; each
-    free page's first 4 bytes hold the next free page number (0 = end). Allocation pops the head; freeing
-    pushes onto the head. One page read/write per operation, like a stack. This is the easiest correct
-    design.</li>
+    <li><strong>Singly-linked free pages:</strong> the database header stores the first free page
+    number. In this build, a free page uses
+    <code>type:u8 | reserved:[u8;3] | next:u32</code>; allocation pops the head and freeing pushes
+    onto it. One page read/write per operation, like a stack.</li>
     <li><strong>Trunk-style (SQLite-like):</strong> trunk pages batching many free page numbers, fewer
     reads under heavy churn. More code; adopt it if you measure the simple list as a bottleneck.</li>
   </ul>
@@ -80,11 +81,13 @@
   </div>
 
   <h2>Optional: shrinking the file</h2>
-  <p>A freelist lets you <em>reuse</em> pages but the file still doesn't shrink. Reclaiming disk back to
-  the OS (SQLite's <code>VACUUM</code> / auto-vacuum) requires moving live pages from the end of the file
-  into freed slots, then truncating. This is an optional advanced feature; a freelist alone keeps the
-  file from growing unboundedly, which is the essential property. <span class="verify-tag">⚠️VERIFY</span>
-  SQLite's auto-vacuum mechanics before describing them in detail.</p>
+  <p>A freelist lets you <em>reuse</em> pages but the file still does not shrink. SQLite documents that
+  with auto-vacuum disabled, freed pages remain on the freelist for reuse and <code>VACUUM</code> can
+  rebuild the file. In <code>auto_vacuum=FULL</code>, SQLite moves freelist pages toward the end and
+  truncates them, but does not repack content inside individual pages.
+  <span class="src">[src: SQLite
+  <a href="https://sqlite.org/pragma.html#pragma_auto_vacuum"><code>PRAGMA auto_vacuum</code></a>]</span>
+  The curriculum does not implement file shrinking.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>

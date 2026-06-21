@@ -12,250 +12,428 @@
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 2</a> › Build</div>
   <span class="pill">Build · AI off</span>
   <h1>Build: a single-file pager with a buffer pool</h1>
-  <div class="goal"><b>Goal:</b> Turn one file into a numbered array of fixed-size pages with a header,
-  a cache that tracks dirty pages and evicts safely, and an explicit <code>sync</code>. Every page
-  above this in the engine will use it.</div>
+  <div class="goal"><b>Goal:</b> Turn one byte store into a checked, numbered array of fixed-size
+  pages with a reserved metadata page, bounded caching, dirty tracking, deterministic eviction, and
+  an explicit synchronization operation.</div>
 
   <div class="box warn">
     <div class="box-title">⚠️ AI off</div>
-    <p>Use the lessons, the SQLite file-format spec, primary docs, compiler errors, and the hint
-    ladder. This page gives you contracts, stubs, and failing tests — not the implementation. The
-    pager is a core database component, so per the project rules there is no worked solution here.</p>
+    <p>Use the lessons, primary documentation, compiler errors, and the hint ladder. This page fixes
+    the format and API contracts, then gives you only failing tests and <code>todo!()</code> stubs.
+    You must write the pager implementation.</p>
   </div>
 
-  <h2>Deliverable</h2>
-  <p>A Rust 2024 package <code>pager</code> exposing a <code>Pager</code> built over a small
-  <code>BlockIo</code> trait, with a file-backed and an in-memory backend, page get/modify/sync, dirty
-  tracking, capacity-bounded caching with safe eviction, and a self-describing header.</p>
-  <span class="code-label">Cargo.toml</span>
-<pre><code>[package]
-name = <span class="tok-s">"pager"</span>
-version = <span class="tok-s">"0.1.0"</span>
-edition = <span class="tok-s">"2024"</span></code></pre>
+  <h2>Scope and non-goals</h2>
+  <p>This phase proves clean create/open/reopen behavior. It does <strong>not</strong> provide
+  transactions, atomic commits, concurrent access, or power-loss recovery. Dirty eviction writes
+  directly to the main file only because no WAL exists yet. Phase 5 must change that write path
+  before uncommitted data is allowed to coexist with a recovery protocol.</p>
 
-  <h2>Fixed design decisions</h2>
+  <h2>Fixed file-format decisions</h2>
   <ul>
-    <li>Page size: a single value stored in the header; default 4096. Page numbers are 1-based; page 0
-    is the reserved null page.</li>
-    <li>Multi-byte header fields are big-endian, written with <code>to_be_bytes</code> (never
-    <code>transmute</code>).</li>
-    <li>Header (kept simple, all big-endian): 16-byte magic <code>"minidb format 1\0"</code>, 2-byte
-    page size, 4-byte page count, 4-byte freelist head (0 = none; unused until Phase 4). The header
-    lives at the start of page 1.</li>
-    <li>Durability is explicit: <code>write_page</code> does not sync; <code>sync</code> does.</li>
+    <li><code>PageNo = u32</code>. Page numbers are 1-based; 0 is the null pointer.</li>
+    <li>Page 1 is entirely reserved for database metadata. Ordinary data pages begin at page 2.
+    Higher layers must never place a tree node or record in page 1.</li>
+    <li>The project accepts power-of-two page sizes from 512 through 32768 bytes. This is the
+    curriculum's simpler <code>u16</code> encoding, not SQLite's full page-size encoding.</li>
+    <li>All multi-byte header fields are big-endian and encoded field-by-field.</li>
+    <li>The 32-byte header occupies the start of page 1; the rest of page 1 is zero/reserved:
+      <div class="tablewrap"><table>
+        <thead><tr><th>Offset</th><th>Bytes</th><th>Field</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>16</td><td>magic: <code>"minidb format 1\0"</code></td></tr>
+          <tr><td>16</td><td>2</td><td>format version: <code>1</code></td></tr>
+          <tr><td>18</td><td>2</td><td>page size</td></tr>
+          <tr><td>20</td><td>4</td><td>page count, including page 1</td></tr>
+          <tr><td>24</td><td>4</td><td>root page, 0 when absent</td></tr>
+          <tr><td>28</td><td>4</td><td>freelist head, 0 when absent</td></tr>
+        </tbody>
+      </table></div>
+    </li>
+    <li>A file length must equal <code>page_count × page_size</code> on clean open. A mismatch is
+    corruption/truncation, not permission to guess.</li>
   </ul>
+
+  <h2>Chosen ownership model</h2>
+  <p><code>read_page</code> returns an owned <code>Vec&lt;u8&gt;</code>. Mutations happen through
+  <code>modify_page(page_no, closure)</code>, and the closure cannot retain the borrowed slice. This
+  deliberately avoids an escaping page guard in the first pager. Lesson 2.5 still teaches pin counts
+  because a later zero-copy or concurrent cache would need them; this build does not pretend a
+  Boolean pin flag is sufficient.</p>
 
   <h2>Ordered milestones</h2>
   <ol>
-    <li><strong>M1 — BlockIo.</strong> Define the trait; implement <code>MemBlock</code> (a
-    <code>Vec&lt;u8&gt;</code>) and <code>FileBlock</code> (seek + <code>read_exact</code>/<code>write_all</code>;
-    <code>sync</code> via <code>sync_all</code>).</li>
-    <li><strong>M2 — Header.</strong> <code>Pager::create</code> writes a fresh header;
-    <code>Pager::open</code> reads and validates it (magic, page size). Reject a wrong magic with a
-    typed error.</li>
-    <li><strong>M3 — Offset math + raw page I/O.</strong> Read and write a page by number through the
-    backend using the 1-based formula.</li>
-    <li><strong>M4 — Cache + dirty tracking.</strong> A bounded cache mapping page no → frame;
-    <code>get_page</code> serves hits from memory; modifications mark the page dirty.</li>
-    <li><strong>M5 — Safe eviction.</strong> When full, evict a victim; if it's dirty, write it out
-    first; never evict a pinned page.</li>
-    <li><strong>M6 — sync + allocate.</strong> <code>sync</code> writes all dirty pages then syncs the
-    backend; <code>allocate_page</code> grows the file by one page and updates the header count.</li>
+    <li><strong>M1 — Block I/O.</strong> Implement exact positional reads/writes, length query/change,
+    and sync for <code>MemBlock</code> and <code>FileBlock</code>.</li>
+    <li><strong>M2 — Header codec.</strong> Encode/decode the exact 32-byte layout. Validate magic,
+    version, page size, page count, pointer ranges, and whole-file length.</li>
+    <li><strong>M3 — Create/open.</strong> Creation writes and synchronizes page 1. Open never
+    silently initializes an empty or malformed file.</li>
+    <li><strong>M4 — Checked page I/O.</strong> Reject page 0, page 1 through the public data-page
+    API, out-of-range pages, wrong-sized buffers, and offset overflow.</li>
+    <li><strong>M5 — Cache.</strong> Load misses, return owned read copies, mutate through the
+    closure, and mark edited frames dirty.</li>
+    <li><strong>M6 — Eviction.</strong> Use one documented deterministic policy (FIFO is enough).
+    In this pre-WAL build, write a dirty victim before reusing its frame.</li>
+    <li><strong>M7 — Allocate/sync/reopen.</strong> Append a zeroed page, mark metadata dirty, flush
+    dirty data plus page 1, call <code>BlockIo::sync</code>, then prove reopen works.</li>
   </ol>
 
   <h2>Acceptance criteria</h2>
   <ul>
-    <li>All Rust tests below pass against <em>both</em> backends.</li>
-    <li>Opening a file written by <code>create</code> round-trips the page size and page count.</li>
-    <li>A wrong-magic file is rejected with the typed error (tested).</li>
-    <li>A written-then-evicted dirty page is not lost: re-reading returns the new bytes (tested).</li>
-    <li>Pinned pages are never chosen as eviction victims (tested).</li>
-    <li>Durability ordering is a documented manual check: <code>write_page</code> alone is not claimed
-    durable; only post-<code>sync</code> state is. (No automated power-cut test in Phase 2; that
-    arrives in Phase 5.)</li>
+    <li>The supplied unit tests pass without changing their assertions.</li>
+    <li>You add the same create/write/sync/reopen scenario for <code>FileBlock</code> using a unique
+    temporary path, and remove the file afterward.</li>
+    <li>Page 1 cannot be read or modified through the ordinary data-page API.</li>
+    <li>Dirty data survives eviction and a subsequent clean reopen.</li>
+    <li>Opening bad magic, bad version, bad page size, impossible pointers, or a file-length mismatch
+    returns a typed error.</li>
+    <li>Manual check: inspect <code>FileBlock</code> and confirm its sync method calls
+    <code>File::sync_all</code>. This is an OS synchronization request, not a claim of transactional
+    atomicity or a universal hardware guarantee.</li>
+    <li>Manual check: document that durable creation of a new directory entry may require a
+    platform-specific containing-directory sync; that operation is outside this narrow
+    <code>BlockIo</code> trait.</li>
   </ul>
 
-  <h2>Stub: <code>src/lib.rs</code></h2>
+  <h2>Stubs: <code>src/lib.rs</code></h2>
   <span class="code-label">src/lib.rs — implement every todo!()</span>
-<pre><code><span class="tok-k">use</span> std::collections::HashMap;
+<pre><code><span class="tok-k">use</span> std::{collections::HashMap, path::Path};
 
+<span class="tok-k">pub type</span> <span class="tok-f">PageNo</span> = <span class="tok-f">u32</span>;
 <span class="tok-k">pub const</span> <span class="tok-f">MAGIC</span>: &amp;[<span class="tok-f">u8</span>; 16] = b<span class="tok-s">"minidb format 1\0"</span>;
+<span class="tok-k">pub const</span> <span class="tok-f">FORMAT_VERSION</span>: <span class="tok-f">u16</span> = 1;
 <span class="tok-k">pub const</span> <span class="tok-f">DEFAULT_PAGE_SIZE</span>: <span class="tok-f">u16</span> = 4096;
+<span class="tok-k">const</span> <span class="tok-f">HEADER_LEN</span>: <span class="tok-f">usize</span> = 32;
 
 <span class="tok-m">#[derive(Debug)]</span>
 <span class="tok-k">pub enum</span> <span class="tok-f">PagerError</span> {
     Io(std::io::Error),
     BadMagic,
+    UnsupportedVersion(<span class="tok-f">u16</span>),
     BadPageSize(<span class="tok-f">u16</span>),
-    PageOutOfRange(<span class="tok-f">u64</span>),
+    BadPageCount(<span class="tok-f">u32</span>),
+    BadPointer { field: &amp;<span class="tok-k">'static</span> str, page: <span class="tok-f">PageNo</span> },
+    FileLengthMismatch { expected: <span class="tok-f">u64</span>, actual: <span class="tok-f">u64</span> },
+    NullPage,
+    ReservedPage(<span class="tok-f">PageNo</span>),
+    PageOutOfRange(<span class="tok-f">PageNo</span>),
+    OffsetOverflow,
+    ZeroCacheCapacity,
 }
+
 <span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;std::io::Error&gt; <span class="tok-k">for</span> <span class="tok-f">PagerError</span> {
-    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: std::io::Error) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">PagerError</span>::<span class="tok-f">Io</span>(e) }
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: std::io::Error) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">Self</span>::<span class="tok-f">Io</span>(e) }
 }
-<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">PagerError</span>&gt;;
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; =
+    std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">PagerError</span>&gt;;
 
 <span class="tok-k">pub trait</span> <span class="tok-f">BlockIo</span> {
-    <span class="tok-k">fn</span> <span class="tok-f">read_at</span>(&amp;<span class="tok-k">mut self</span>, offset: <span class="tok-f">u64</span>, buf: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt;;
-    <span class="tok-k">fn</span> <span class="tok-f">write_at</span>(&amp;<span class="tok-k">mut self</span>, offset: <span class="tok-f">u64</span>, buf: &amp;[<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt;;
+    <span class="tok-k">fn</span> <span class="tok-f">read_at</span>(&amp;<span class="tok-k">mut self</span>, offset: <span class="tok-f">u64</span>, out: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>])
+        -&gt; std::io::Result&lt;()&gt;;
+    <span class="tok-k">fn</span> <span class="tok-f">write_at</span>(&amp;<span class="tok-k">mut self</span>, offset: <span class="tok-f">u64</span>, bytes: &amp;[<span class="tok-f">u8</span>])
+        -&gt; std::io::Result&lt;()&gt;;
     <span class="tok-k">fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; std::io::Result&lt;()&gt;;
     <span class="tok-k">fn</span> <span class="tok-f">len</span>(&amp;<span class="tok-k">self</span>) -&gt; std::io::Result&lt;<span class="tok-f">u64</span>&gt;;
+    <span class="tok-k">fn</span> <span class="tok-f">set_len</span>(&amp;<span class="tok-k">mut self</span>, len: <span class="tok-f">u64</span>)
+        -&gt; std::io::Result&lt;()&gt;;
 }
 
 <span class="tok-k">pub struct</span> <span class="tok-f">MemBlock</span> { <span class="tok-k">pub</span> data: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; }
-<span class="tok-c">// impl BlockIo for MemBlock { todo!("M1") }</span>
+<span class="tok-k">impl</span> <span class="tok-f">MemBlock</span> {
+    <span class="tok-k">pub fn</span> <span class="tok-f">empty</span>() -&gt; <span class="tok-f">Self</span> { <span class="tok-f">Self</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() } }
+}
+<span class="tok-k">impl</span> <span class="tok-f">BlockIo</span> <span class="tok-k">for</span> <span class="tok-f">MemBlock</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">read_at</span>(&amp;<span class="tok-k">mut self</span>, _: <span class="tok-f">u64</span>, _: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: bounds-check and fill the entire output"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">write_at</span>(&amp;<span class="tok-k">mut self</span>, _: <span class="tok-f">u64</span>, _: &amp;[<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: bounds-check and write every byte"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; std::io::Result&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: memory backend synchronization semantics"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">len</span>(&amp;<span class="tok-k">self</span>) -&gt; std::io::Result&lt;<span class="tok-f">u64</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: checked conversion from data.len()"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">set_len</span>(&amp;<span class="tok-k">mut self</span>, _: <span class="tok-f">u64</span>) -&gt; std::io::Result&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: checked resize"</span>)
+    }
+}
 
-<span class="tok-k">pub struct</span> <span class="tok-f">FileBlock</span> { <span class="tok-k">pub</span> file: std::fs::File }
-<span class="tok-c">// impl BlockIo for FileBlock { todo!("M1: seek + read_exact/write_all; sync_all") }</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">FileBlock</span> { file: std::fs::File }
+<span class="tok-k">impl</span> <span class="tok-f">FileBlock</span> {
+    <span class="tok-k">pub fn</span> <span class="tok-f">create</span>(path: <span class="tok-k">impl</span> <span class="tok-f">AsRef</span>&lt;<span class="tok-f">Path</span>&gt;)
+        -&gt; std::io::Result&lt;<span class="tok-f">Self</span>&gt; { <span class="tok-m">todo!</span>(<span class="tok-s">"M1: create/read/write/truncate"</span>) }
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(path: <span class="tok-k">impl</span> <span class="tok-f">AsRef</span>&lt;<span class="tok-f">Path</span>&gt;)
+        -&gt; std::io::Result&lt;<span class="tok-f">Self</span>&gt; { <span class="tok-m">todo!</span>(<span class="tok-s">"M1: open read/write without truncating"</span>) }
+}
+<span class="tok-k">impl</span> <span class="tok-f">BlockIo</span> <span class="tok-k">for</span> <span class="tok-f">FileBlock</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">read_at</span>(&amp;<span class="tok-k">mut self</span>, _: <span class="tok-f">u64</span>, _: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: seek plus read_exact, or positional I/O"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">write_at</span>(&amp;<span class="tok-k">mut self</span>, _: <span class="tok-f">u64</span>, _: &amp;[<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: seek plus write_all, or positional I/O"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; std::io::Result&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: File::sync_all"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">len</span>(&amp;<span class="tok-k">self</span>) -&gt; std::io::Result&lt;<span class="tok-f">u64</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: metadata length"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">set_len</span>(&amp;<span class="tok-k">mut self</span>, _: <span class="tok-f">u64</span>) -&gt; std::io::Result&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: File::set_len"</span>)
+    }
+}
+
+<span class="tok-m">#[derive(Clone, Copy)]</span>
+<span class="tok-k">struct</span> <span class="tok-f">Header</span> {
+    page_size: <span class="tok-f">u16</span>,
+    page_count: <span class="tok-f">u32</span>,
+    root_page: <span class="tok-f">PageNo</span>,
+    freelist_head: <span class="tok-f">PageNo</span>,
+}
 
 <span class="tok-k">struct</span> <span class="tok-f">Frame</span> {
-    page_no: <span class="tok-f">u64</span>,
+    page_no: <span class="tok-f">PageNo</span>,
     bytes: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;,
     dirty: <span class="tok-f">bool</span>,
-    pinned: <span class="tok-f">bool</span>,
+    loaded_at: <span class="tok-f">u64</span>,
 }
 
 <span class="tok-k">pub struct</span> <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; {
     io: <span class="tok-f">B</span>,
-    page_size: <span class="tok-f">usize</span>,
-    page_count: <span class="tok-f">u64</span>,
+    header: <span class="tok-f">Header</span>,
+    header_dirty: <span class="tok-f">bool</span>,
     capacity: <span class="tok-f">usize</span>,
+    clock: <span class="tok-f">u64</span>,
     frames: <span class="tok-f">Vec</span>&lt;<span class="tok-f">Frame</span>&gt;,
-    table: HashMap&lt;<span class="tok-f">u64</span>, <span class="tok-f">usize</span>&gt;, <span class="tok-c">// page_no -&gt; frame index</span>
+    table: <span class="tok-f">HashMap</span>&lt;<span class="tok-f">PageNo</span>, <span class="tok-f">usize</span>&gt;,
 }
 
 <span class="tok-k">impl</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt; {
-    <span class="tok-k">pub fn</span> <span class="tok-f">create</span>(io: <span class="tok-f">B</span>, page_size: <span class="tok-f">u16</span>, capacity: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: validate page_size is power of two in 512..=32768; write header to page 1; page_count = 1"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">create</span>(io: <span class="tok-f">B</span>, page_size: <span class="tok-f">u16</span>, capacity: <span class="tok-f">usize</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2–M3: validate; create page 1; write header; sync"</span>)
     }
-    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(io: <span class="tok-f">B</span>, capacity: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: read header; check MAGIC -&gt; BadMagic; read page_size + page_count"</span>)
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(io: <span class="tok-f">B</span>, capacity: <span class="tok-f">usize</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2–M3: decode and validate the complete header and file length"</span>)
     }
-    <span class="tok-k">fn</span> <span class="tok-f">offset</span>(&amp;<span class="tok-k">self</span>, page_no: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">u64</span> {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: 1-based; (page_no - 1) * page_size as u64"</span>)
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">page_size</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">u16</span> { <span class="tok-k">self</span>.header.page_size }
+    <span class="tok-k">pub fn</span> <span class="tok-f">page_count</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">u32</span> { <span class="tok-k">self</span>.header.page_count }
+    <span class="tok-k">pub fn</span> <span class="tok-f">root_page</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">PageNo</span> { <span class="tok-k">self</span>.header.root_page }
+    <span class="tok-k">pub fn</span> <span class="tok-f">freelist_head</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">PageNo</span> { <span class="tok-k">self</span>.header.freelist_head }
+    <span class="tok-k">pub fn</span> <span class="tok-f">into_inner</span>(<span class="tok-k">self</span>) -&gt; <span class="tok-f">B</span> { <span class="tok-k">self</span>.io }
+
+    <span class="tok-k">fn</span> <span class="tok-f">offset</span>(&amp;<span class="tok-k">self</span>, page_no: <span class="tok-f">PageNo</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">u64</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: reject 0; checked (u64::from(page_no) - 1) * page_size"</span>)
     }
-    <span class="tok-k">pub fn</span> <span class="tok-f">get_page</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">Result</span>&lt;&amp;[<span class="tok-f">u8</span>]&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: hit -&gt; return; miss -&gt; ensure_frame, read_at, insert"</span>)
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">read_page</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">PageNo</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4–M5: validate data page; load/cache; return an owned copy"</span>)
     }
-    <span class="tok-k">pub fn</span> <span class="tok-f">modify_page</span>&lt;<span class="tok-f">F</span>: <span class="tok-f">FnOnce</span>(&amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>])&gt;(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">u64</span>, f: <span class="tok-f">F</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: bring page in, run f over its bytes, mark dirty"</span>)
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">modify_page</span>&lt;<span class="tok-f">F</span>&gt;(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">PageNo</span>, edit: <span class="tok-f">F</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;()&gt;
+    <span class="tok-k">where</span>
+        <span class="tok-f">F</span>: <span class="tok-f">FnOnce</span>(&amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>]),
+    {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: load; run closure; mark dirty"</span>)
     }
+
     <span class="tok-k">fn</span> <span class="tok-f">evict_one</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">usize</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: choose an UNPINNED victim; if dirty write_at first; free its table entry"</span>)
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: deterministic victim; pre-WAL dirty writeback; repair table"</span>)
     }
-    <span class="tok-k">pub fn</span> <span class="tok-f">allocate_page</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">u64</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: page_count += 1; grow file; persist count in header; return new page no"</span>)
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">allocate_page</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">PageNo</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M7: checked increment; extend; write one zero page; mark header dirty"</span>)
     }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">set_root_page</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">PageNo</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M7: allow 0 or an allocated data page; mark header dirty"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">set_freelist_head</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">PageNo</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M7: allow 0 or an allocated data page; mark header dirty"</span>)
+    }
+
     <span class="tok-k">pub fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: write_at every dirty frame, clear dirty, then io.sync()"</span>)
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M7: write dirty data and page 1; then io.sync; no atomicity claim"</span>)
     }
 }</code></pre>
-  <div class="box warn">
-    <div class="box-title">⚠️ The borrow-checker design decision (read before M4)</div>
-    <p>Returning <code>&amp;[u8]</code> from <code>get_page</code> borrows the whole <code>Pager</code>,
-    so you can't get one page and then evict to make room for another in the same expression. This is
-    the real design tension from 2.5. Options, in rough order of simplicity: (a) make
-    <code>modify_page</code> take a closure so the borrow ends when the closure returns (shown above);
-    (b) return a copy of the bytes for reads; (c) hand out a guard/handle that unpins on
-    <code>Drop</code>; (d) interior mutability with <code>RefCell</code>. Pick one and justify it in
-    your notes — this choice is part of the exercise, not an obstacle to route around with
-    <code>unsafe</code>.</p>
-  </div>
 
   <h2>Failing tests</h2>
-  <span class="code-label">append to src/lib.rs</span>
+  <span class="code-label">append as an inline unit-test module in src/lib.rs</span>
 <pre><code><span class="tok-m">#[cfg(test)]</span>
 <span class="tok-k">mod</span> tests {
     <span class="tok-k">use super</span>::*;
 
-    <span class="tok-k">impl</span> <span class="tok-f">MemBlock</span> {
-        <span class="tok-k">fn</span> <span class="tok-f">empty</span>() -&gt; <span class="tok-f">Self</span> { <span class="tok-f">MemBlock</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() } }
+    <span class="tok-k">fn</span> <span class="tok-f">fresh</span>(capacity: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Pager</span>&lt;<span class="tok-f">MemBlock</span>&gt; {
+        <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, capacity).<span class="tok-f">unwrap</span>()
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">create_then_open_roundtrips_header</span>() {
-        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, 8).<span class="tok-f">unwrap</span>();
-        <span class="tok-c">// reuse the same backing bytes by moving io back out in your design,</span>
-        <span class="tok-c">// or expose a helper; the point: reopened page_size == 4096.</span>
-        <span class="tok-m">assert_eq!</span>(p.page_size, 4096);
+    <span class="tok-k">fn</span> <span class="tok-f">create_then_open_really_roundtrips</span>() {
+        <span class="tok-k">let</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-k">let</span> io = p.<span class="tok-f">into_inner</span>();
+        <span class="tok-k">let</span> reopened = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(io, 2).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">page_size</span>(), 4096);
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">page_count</span>(), 1);
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">root_page</span>(), 0);
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">rejects_bad_magic</span>() {
-        <span class="tok-k">let mut</span> io = <span class="tok-f">MemBlock</span> { data: <span class="tok-f">vec!</span>[0u8; 4096] };
-        io.data[0..4].<span class="tok-f">copy_from_slice</span>(b<span class="tok-s">"nope"</span>);
-        <span class="tok-k">let</span> err = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(io, 8);
-        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(err, <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">BadMagic</span>)));
+    <span class="tok-k">fn</span> <span class="tok-f">rejects_bad_magic_and_page_size</span>() {
+        <span class="tok-k">let</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-k">let mut</span> bad_magic = p.<span class="tok-f">into_inner</span>();
+        bad_magic.data[0] ^= 0xff;
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(
+            <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(bad_magic, 2),
+            <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">BadMagic</span>)
+        ));
+
+        <span class="tok-k">let</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-k">let mut</span> bad_size = p.<span class="tok-f">into_inner</span>();
+        bad_size.data[18..20].<span class="tok-f">copy_from_slice</span>(&amp;1000u16.<span class="tok-f">to_be_bytes</span>());
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(
+            <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(bad_size, 2),
+            <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">BadPageSize</span>(1000))
+        ));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">rejects_bad_version_pointer_and_file_length</span>() {
+        <span class="tok-k">let</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-k">let mut</span> bad_version = p.<span class="tok-f">into_inner</span>();
+        bad_version.data[16..18].<span class="tok-f">copy_from_slice</span>(&amp;2u16.<span class="tok-f">to_be_bytes</span>());
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(
+            <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(bad_version, 2),
+            <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">UnsupportedVersion</span>(2))
+        ));
+
+        <span class="tok-k">let</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-k">let mut</span> bad_pointer = p.<span class="tok-f">into_inner</span>();
+        bad_pointer.data[24..28].<span class="tok-f">copy_from_slice</span>(&amp;2u32.<span class="tok-f">to_be_bytes</span>());
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(
+            <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(bad_pointer, 2),
+            <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">BadPointer</span> { field: <span class="tok-s">"root_page"</span>, page: 2 })
+        ));
+
+        <span class="tok-k">let</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-k">let mut</span> truncated = p.<span class="tok-f">into_inner</span>();
+        truncated.data.<span class="tok-f">pop</span>();
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(
+            <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(truncated, 2),
+            <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">FileLengthMismatch</span> { .. })
+        ));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">rejects_null_reserved_and_out_of_range_pages</span>() {
+        <span class="tok-k">let mut</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(p.<span class="tok-f">read_page</span>(0), <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">NullPage</span>)));
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(p.<span class="tok-f">read_page</span>(1), <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">ReservedPage</span>(1))));
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(p.<span class="tok-f">read_page</span>(2), <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">PageOutOfRange</span>(2))));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">first_allocated_data_page_is_two</span>() {
+        <span class="tok-k">let mut</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">allocate_page</span>().<span class="tok-f">unwrap</span>(), 2);
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">page_count</span>(), 2);
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">read_page</span>(2).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[0; 4096]);
     }
 
     <span class="tok-m">#[test]</span>
     <span class="tok-k">fn</span> <span class="tok-f">dirty_page_survives_eviction</span>() {
-        <span class="tok-k">let mut</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, /* capacity */ 2).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let mut</span> p = <span class="tok-f">fresh</span>(1);
         <span class="tok-k">let</span> a = p.<span class="tok-f">allocate_page</span>().<span class="tok-f">unwrap</span>();
-        p.<span class="tok-f">modify_page</span>(a, |b| b[0] = 42).<span class="tok-f">unwrap</span>();
-        <span class="tok-c">// touch enough other pages to force `a` out of a 2-frame cache</span>
-        <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..4 {
-            <span class="tok-k">let</span> n = p.<span class="tok-f">allocate_page</span>().<span class="tok-f">unwrap</span>();
-            <span class="tok-k">let</span> _ = p.<span class="tok-f">get_page</span>(n).<span class="tok-f">unwrap</span>();
-        }
-        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">get_page</span>(a).<span class="tok-f">unwrap</span>()[0], 42);
+        <span class="tok-k">let</span> b = p.<span class="tok-f">allocate_page</span>().<span class="tok-f">unwrap</span>();
+        p.<span class="tok-f">modify_page</span>(a, |bytes| bytes[0] = 42).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> _ = p.<span class="tok-f">read_page</span>(b).<span class="tok-f">unwrap</span>(); <span class="tok-c">// capacity 1: evicts a</span>
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">read_page</span>(a).<span class="tok-f">unwrap</span>()[0], 42);
+        p.<span class="tok-f">sync</span>().<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let mut</span> reopened = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(p.<span class="tok-f">into_inner</span>(), 1).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">read_page</span>(a).<span class="tok-f">unwrap</span>()[0], 42);
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">offset_is_one_based</span>() {
-        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, 8).<span class="tok-f">unwrap</span>();
-        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">offset</span>(1), 0);
-        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">offset</span>(4), 3 * 4096);
+    <span class="tok-k">fn</span> <span class="tok-f">sync_then_reopen_preserves_data_and_metadata</span>() {
+        <span class="tok-k">let mut</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-k">let</span> root = p.<span class="tok-f">allocate_page</span>().<span class="tok-f">unwrap</span>();
+        p.<span class="tok-f">modify_page</span>(root, |bytes| bytes[7] = 99).<span class="tok-f">unwrap</span>();
+        p.<span class="tok-f">set_root_page</span>(root).<span class="tok-f">unwrap</span>();
+        p.<span class="tok-f">sync</span>().<span class="tok-f">unwrap</span>();
+
+        <span class="tok-k">let</span> io = p.<span class="tok-f">into_inner</span>();
+        <span class="tok-k">let mut</span> reopened = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(io, 2).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">root_page</span>(), root);
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">read_page</span>(root).<span class="tok-f">unwrap</span>()[7], 99);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">offset_math_is_one_based_and_checked</span>() {
+        <span class="tok-k">let</span> p = <span class="tok-f">fresh</span>(2);
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">offset</span>(1).<span class="tok-f">unwrap</span>(), 0);
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">offset</span>(4).<span class="tok-f">unwrap</span>(), 3 * 4096);
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(p.<span class="tok-f">offset</span>(0), <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">NullPage</span>)));
     }
 }</code></pre>
-  <p class="src">Note: <code>create_then_open_roundtrips_header</code> needs your design to expose the
-  backing bytes for reopen (e.g. return <code>io</code> on close, or test <code>MemBlock</code> shared
-  via a handle). Decide the shape; the test asserts the round-trip property, not a specific API.</p>
 
   <h2>Stuck? — graduated hints</h2>
-  <details><summary>M2: how do I validate the page size?</summary><div class="answer">
-    <strong>Nudge:</strong> The valid set is powers of two in a fixed range.
-    <br><strong>Bigger:</strong> Check <code>512..=32768</code> and <code>v.is_power_of_two()</code>.
-    <br><strong>Source:</strong> the same constraint SQLite enforces at header offset 16
-    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">fileformat2 §1.3.2</a>]</span>;
-    return <code>BadPageSize</code> otherwise.</div></details>
+  <details><summary>M1: exact I/O and extension</summary><div class="answer">
+    <strong>Nudge:</strong> Your trait promises either the complete requested transfer or an error.
+    <br><strong>Bigger:</strong> For a cursor-based file backend, seek before
+    <code>read_exact</code>/<code>write_all</code>. <code>set_len</code> changes the logical length;
+    allocation still writes a full zero page so every backend has the same observable contents.
+    <br><strong>Technique:</strong> keep cursor movement inside <code>FileBlock</code>. A concurrent
+    design would instead use positional APIs or lock the cursor.</div></details>
 
-  <details><summary>M4: get_page won't compile — borrow conflicts</summary><div class="answer">
-    <strong>Nudge:</strong> A returned <code>&amp;[u8]</code> borrows the whole pager for as long as you
-    hold it.
-    <br><strong>Bigger:</strong> Separate "bring the page into a frame" (mutable, may evict) from
-    "hand out a view" (immutable), so eviction never races a live borrow.
-    <br><strong>Technique:</strong> resolve all eviction <em>before</em> taking the final shared borrow,
-    or use the closure-based <code>modify_page</code> so the borrow's scope is the closure.</div></details>
+  <details><summary>M2: header validation order</summary><div class="answer">
+    <strong>Nudge:</strong> Do not use the page size to allocate or multiply until it is validated.
+    <br><strong>Bigger:</strong> Read the fixed 32-byte prefix, check magic/version/page size, then
+    decode counts and compute the expected length with checked <code>u64</code> arithmetic.
+    <br><strong>Technique:</strong> small field codec helpers using
+    <code>from_be_bytes</code>/<code>to_be_bytes</code>; no struct casts.</div></details>
 
-  <details><summary>M5: my eviction sometimes loses data</summary><div class="answer">
-    <strong>Nudge:</strong> What's true of a frame you're about to reuse?
-    <br><strong>Bigger:</strong> If <code>dirty</code>, you must <code>write_at</code> it before
-    overwriting the frame.
-    <br><strong>Technique:</strong> never select a <code>pinned</code> frame; write-back-then-reuse for
-    dirty victims; drop clean victims directly.</div></details>
+  <details><summary>M5–M6: cache bookkeeping after eviction</summary><div class="answer">
+    <strong>Nudge:</strong> A frame index is stored in two places.
+    <br><strong>Bigger:</strong> Before reusing a victim, preserve dirty bytes, remove the old page
+    number from the table, replace the frame, then insert the new mapping.
+    <br><strong>Technique:</strong> FIFO can choose the smallest <code>loaded_at</code>. Increment the
+    pager's monotonic counter whenever a page is loaded into a frame.</div></details>
 
-  <details><summary>M6: when exactly do I sync?</summary><div class="answer">
-    <strong>Nudge:</strong> Per 2.6, <code>write_at</code> ≠ durable.
-    <br><strong>Technique:</strong> flush every dirty frame with <code>write_at</code>, clear their
-    dirty bits, then call <code>io.sync()</code> once. Document that only this point is durable.</div></details>
+  <details><summary>M7: why page count and file length move together</summary><div class="answer">
+    <strong>Nudge:</strong> A clean header must not name bytes that the file does not contain.
+    <br><strong>Bigger:</strong> Compute the new page number/count with checked arithmetic, extend,
+    write the zero page, then mark the in-memory header dirty.
+    <br><strong>Technique:</strong> <code>sync</code> persists dirty frames and the encoded metadata
+    page before calling the backend synchronization request. This gives clean reopen behavior only;
+    Phase 5 supplies atomic publication.</div></details>
 
   <h2>Definition of Done</h2>
   <ul>
-    <li>☐ All four tests pass against <code>MemBlock</code> (and your <code>FileBlock</code> via a
-    temp-file test you add).</li>
-    <li>☐ Header is big-endian, written field-by-field (no <code>transmute</code>).</li>
-    <li>☐ Eviction never loses a dirty page and never evicts a pinned page.</li>
-    <li>☐ You can state, for any byte, whether it is cached-clean, cached-dirty, written, or synced.</li>
-    <li>☐ You documented your borrow-design choice for <code>get_page</code>/<code>modify_page</code>.</li>
+    <li>☐ The eight supplied tests pass unchanged, plus your <code>FileBlock</code> reopen test.</li>
+    <li>☐ All on-disk integers use explicit big-endian encoding and checked arithmetic.</li>
+    <li>☐ Public data access rejects pages 0 and 1 and never reads past <code>page_count</code>.</li>
+    <li>☐ Dirty eviction is documented as a temporary pre-WAL rule, not a crash-safe commit.</li>
+    <li>☐ Bad headers and length mismatches return typed errors rather than panicking.</li>
+    <li>☐ You can identify whether a byte is only cached, written to the backend, or synchronized.</li>
     <li>☐ <strong>You wrote every implementation line yourself.</strong></li>
   </ul>
 
   <div class="box deeper">
     <div class="box-title">📚 Source anchors</div>
-    <p>Recheck the <a href="https://www.sqlite.org/fileformat2.html">SQLite header layout</a>,
-    <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>sync_all</code></a>,
-    and <a href="https://doc.rust-lang.org/std/primitive.u32.html#method.to_be_bytes">big-endian
-    encoding</a> while implementing.</p>
+    <p>Recheck the <a href="https://www.sqlite.org/fileformat2.html">SQLite file-format principles</a>,
+    Rust's <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>File::sync_all</code></a>,
+    <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.set_len"><code>File::set_len</code></a>,
+    and <a href="https://doc.rust-lang.org/std/primitive.u32.html#method.to_be_bytes">explicit
+    big-endian encoding</a>. The 32-byte MiniDB header above is this curriculum's design, not
+    SQLite's format.</p>
   </div>
 
   <div class="pager" id="pager"></div>

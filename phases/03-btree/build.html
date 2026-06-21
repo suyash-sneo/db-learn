@@ -11,222 +11,359 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › Build</div>
   <span class="pill">Build · AI off</span>
-  <h1>Build: a persistent B+tree on the pager</h1>
-  <div class="goal"><b>Goal:</b> Implement an ordered map from byte-string keys to byte-string values,
-  stored as a B+tree whose nodes are pages from your Phase 2 pager: get, insert (with split), delete
-  (with merge/borrow), and an ordered range scan.</div>
+  <h1>Build: persistent B+tree search, insert, and range scan</h1>
+  <div class="goal"><b>Goal:</b> Build an ordered byte-string map whose nodes live in Phase 2 pager
+  pages. Implement an exact node codec, point lookup, duplicate-key replacement, byte-aware leaf and
+  internal splits, root growth, persistence, and inclusive range scan.</div>
 
   <div class="box warn">
     <div class="box-title">⚠️ AI off</div>
-    <p>The B+tree is the core index — per the project rules there is no worked implementation here, only
-    contracts, stubs, failing tests, and graduated hints. Use the lessons, the SQLite file-format spec,
-    and the compiler. Splitting and balancing are exactly the skills being tested; do not have an AI
-    write them.</p>
+    <p>The B+tree is a prohibited solution component. This page defines the format and behavior, then
+    supplies only <code>todo!()</code> stubs, failing tests, and graduated hints. You write every
+    encoding, search, and split operation.</p>
   </div>
 
-  <h2>Deliverable</h2>
-  <p>A Rust 2024 module <code>btree</code> built on the Phase 2 <code>pager</code> crate (as a path or
-  workspace dependency). It exposes an ordered key/value map persisted in a single file.</p>
+  <h2>Scope</h2>
+  <p>This build requires <code>get</code>, <code>insert</code>, and inclusive <code>range</code>.
+  Inserting an existing key replaces its value and returns the previous value. Full B+tree deletion,
+  redistribution, merge, and root shrink are <strong>not</strong> part of this milestone; lesson 3.6
+  provides the later design vocabulary. Overflow values arrive in Phase 4.</p>
 
-  <h2>Fixed design decisions</h2>
+  <h2>Required Phase 2 contract</h2>
+  <p>Use the reviewed pager API: <code>PageNo = u32</code>, page 1 reserved for metadata,
+  <code>read_page</code> returns owned bytes, <code>modify_page</code> edits through a closure,
+  <code>allocate_page</code> returns a zeroed data page, and the header exposes
+  <code>root_page</code>/<code>set_root_page</code>. Do not extend page 1 again.</p>
+
+  <h2>Exact node format</h2>
+  <p>All integers are big-endian. Every node occupies one complete pager page. Bytes not used by the
+  encoded node are zero. The 16-byte header is:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Offset</th><th>Bytes</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td>1</td><td>tag: 1 leaf, 2 internal</td></tr>
+      <tr><td>1</td><td>1</td><td>reserved, must be zero</td></tr>
+      <tr><td>2</td><td>2</td><td>entry/separator count</td></tr>
+      <tr><td>4</td><td>2</td><td>end of slot array (<code>free_start</code>)</td></tr>
+      <tr><td>6</td><td>2</td><td>start of cell-content area (<code>cell_start</code>)</td></tr>
+      <tr><td>8</td><td>4</td><td>leaf: next leaf or 0; internal: rightmost child</td></tr>
+      <tr><td>12</td><td>4</td><td>reserved, must be zero</td></tr>
+    </tbody>
+  </table>
+  </div>
   <ul>
-    <li>Keys and values are <code>&amp;[u8]</code>. Order is lexicographic byte order (<code>[u8]</code>'s
-    natural <code>Ord</code>).</li>
-    <li>Two node types (leaf, internal) with a 1-byte type tag, stored as slotted pages in a pager page.</li>
-    <li><strong>Bound key+value sizes</strong> so any single entry fits in a page with room to split
-    (e.g. an entry may be at most ¼ of usable page space). Oversized entries return a typed error;
-    overflow pages are deferred to Phase 4. Document this limit.</li>
-    <li>The root page number is stored in the file header (extend your Phase 2 header with a 4-byte
-    "root page" field, or keep it in a dedicated metadata page).</li>
-    <li>Separator convention (write it as a comment and never deviate): child <code>cᵢ</code> holds keys
-    <code>&lt; kᵢ</code>; rightmost child holds keys <code>≥</code> the last separator.</li>
+    <li>Immediately after the header are sorted 2-byte cell offsets, one per entry/separator.</li>
+    <li>Leaf cell: <code>key_len:u16 | value_len:u16 | key | value</code>.</li>
+    <li>Internal cell: <code>left_child:u32 | key_len:u16 | separator_key</code>. The header stores
+    the final/rightmost child.</li>
+    <li>Leaf keys and internal separators are strictly increasing.</li>
+    <li>Internal invariant: <code>children.len() == separators.len() + 1</code>.</li>
+    <li>Separator <code>separators[i]</code> equals the smallest key reachable from
+    <code>children[i + 1]</code>. Therefore
+    <code>c₀: K&lt;k₀</code>, <code>cᵢ: kᵢ₋₁≤K&lt;kᵢ</code>, and
+    <code>cₙ: K≥kₙ₋₁</code>.</li>
+  </ul>
+
+  <h2>Size and split rules</h2>
+  <ul>
+    <li>For a leaf entry, <code>needed = 2-byte slot + 4-byte lengths + key bytes + value bytes</code>.
+    Reject it when <code>needed &gt; (page_size − 16) / 4</code>. This project limit is intentionally
+    conservative so one entry cannot consume most of a page.</li>
+    <li>A node fits only when its complete encoded representation—including header, slots, lengths,
+    child pointers, keys, and values—fits in one page.</li>
+    <li>When a variable-size node overflows, choose a split boundary near half of the encoded bytes,
+    not merely half of the entry count. Both halves must be nonempty and encodable.</li>
+    <li>Leaf split: right leaf receives the upper entries; repair next links; copy the right leaf's
+    first key into the parent.</li>
+    <li>Internal split: promote one separator; left/right nodes retain the children and separators on
+    either side. Check the invariant after constructing both nodes.</li>
   </ul>
 
   <h2>Ordered milestones</h2>
   <ol>
-    <li><strong>M1 — Node codec.</strong> Encode/decode a leaf and an internal node to/from a page's
-    bytes (slotted layout). Round-trip tested in isolation.</li>
-    <li><strong>M2 — Search.</strong> <code>get(key)</code>: descend internal nodes, binary-search the
-    leaf. Build the root-to-leaf path stack you'll reuse.</li>
-    <li><strong>M3 — Insert, no split.</strong> Insert into a leaf with room; keep entries sorted.</li>
-    <li><strong>M4 — Leaf split.</strong> Split a full leaf, fix sibling links, copy a separator up;
-    handle the parent-has-room case.</li>
-    <li><strong>M5 — Internal split + new root.</strong> Propagate splits upward (move the median up);
-    grow a new root when the old root splits.</li>
-    <li><strong>M6 — Delete + rebalance.</strong> Remove from a leaf; borrow from a sibling or merge;
-    propagate; shrink the root when it has one child.</li>
-    <li><strong>M7 — Range scan.</strong> Iterate <code>[lo, hi]</code> in order via the leaf links.</li>
+    <li><strong>M1 — Owned node codec.</strong> Encode/decode <code>LeafNode</code> and
+    <code>InternalNode</code>; reject malformed offsets, lengths, tags, ordering, child counts, null
+    children, and pages whose fields overlap.</li>
+    <li><strong>M2 — Create/open.</strong> Create an empty leaf root and persist its page number in
+    Phase 2 metadata. Open validates that the stored root is an allocated data page and decodes it.</li>
+    <li><strong>M3 — Search.</strong> At internal nodes choose
+    <code>partition_point(|sep| sep &lt;= key)</code>; binary-search leaves.</li>
+    <li><strong>M4 — Insert/replace without split.</strong> Preserve strict key order. Existing key
+    replacement returns the previous value without creating a duplicate.</li>
+    <li><strong>M5 — Leaf split.</strong> Select a byte-aware boundary, create the right page, repair
+    leaf links, and propagate the copied separator.</li>
+    <li><strong>M6 — Internal split/root growth.</strong> Propagate upward using an owned path stack;
+    when the old root splits, allocate and publish a new root.</li>
+    <li><strong>M7 — Range/persistence.</strong> Descend once to <code>lo</code>, follow next-leaf
+    links through <code>hi</code>, then sync and reopen through the pager metadata.</li>
   </ol>
 
   <h2>Acceptance criteria</h2>
   <ul>
-    <li>All Rust tests below pass.</li>
-    <li>Inserting many keys in random order, then reading them all back, returns every value (split
-    correctness).</li>
-    <li>A range scan returns keys in sorted order and exactly the keys in range.</li>
-    <li>After deleting half the keys (random order), the remaining keys are all still found and the
-    deleted ones are absent (merge/borrow correctness).</li>
-    <li>The tree survives close+reopen: persist, drop, reopen from the file, and all data is intact
-    (assuming a <code>sync</code> before drop).</li>
-    <li>An over-limit entry returns the typed <code>EntryTooLarge</code> error (tested).</li>
+    <li>All supplied tests pass unchanged.</li>
+    <li>Malformed node pages return <code>Corrupt</code>; decoding never panics on arbitrary bytes.</li>
+    <li>Random-order insertion forces leaf/internal/root splits and every inserted value is found.</li>
+    <li>Duplicate insertion replaces exactly one value and preserves one key.</li>
+    <li>Inclusive range output is strictly sorted, contains exactly the requested keys, and follows
+    leaf links after the initial descent.</li>
+    <li>Sync plus reopen preserves root metadata and data.</li>
+    <li>Manual integration check: repeat persistence with <code>FileBlock</code> and a unique temporary
+    path. Phase 3 still claims only clean-restart persistence, not crash atomicity.</li>
   </ul>
 
-  <h2>Stub: <code>src/btree.rs</code></h2>
+  <h2>Stubs: <code>src/btree.rs</code></h2>
   <span class="code-label">src/btree.rs — implement every todo!()</span>
-<pre><code><span class="tok-k">use</span> pager::{Pager, BlockIo};
+<pre><code><span class="tok-k">use</span> pager::{BlockIo, PageNo, Pager};
+
+<span class="tok-k">const</span> <span class="tok-f">TAG_LEAF</span>: <span class="tok-f">u8</span> = 1;
+<span class="tok-k">const</span> <span class="tok-f">TAG_INTERNAL</span>: <span class="tok-f">u8</span> = 2;
+<span class="tok-k">const</span> <span class="tok-f">NODE_HEADER_LEN</span>: <span class="tok-f">usize</span> = 16;
 
 <span class="tok-m">#[derive(Debug)]</span>
 <span class="tok-k">pub enum</span> <span class="tok-f">BTreeError</span> {
     Pager(pager::PagerError),
     EntryTooLarge { needed: <span class="tok-f">usize</span>, max: <span class="tok-f">usize</span> },
+    NodeTooLarge { needed: <span class="tok-f">usize</span>, page_size: <span class="tok-f">usize</span> },
     Corrupt(&amp;<span class="tok-k">'static</span> <span class="tok-f">str</span>),
 }
 <span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;pager::PagerError&gt; <span class="tok-k">for</span> <span class="tok-f">BTreeError</span> {
-    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: pager::PagerError) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">BTreeError</span>::<span class="tok-f">Pager</span>(e) }
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: pager::PagerError) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">Self</span>::<span class="tok-f">Pager</span>(e) }
 }
-<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">BTreeError</span>&gt;;
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; =
+    std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">BTreeError</span>&gt;;
 
-<span class="tok-k">const</span> <span class="tok-f">TAG_LEAF</span>: <span class="tok-f">u8</span> = 1;
-<span class="tok-k">const</span> <span class="tok-f">TAG_INTERNAL</span>: <span class="tok-f">u8</span> = 2;
+<span class="tok-m">#[derive(Debug, Clone, PartialEq, Eq)]</span>
+<span class="tok-k">struct</span> <span class="tok-f">LeafNode</span> {
+    next: <span class="tok-f">PageNo</span>, <span class="tok-c">// 0 means end of leaf chain</span>
+    entries: <span class="tok-f">Vec</span>&lt;(<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;, <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;)&gt;,
+}
 
-<span class="tok-c">// Decoded views over a page's bytes. Encode/decode is M1.</span>
-<span class="tok-k">struct</span> <span class="tok-f">Leaf</span>&lt;<span class="tok-f">'p</span>&gt; { bytes: &amp;<span class="tok-f">'p</span> <span class="tok-k">mut</span> [<span class="tok-f">u8</span>] }
-<span class="tok-k">struct</span> <span class="tok-f">Internal</span>&lt;<span class="tok-f">'p</span>&gt; { bytes: &amp;<span class="tok-f">'p</span> <span class="tok-k">mut</span> [<span class="tok-f">u8</span>] }
+<span class="tok-m">#[derive(Debug, Clone, PartialEq, Eq)]</span>
+<span class="tok-k">struct</span> <span class="tok-f">InternalNode</span> {
+    children: <span class="tok-f">Vec</span>&lt;<span class="tok-f">PageNo</span>&gt;,
+    separators: <span class="tok-f">Vec</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt;,
+}
+
+<span class="tok-m">#[derive(Debug, Clone, PartialEq, Eq)]</span>
+<span class="tok-k">enum</span> <span class="tok-f">Node</span> {
+    Leaf(<span class="tok-f">LeafNode</span>),
+    Internal(<span class="tok-f">InternalNode</span>),
+}
+
+<span class="tok-k">fn</span> <span class="tok-f">encoded_len</span>(node: &amp;<span class="tok-f">Node</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">usize</span>&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: checked header + slots + complete cell sizes"</span>)
+}
+
+<span class="tok-k">fn</span> <span class="tok-f">encode_node</span>(node: &amp;<span class="tok-f">Node</span>, page_size: <span class="tok-f">usize</span>)
+    -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: validate invariants; write header, sorted slots, and back-growing cells"</span>)
+}
+
+<span class="tok-k">fn</span> <span class="tok-f">decode_node</span>(page: &amp;[<span class="tok-f">u8</span>], page_count: <span class="tok-f">u32</span>)
+    -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Node</span>&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: validate every range before slicing; reject malformed ordering/children"</span>)
+}
 
 <span class="tok-k">pub struct</span> <span class="tok-f">BTree</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; {
     pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;,
-    root: <span class="tok-f">u64</span>,
+    root: <span class="tok-f">PageNo</span>,
 }
 
 <span class="tok-k">impl</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; <span class="tok-f">BTree</span>&lt;<span class="tok-f">B</span>&gt; {
     <span class="tok-k">pub fn</span> <span class="tok-f">create</span>(<span class="tok-k">mut</span> pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"allocate an empty leaf as the root; store its page no in the header"</span>)
-    }
-    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;, root: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">BTree</span> { pager, root } }
-
-    <span class="tok-k">pub fn</span> <span class="tok-f">get</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Option</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: descend to leaf, binary search"</span>)
-    }
-    <span class="tok-k">pub fn</span> <span class="tok-f">insert</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;[<span class="tok-f">u8</span>], val: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M3-M5: find leaf; insert; split + propagate; grow root if needed"</span>)
-    }
-    <span class="tok-k">pub fn</span> <span class="tok-f">delete</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">bool</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: remove; borrow/merge; propagate; shrink root"</span>)
-    }
-    <span class="tok-k">pub fn</span> <span class="tok-f">range</span>(&amp;<span class="tok-k">mut self</span>, lo: &amp;[<span class="tok-f">u8</span>], hi: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;(<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;, <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;)&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M7: descend to lo, walk leaf links until key &gt; hi"</span>)
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: require root=0; allocate/encode empty leaf; set pager root"</span>)
     }
 
-    <span class="tok-k">fn</span> <span class="tok-f">max_entry_bytes</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">usize</span> {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"usable page space / 4, used to reject oversized entries"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(<span class="tok-k">mut</span> pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: read root from metadata; validate allocated data page and decode it"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">root_page</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">PageNo</span> { <span class="tok-k">self</span>.root }
+    <span class="tok-k">pub fn</span> <span class="tok-f">into_pager</span>(<span class="tok-k">self</span>) -&gt; <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt; { <span class="tok-k">self</span>.pager }
+
+    <span class="tok-k">fn</span> <span class="tok-f">read_node</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">PageNo</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Node</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: pager.read_page then decode_node"</span>)
+    }
+
+    <span class="tok-k">fn</span> <span class="tok-f">write_node</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">PageNo</span>, node: &amp;<span class="tok-f">Node</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: encode owned bytes then copy them through pager.modify_page"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">get</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;[<span class="tok-f">u8</span>])
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Option</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: exact separator convention; binary-search leaf"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">insert</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;[<span class="tok-f">u8</span>], value: &amp;[<span class="tok-f">u8</span>])
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Option</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4–M6: replace or insert; split by bytes; propagate; publish new root"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">range</span>(&amp;<span class="tok-k">mut self</span>, lo: &amp;[<span class="tok-f">u8</span>], hi: &amp;[<span class="tok-f">u8</span>])
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;(<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;, <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;)&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M7: empty if lo&gt;hi; descend once; follow leaf links through inclusive hi"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M7: delegate to pager.sync and map the error"</span>)
     }
 }</code></pre>
 
   <h2>Failing tests</h2>
-  <span class="code-label">append to src/btree.rs (uses pager::MemBlock)</span>
+  <span class="code-label">append as an inline unit-test module in src/btree.rs</span>
 <pre><code><span class="tok-m">#[cfg(test)]</span>
 <span class="tok-k">mod</span> tests {
     <span class="tok-k">use super</span>::*;
     <span class="tok-k">use</span> pager::MemBlock;
 
     <span class="tok-k">fn</span> <span class="tok-f">fresh</span>() -&gt; <span class="tok-f">BTree</span>&lt;<span class="tok-f">MemBlock</span>&gt; {
-        <span class="tok-k">let</span> pager = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() }, 4096, 64).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> pager = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, 8).<span class="tok-f">unwrap</span>();
         <span class="tok-f">BTree</span>::<span class="tok-f">create</span>(pager).<span class="tok-f">unwrap</span>()
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">insert_get_roundtrip_forces_splits</span>() {
-        <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
-        <span class="tok-k">let</span> n = 5000u32;
-        <span class="tok-c">// pseudo-random order via a simple LCG so a split cascade happens</span>
-        <span class="tok-k">let mut</span> x = 1u32;
-        <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..n {
-            x = x.<span class="tok-f">wrapping_mul</span>(1664525).<span class="tok-f">wrapping_add</span>(1013904223);
-            <span class="tok-k">let</span> k = x.<span class="tok-f">to_be_bytes</span>();
-            t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>();
+    <span class="tok-k">fn</span> <span class="tok-f">node_codec_roundtrips_both_types</span>() {
+        <span class="tok-k">let</span> leaf = <span class="tok-f">Node</span>::<span class="tok-f">Leaf</span>(<span class="tok-f">LeafNode</span> {
+            next: 9,
+            entries: <span class="tok-f">vec!</span>[
+                (b<span class="tok-s">"a"</span>.<span class="tok-f">to_vec</span>(), b<span class="tok-s">"one"</span>.<span class="tok-f">to_vec</span>()),
+                (b<span class="tok-s">"z"</span>.<span class="tok-f">to_vec</span>(), b<span class="tok-s">"two"</span>.<span class="tok-f">to_vec</span>()),
+            ],
+        });
+        <span class="tok-k">let</span> internal = <span class="tok-f">Node</span>::<span class="tok-f">Internal</span>(<span class="tok-f">InternalNode</span> {
+            children: <span class="tok-f">vec!</span>[2, 3, 4],
+            separators: <span class="tok-f">vec!</span>[b<span class="tok-s">"m"</span>.<span class="tok-f">to_vec</span>(), b<span class="tok-s">"t"</span>.<span class="tok-f">to_vec</span>()],
+        });
+        <span class="tok-k">for</span> node <span class="tok-k">in</span> [leaf, internal] {
+            <span class="tok-k">let</span> page = <span class="tok-f">encode_node</span>(&amp;node, 4096).<span class="tok-f">unwrap</span>();
+            <span class="tok-m">assert_eq!</span>(<span class="tok-f">decode_node</span>(&amp;page, 20).<span class="tok-f">unwrap</span>(), node);
         }
-        x = 1;
-        <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..n {
-            x = x.<span class="tok-f">wrapping_mul</span>(1664525).<span class="tok-f">wrapping_add</span>(1013904223);
-            <span class="tok-k">let</span> k = x.<span class="tok-f">to_be_bytes</span>();
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">decoder_rejects_arbitrary_non_node_page</span>() {
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(
+            <span class="tok-f">decode_node</span>(&amp;<span class="tok-f">vec!</span>[0u8; 4096], 10),
+            <span class="tok-f">Err</span>(<span class="tok-f">BTreeError</span>::<span class="tok-f">Corrupt</span>(_))
+        ));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">random_order_insert_get_forces_split_cascades</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let mut</span> keys = (0u32..5000).<span class="tok-f">collect</span>::&lt;<span class="tok-f">Vec</span>&lt;_&gt;&gt;();
+        keys.<span class="tok-f">sort_by_key</span>(|x| x.<span class="tok-f">wrapping_mul</span>(2654435761));
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> &amp;keys {
+            <span class="tok-k">let</span> k = i.<span class="tok-f">to_be_bytes</span>();
+            <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>(), <span class="tok-f">None</span>);
+        }
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..5000 {
+            <span class="tok-k">let</span> k = i.<span class="tok-f">to_be_bytes</span>();
             <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">get</span>(&amp;k).<span class="tok-f">unwrap</span>().<span class="tok-f">as_deref</span>(), <span class="tok-f">Some</span>(&amp;k[..]));
         }
+        <span class="tok-m">assert_ne!</span>(t.<span class="tok-f">root_page</span>(), 2); <span class="tok-c">// the original leaf root split</span>
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">range_is_sorted_and_bounded</span>() {
+    <span class="tok-k">fn</span> <span class="tok-f">duplicate_key_replaces_without_duplicate</span>() {
         <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
-        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..1000 { <span class="tok-k">let</span> k = i.<span class="tok-f">to_be_bytes</span>(); t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>(); }
-        <span class="tok-k">let</span> out = t.<span class="tok-f">range</span>(&amp;100u32.<span class="tok-f">to_be_bytes</span>(), &amp;200u32.<span class="tok-f">to_be_bytes</span>()).<span class="tok-f">unwrap</span>();
-        <span class="tok-m">assert_eq!</span>(out.<span class="tok-f">len</span>(), 101); <span class="tok-c">// 100..=200 inclusive</span>
-        <span class="tok-m">assert!</span>(out.<span class="tok-f">windows</span>(2).<span class="tok-f">all</span>(|w| w[0].0 &lt; w[1].0)); <span class="tok-c">// sorted, strictly increasing keys</span>
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">insert</span>(b<span class="tok-s">"k"</span>, b<span class="tok-s">"old"</span>).<span class="tok-f">unwrap</span>(), <span class="tok-f">None</span>);
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">insert</span>(b<span class="tok-s">"k"</span>, b<span class="tok-s">"new"</span>).<span class="tok-f">unwrap</span>(), <span class="tok-f">Some</span>(b<span class="tok-s">"old"</span>.<span class="tok-f">to_vec</span>()));
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">range</span>(b<span class="tok-s">"k"</span>, b<span class="tok-s">"k"</span>).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[(b<span class="tok-s">"k"</span>.<span class="tok-f">to_vec</span>(), b<span class="tok-s">"new"</span>.<span class="tok-f">to_vec</span>())]);
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">delete_then_search_forces_merges</span>() {
+    <span class="tok-k">fn</span> <span class="tok-f">range_is_inclusive_sorted_and_exact</span>() {
         <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
-        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..2000 { <span class="tok-k">let</span> k = i.<span class="tok-f">to_be_bytes</span>(); t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>(); }
-        <span class="tok-k">for</span> i <span class="tok-k">in</span> (0u32..2000).<span class="tok-f">step_by</span>(2) { <span class="tok-m">assert!</span>(t.<span class="tok-f">delete</span>(&amp;i.<span class="tok-f">to_be_bytes</span>()).<span class="tok-f">unwrap</span>()); }
-        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..2000 {
-            <span class="tok-k">let</span> got = t.<span class="tok-f">get</span>(&amp;i.<span class="tok-f">to_be_bytes</span>()).<span class="tok-f">unwrap</span>().<span class="tok-f">is_some</span>();
-            <span class="tok-m">assert_eq!</span>(got, i % 2 == 1); <span class="tok-c">// odds remain, evens gone</span>
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..1000 {
+            <span class="tok-k">let</span> k = i.<span class="tok-f">to_be_bytes</span>();
+            t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>();
         }
+        <span class="tok-k">let</span> out = t.<span class="tok-f">range</span>(&amp;100u32.<span class="tok-f">to_be_bytes</span>(), &amp;200u32.<span class="tok-f">to_be_bytes</span>()).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(out.<span class="tok-f">len</span>(), 101);
+        <span class="tok-m">assert!</span>(out.<span class="tok-f">windows</span>(2).<span class="tok-f">all</span>(|w| w[0].0 &lt; w[1].0));
+        <span class="tok-m">assert_eq!</span>(out.<span class="tok-f">first</span>().<span class="tok-f">unwrap</span>().0.<span class="tok-f">as_slice</span>(), &amp;100u32.<span class="tok-f">to_be_bytes</span>());
+        <span class="tok-m">assert_eq!</span>(out.<span class="tok-f">last</span>().<span class="tok-f">unwrap</span>().0.<span class="tok-f">as_slice</span>(), &amp;200u32.<span class="tok-f">to_be_bytes</span>());
+        <span class="tok-m">assert!</span>(t.<span class="tok-f">range</span>(b<span class="tok-s">"z"</span>, b<span class="tok-s">"a"</span>).<span class="tok-f">unwrap</span>().<span class="tok-f">is_empty</span>());
     }
 
     <span class="tok-m">#[test]</span>
     <span class="tok-k">fn</span> <span class="tok-f">rejects_oversized_entry</span>() {
         <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
-        <span class="tok-k">let</span> big = <span class="tok-f">vec!</span>[0u8; 4096];
-        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(t.<span class="tok-f">insert</span>(b<span class="tok-s">"k"</span>, &amp;big), <span class="tok-f">Err</span>(<span class="tok-f">BTreeError</span>::<span class="tok-f">EntryTooLarge</span> { .. })));
+        <span class="tok-k">let</span> big = <span class="tok-f">vec!</span>[0u8; 2048];
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(
+            t.<span class="tok-f">insert</span>(b<span class="tok-s">"k"</span>, &amp;big),
+            <span class="tok-f">Err</span>(<span class="tok-f">BTreeError</span>::<span class="tok-f">EntryTooLarge</span> { .. })
+        ));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">sync_and_reopen_preserve_root_and_values</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..2000 {
+            <span class="tok-k">let</span> k = i.<span class="tok-f">to_be_bytes</span>();
+            t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>();
+        }
+        <span class="tok-k">let</span> root = t.<span class="tok-f">root_page</span>();
+        t.<span class="tok-f">sync</span>().<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> io = t.<span class="tok-f">into_pager</span>().<span class="tok-f">into_inner</span>();
+        <span class="tok-k">let</span> pager = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(io, 8).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let mut</span> reopened = <span class="tok-f">BTree</span>::<span class="tok-f">open</span>(pager).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">root_page</span>(), root);
+        <span class="tok-m">assert_eq!</span>(reopened.<span class="tok-f">get</span>(&amp;1777u32.<span class="tok-f">to_be_bytes</span>()).<span class="tok-f">unwrap</span>(), <span class="tok-f">Some</span>(1777u32.<span class="tok-f">to_be_bytes</span>().<span class="tok-f">to_vec</span>()));
     }
 }</code></pre>
-  <p class="src">A persistence test (close + reopen) belongs in an integration test under
-  <code>tests/</code> using a temp file + <code>FileBlock</code>; remember <code>use super::*</code>
-  works inline but an integration test must import your crate by name.</p>
 
   <h2>Stuck? — graduated hints</h2>
-  <details><summary>M1: how do I store variable-length entries in a page?</summary><div class="answer">
-    <strong>Nudge:</strong> Re-read 3.3 — sorted slot array at the front, cells at the back.
-    <br><strong>Bigger:</strong> Each slot is a 2-byte offset to a cell; the header tracks count and the
-    start of free space.
-    <br><strong>Technique:</strong> keep slots sorted by key; to insert, shift slots (cheap) and place
-    the cell wherever it fits (Phase 4 adds compaction).</div></details>
+  <details><summary>M1: decoder safety</summary><div class="answer">
+    <strong>Nudge:</strong> Treat every on-disk offset and length as hostile.
+    <br><strong>Bigger:</strong> Validate header size, tag, reserved bytes, slot-array end, cell-area
+    start, every slot offset, and every checked cell end before slicing.
+    <br><strong>Technique:</strong> decode into owned vectors only after all bounds for that field are
+    proven; finish by checking strict key order and internal child invariants.</div></details>
 
-  <details><summary>M4/M5: my keys go missing after splits</summary><div class="answer">
-    <strong>Nudge:</strong> Leaf split copies the separator up; internal split moves the median up
-    (3.5).
-    <br><strong>Bigger:</strong> Verify your separator convention is identical in <code>get</code> and in
-    split.
-    <br><strong>Technique:</strong> after each split, assert the parent's separators still partition the
-    children correctly before descending in a test.</div></details>
+  <details><summary>M3: equal separator keys go to the wrong child</summary><div class="answer">
+    <strong>Nudge:</strong> The right child owns keys equal to its minimum separator.
+    <br><strong>Bigger:</strong> Count separators <code>≤ key</code>, not separators
+    <code>&lt; key</code>.
+    <br><strong>Technique:</strong> <code>partition_point(|sep| sep.as_slice() &lt;= key)</code>.</div></details>
 
-  <details><summary>M5: borrow-checker fights me passing pages up the path</summary><div class="answer">
-    <strong>Nudge:</strong> You can't hold mutable borrows of two pages from the same pager at once.
-    <br><strong>Technique:</strong> work one page at a time — read a node into an owned buffer, mutate,
-    write it back via the pager, then move to the parent using the path stack from M2. Avoid holding two
-    live page borrows simultaneously.</div></details>
+  <details><summary>M5: choosing a split by count still overflows</summary><div class="answer">
+    <strong>Nudge:</strong> Two entries can have very different encoded sizes.
+    <br><strong>Bigger:</strong> Evaluate candidate boundaries using the same complete
+    <code>encoded_len</code> calculation used by the codec.
+    <br><strong>Technique:</strong> choose a nonempty boundary whose left/right byte totals are close
+    and whose two encodings both fit; do not duplicate encoding arithmetic in split code.</div></details>
 
-  <details><summary>M6: deletes corrupt the parent separator</summary><div class="answer">
-    <strong>Nudge:</strong> After borrow/merge the separator must describe the new boundary (3.6).
-    <br><strong>Technique:</strong> re-derive the separator from the children after redistribution rather
-    than patching it incrementally.</div></details>
+  <details><summary>M6: parent updates fight the borrow checker</summary><div class="answer">
+    <strong>Nudge:</strong> Do not hold page borrows while moving upward.
+    <br><strong>Bigger:</strong> Store owned path entries such as
+    <code>(parent_page_no, chosen_child_index)</code>.
+    <br><strong>Technique:</strong> decode one page into an owned <code>Node</code>, mutate/encode/write
+    it, drop that value, then load the next parent.</div></details>
 
   <h2>Definition of Done</h2>
   <ul>
-    <li>☐ All four unit tests pass plus a temp-file persistence integration test.</li>
-    <li>☐ Random-order insert of thousands of keys round-trips (splits proven).</li>
-    <li>☐ Range scan is sorted and exactly bounded.</li>
-    <li>☐ Delete with borrow/merge keeps the surviving keys correct.</li>
-    <li>☐ Separator convention is documented and identical across search/insert/delete.</li>
-    <li>☐ Oversized entries are rejected; the inline-only limitation is documented.</li>
+    <li>☐ All seven supplied tests pass unchanged.</li>
+    <li>☐ The codec rejects malformed bytes without panic and round-trips both node types.</li>
+    <li>☐ Separator intervals are written as a module comment and shared by search and split logic.</li>
+    <li>☐ Split selection uses complete encoded byte sizes.</li>
+    <li>☐ Duplicate keys replace; no leaf contains equal adjacent keys.</li>
+    <li>☐ Root growth is persisted through Phase 2 metadata and survives reopen.</li>
+    <li>☐ A separate <code>FileBlock</code> integration check passes.</li>
+    <li>☐ Full delete/rebalance is explicitly not claimed.</li>
     <li>☐ <strong>You wrote every implementation line yourself.</strong></li>
   </ul>
 
   <div class="box deeper">
     <div class="box-title">📚 Source anchors</div>
-    <p>Recheck the <a href="https://www.sqlite.org/fileformat2.html">slotted b-tree page layout (§1.6)</a>
-    and <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.binary_search_by"><code>binary_search_by</code></a>
-    while implementing. For the balance algorithm, re-read 3.5/3.6 and skim <a href="https://www.sqlite.org/src/file/src/btree.c">btree.c</a>'s <code>balance</code> for ideas only.</p>
+    <p>Use the <a href="https://www.sqlite.org/fileformat2.html">SQLite slotted B-tree page
+    specification</a> as a comparison, Rust slice
+    <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.partition_point"><code>partition_point</code></a>
+    for internal routing, and the pinned SQLite
+    <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>
+    only for source study. The MiniDB node layout above is its own format.</p>
   </div>
 
   <div class="pager" id="pager"></div>

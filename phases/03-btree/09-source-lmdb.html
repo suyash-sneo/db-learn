@@ -17,26 +17,35 @@
 
   <div class="box source">
     <div class="box-title">📂 Where to read</div>
-    <p>LMDB (Lightning Memory-Mapped Database, by Howard Chu / Symas) is a compact C B+tree engine; its
-    core is <code>mdb.c</code>. libmdbx is a hardened fork with extended docs. Both are good reads
-    because they are small and document their copy-on-write design.
-    <span class="src">[src: <a href="http://www.lmdb.tech/doc/">LMDB documentation (lmdb.tech)</a>; <a href="https://github.com/erthink/libmdbx">libmdbx repository</a>]</span>
-    <span class="verify-tag">⚠️VERIFY</span> precise LMDB internals against the source/design talk
-    before asserting exact structures; this page teaches the COW idea, which is the transferable part.</p>
+    <p>This lesson verifies LMDB itself at commit
+    <code>22a8571f4506f853a101506465893486cdea3776</code>. Its core implementation is
+    <code>libraries/liblmdb/mdb.c</code>. libmdbx is related and Isar v3 uses it, but this page does
+    not merge the two codebases' exact protocols.
+    <span class="src">[src: pinned LMDB
+    <a href="https://github.com/LMDB/lmdb/blob/22a8571f4506f853a101506465893486cdea3776/libraries/liblmdb/mdb.c"><code>mdb.c</code></a>;
+    <a href="http://www.lmdb.tech/doc/">LMDB API documentation</a>]</span></p>
   </div>
 
-  <h2>The big idea: never overwrite a live page</h2>
-  <p>LMDB's B+tree is <strong>copy-on-write</strong> (a.k.a. shadow paging). To modify a page, it does
-  not write in place. Instead it:</p>
+  <h2>The big idea: copy an older-snapshot page before changing it</h2>
+  <p>LMDB uses copy-on-write/shadow-paging behavior for pages from an older snapshot. In
+  <code>mdb_page_touch</code>, if the cursor's page is not mutable in the current transaction, LMDB
+  allocates a replacement page, records the old page for later reclamation, and updates either the
+  parent pointer or the database root to the replacement. It then copies the original page bytes into
+  the writable page.
+  <span class="src">[src: pinned LMDB
+  <a href="https://github.com/LMDB/lmdb/blob/22a8571f4506f853a101506465893486cdea3776/libraries/liblmdb/mdb.c"><code>mdb_page_touch</code></a>]</span>
+  Across a tree update, pages on the modified path are touched as needed:</p>
   <ol>
-    <li>Copies the page being modified to a brand-new, currently-free page.</li>
+    <li>Obtain a transaction-writable copy of the page being modified.</li>
     <li>Applies the change to the copy.</li>
-    <li>Because the copy has a new page number, its <em>parent</em> must now point to the new page — so
-    the parent is also copied and updated, and so on up to the root.</li>
-    <li>The transaction commits by writing a new root and a new "meta page" that points at it.</li>
+    <li>Update the parent pointer; when the changed page is the root, update the transaction's root
+    descriptor.</li>
+    <li>Commit the new database descriptors through one of the metadata pages after the data-page
+    write/synchronization steps required by the selected durability flags.</li>
   </ol>
-  <p>The old pages are untouched and still form a complete, consistent older version of the tree until
-  the new root is published.</p>
+  <p>A page already writable in the same transaction need not be copied again. Copy-on-write is
+  therefore not “rewrite the entire tree”; it preserves older reachable pages while publishing new
+  roots for changed paths.</p>
 
   <figure>
   <svg viewBox="0 0 560 200" role="img" aria-label="Copy-on-write copies the path from a changed leaf up to a new root">
@@ -51,19 +60,33 @@
     <rect class="dg-node-w" x="330" y="80" width="60" height="24" rx="4"/><text class="dg-txt-s" x="360" y="97" text-anchor="middle">int'</text>
     <rect class="dg-node-w" x="330" y="130" width="60" height="24" rx="4"/><text class="dg-txt-s" x="360" y="147" text-anchor="middle">leaf'</text>
     <path class="dg-edge-hot" d="M380,56 L365,78"/><path class="dg-edge-hot" d="M360,104 L360,128"/>
-    <text class="dg-txt-s" x="280" y="185" text-anchor="middle">commit = atomically publish the new meta/root pointer</text>
+    <text class="dg-txt-s" x="280" y="185" text-anchor="middle">commit publishes new roots through an alternating meta page</text>
   </svg>
   <figcaption>Only the root-to-leaf path is copied; the rest of the tree is shared with the old version.</figcaption>
   </figure>
 
-  <h2>What COW buys you</h2>
+  <h2>LMDB's two metadata pages</h2>
+  <p><code>mdb.c</code> defines <code>NUM_METAS</code> as 2 and states that pages 0–1 are metadata
+  pages; transaction <code>N</code> writes metadata page <code>N % 2</code>. Each
+  <code>MDB_meta</code> contains the free-space and main-database descriptors, the last page number,
+  and the transaction id that committed the metadata page.
+  <span class="src">[src: pinned LMDB
+  <a href="https://github.com/LMDB/lmdb/blob/22a8571f4506f853a101506465893486cdea3776/libraries/liblmdb/mdb.c"><code>NUM_METAS</code> and <code>MDB_meta</code></a>]</span>
+  On open, LMDB reads the metadata pages and selects the newer acceptable transaction id. Alternating
+  pages means one commit does not overwrite both metadata copies.</p>
+
+  <h2>What the complete protocol can buy you</h2>
   <ul>
-    <li><strong>Crash safety without a WAL.</strong> A crash mid-write leaves the old root and all old
-    pages intact; on restart you simply use the last fully-committed meta page. There is no journal to
-    replay.</li>
-    <li><strong>Cheap consistent snapshots / MVCC reads.</strong> A reader that pinned the old root keeps
-    seeing a consistent older version while a writer builds a new one — readers never block writers and
-    vice versa. LMDB uses exactly this for its single-writer, many-reader concurrency.</li>
+    <li><strong>Recovery without replaying a WAL.</strong> With the default ordered data/meta commit
+    path and its documented storage assumptions, an open chooses metadata for a committed snapshot
+    rather than replaying logical changes. Relaxed LMDB flags weaken synchronization behavior and must
+    be analyzed separately.</li>
+    <li><strong>Snapshot reads.</strong> A read transaction identifies a committed version while a
+    single writer creates new pages. Older pages cannot be reused until they are no longer needed by
+    readers, so reader tracking and free-page reclamation are essential parts of the design.
+    <span class="src">[src: LMDB
+    <a href="http://www.lmdb.tech/doc/starting.html">Getting Started — transactions and
+    concurrency</a>; pinned <code>mdb.c</code> free-space database]</span></li>
   </ul>
 
   <div class="box warn">
@@ -71,27 +94,28 @@
     <p>This is the lesson's whole point, and a common over-claim. Copy-on-write provides the
     <em>mechanism</em>, but you still must implement the protocol around it:</p>
     <ul>
-      <li><strong>Atomic root publication.</strong> Switching to the new root must itself be atomic and
-      correctly ordered with syncs, or a crash mid-publish corrupts everything. LMDB uses two meta pages
-      and writes them alternately, with sync ordering, so one is always valid.
-      <span class="verify-tag">⚠️VERIFY</span> the exact two-meta-page protocol against LMDB docs.</li>
-      <li><strong>Durability still needs fsync.</strong> Publishing a new root is only durable after the
-      relevant sync; COW does not remove the need for the durability ordering from 2.6.</li>
+      <li><strong>Root publication protocol.</strong> The new roots, transaction id, and last-page
+      boundary must be encoded and ordered so recovery can choose a usable metadata page.</li>
+      <li><strong>Durability policy.</strong> In the normal commit path,
+      <code>_mdb_txn_commit</code> flushes dirty pages, performs environment synchronization unless
+      disabled by flags, and then calls <code>mdb_env_write_meta</code>.
+      <span class="src">[src: pinned LMDB
+      <a href="https://github.com/LMDB/lmdb/blob/22a8571f4506f853a101506465893486cdea3776/libraries/liblmdb/mdb.c"><code>_mdb_txn_commit</code></a>]</span>
+      COW does not remove synchronization or storage assumptions.</li>
       <li><strong>Space reclamation.</strong> Old pages from no-longer-referenced versions must be put
-      back on a free list, or the file grows forever. LMDB maintains a free-page list keyed by the
-      transaction that freed them.</li>
-      <li><strong>Write amplification.</strong> Every change rewrites the whole root-to-leaf path, not
-      one page — a real cost for deep trees or tiny updates.</li>
+      into the free-space database and reused only when no relevant reader can still observe them.</li>
+      <li><strong>Write amplification.</strong> The first modification to an older page in a
+      transaction copies that page, and parent/root changes can copy additional path pages.</li>
     </ul>
   </div>
 
   <h2>COW vs WAL (and why this project uses WAL)</h2>
-  <p>COW (shadow paging) and write-ahead logging are two answers to the same question — "how do I make
-  an in-place B+tree crash-safe?" COW keeps old pages and atomically switches roots; WAL (Phase 5) logs
-  changes before applying them and replays on recovery. Both are valid. This curriculum builds a WAL
-  because it generalizes more directly to incremental durability and is the design SQLite uses, but COW
-  is a legitimate (and in some ways simpler) alternative you should understand. A future v2 of your
-  engine could adopt COW for snapshot isolation.</p>
+  <p>Shadow paging and write-ahead logging are two protocol families for publishing tree changes.
+  Shadow paging retains old reachable pages and publishes new roots. WAL records page versions before
+  the main database is updated; recovery can use committed log frames and checkpoint them later. Both
+  require explicit commit ordering, corruption checks, and reclamation. This curriculum implements WAL
+  in Phase 5 because that is the selected architecture, not because COW automatically supplies or
+  lacks a particular isolation level.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
@@ -100,11 +124,13 @@
       <details><summary>Show answer</summary><div class="answer">The copied leaf has a new page number, so
       its parent must point to the new page; that re-points cascades up to a new root.</div></details>
       <p class="q">2. How does COW give crash safety without a journal?</p>
-      <details><summary>Show answer</summary><div class="answer">Old pages and the old root stay intact;
-      a crash before publishing the new root just leaves the last committed version usable.</div></details>
+      <details><summary>Show answer</summary><div class="answer">Older reachable pages are preserved
+      while new pages are written, and recovery chooses an acceptable committed metadata snapshot.
+      That result depends on the full data/meta write and synchronization protocol, not COW alone.</div></details>
       <p class="q">3. Name two things COW does <em>not</em> provide automatically.</p>
       <details><summary>Show answer</summary><div class="answer">Any two of: atomic+ordered root
-      publication, fsync durability, free-page reclamation, low write amplification.</div></details>
+      publication ordering, durability synchronization, reader tracking, free-page reclamation, or low
+      write amplification.</div></details>
       <p class="q">4. Why might COW give cheap snapshots?</p>
       <details><summary>Show answer</summary><div class="answer">A reader holding an old root sees a
       complete, immutable older version while writers build new pages elsewhere.</div></details>
@@ -114,8 +140,11 @@
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Docs/Source:</strong> <a href="http://www.lmdb.tech/doc/">LMDB docs</a>, <a href="https://github.com/erthink/libmdbx">libmdbx</a> (design notes are extensive).</li>
-      <li><strong>Talk:</strong> Howard Chu's LMDB talks explain the two-meta-page commit. <span class="verify-tag">⚠️VERIFY</span> a specific talk/timestamp before citing.</li>
+      <li><strong>Source:</strong> pinned LMDB
+      <a href="https://github.com/LMDB/lmdb/blob/22a8571f4506f853a101506465893486cdea3776/libraries/liblmdb/mdb.c"><code>libraries/liblmdb/mdb.c</code></a>:
+      <code>mdb_page_touch</code>, <code>_mdb_txn_commit</code>, <code>mdb_env_write_meta</code>,
+      <code>mdb_env_read_header</code>, and <code>mdb_env_pick_meta</code>.</li>
+      <li><strong>Docs:</strong> <a href="http://www.lmdb.tech/doc/">LMDB API documentation</a>.</li>
       <li><strong>Forward link:</strong> Phase 5 builds the WAL alternative; Phase 7 revisits MVCC, which COW enables.</li>
     </ul>
   </div>

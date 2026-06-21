@@ -18,8 +18,10 @@
     <div class="box-title">📂 Where to read</div>
     <p>For Phase 4 the most authoritative reading is the <strong>file-format specification</strong> (it
     is the contract the code implements), backed by <code>src/btree.c</code> for the page-manipulation
-    routines.
-    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §1.5, §1.6, §2</a>; <a href="https://www.sqlite.org/src/file/src/btree.c">src/btree.c</a>]</span></p>
+    routines. Code links are pinned to SQLite 3.53.2, commit
+    <code>ccc132c5be20ab5c755c97a08d06b1b592fef330</code>.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §1.5, §1.6, §2</a>;
+    pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>src/btree.c</code></a>]</span></p>
   </div>
 
   <h2>Spec-confirmed facts to reuse</h2>
@@ -37,17 +39,24 @@
   </table>
   </div>
 
-  <h2>Code routines to grep (verify each name)</h2>
+  <h2>Verified code routines in SQLite 3.53.2</h2>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Concept</th><th>Look for in btree.c</th></tr></thead>
     <tbody>
-      <tr><td>Pack a fragmented page (compaction)</td><td><code>defragmentPage</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Allocate space within a page</td><td><code>allocateSpace</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Free space within a page (freeblocks)</td><td><code>freeSpace</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Allocate a whole page (freelist first)</td><td><code>allocateBtreePage</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Return a page to the freelist</td><td><code>freePage</code> / <code>freePage2</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Walk/clear an overflow chain</td><td><code>clearCell</code> / overflow handling <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Pack a fragmented page</td><td><code>defragmentPage</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
+      <tr><td>Allocate space within a page</td><td><code>allocateSpace</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
+      <tr><td>Return an in-page region to freeblocks</td><td><code>freeSpace</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
+      <tr><td>Allocate a whole B-tree page</td><td><code>allocateBtreePage</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
+      <tr><td>Return a page to the freelist</td><td><code>freePage</code> / <code>freePage2</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
+      <tr><td>Validate and free an overflow chain</td><td><code>clearCellOverflow</code> via
+      <code>BTREE_CLEAR_CELL</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
     </tbody>
   </table>
   </div>
@@ -58,9 +67,9 @@
 
   <div class="box warn">
     <div class="box-title">⚠️ Source dive discipline</div>
-    <p>These names are anchors to look up, not facts to trust — each carries a ⚠️VERIFY because the exact
-    current symbol/signature must be confirmed in the file. The spec sections, by contrast, are the
-    authoritative contract. When the build asks for a layout, cite the spec section, not this page.</p>
+    <p>The names above were checked at the pinned revision, but their internal contracts are still more
+    complex than this curriculum's format. The file-format specification is the authority for SQLite
+    bytes. The build's record-page and freelist layouts are explicitly different project choices.</p>
   </div>
 
   <div class="box check">
@@ -76,8 +85,8 @@
       <details><summary>Show answer</summary><div class="answer">The page number of the next overflow page,
       or 0 if it's the last in the chain.</div></details>
       <p class="q">4. Which routine corresponds to your 4.4 compaction?</p>
-      <details><summary>Show answer</summary><div class="answer"><code>defragmentPage</code> (verify against
-      the source) — it packs live cells to reclaim fragmented free space.</div></details>
+      <details><summary>Show answer</summary><div class="answer"><code>defragmentPage</code>—it packs
+      live cells to reclaim fragmented free space.</div></details>
     </div>
   </div>
 
@@ -85,7 +94,8 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">file format §1.5, §1.6, §2</a>.</li>
-      <li><strong>Source:</strong> <a href="https://www.sqlite.org/src/file/src/btree.c">btree.c</a>.</li>
+      <li><strong>Source:</strong> pinned SQLite 3.53.2
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>.</li>
       <li><strong>Forward link:</strong> the build assembles slotted pages + overflow + freelist into a record store.</li>
     </ul>
   </div>

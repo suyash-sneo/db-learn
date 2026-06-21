@@ -16,10 +16,14 @@
 
   <div class="box source">
     <div class="box-title">📂 Where to read</div>
-    <p>The B-tree layer is <code>src/btree.c</code> (with <code>btree.h</code> and
-    <code>btreeInt.h</code> for internals) in the public-domain SQLite tree. The on-disk layout it
-    produces is specified precisely in the file-format document §1.6.
-    <span class="src">[src: <a href="https://www.sqlite.org/src/file/src/btree.c">sqlite.org/src · src/btree.c</a>; <a href="https://www.sqlite.org/fileformat2.html">file format §1.6 "B-tree Pages"</a>]</span></p>
+    <p>The B-tree layer is <code>src/btree.c</code>, with public declarations in
+    <code>src/btree.h</code> and internal structures in <code>src/btreeInt.h</code>. Source links in
+    this lesson are pinned to SQLite 3.53.2, commit
+    <code>ccc132c5be20ab5c755c97a08d06b1b592fef330</code>. The on-disk layout is specified
+    separately in file-format §1.6.
+    <span class="src">[src: pinned SQLite
+    <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>src/btree.c</code></a>;
+    <a href="https://www.sqlite.org/fileformat2.html">file format §1.6</a>]</span></p>
     <p><strong>How to verify any claim below:</strong> open the file, search the symbol, read the comment.
     The §1.6 spec is the authority for byte layout; <code>btreeInt.h</code> is the authority for the data
     structures.</p>
@@ -39,24 +43,34 @@
     <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §1.6</a>]</span></li>
   </ul>
 
-  <h2>Concepts → symbols to grep (verify each)</h2>
+  <h2>Concepts → verified symbols in SQLite 3.53.2</h2>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Concept (3.2–3.6)</th><th>Look for</th></tr></thead>
     <tbody>
-      <tr><td>A position in the tree (search state)</td><td><code>BtCursor</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>In-memory page with parsed cells</td><td><code>MemPage</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Point search / move cursor</td><td><code>sqlite3BtreeMovetoUnpacked</code> / <code>moveToChild</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Insert an entry</td><td><code>sqlite3BtreeInsert</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Split / merge / redistribute</td><td>the <code>balance</code> family (<code>balance_nonroot</code>, <code>balance_deeper</code>, <code>balance_quick</code>) <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>A position in the tree (search state)</td><td><code>struct BtCursor</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btreeInt.h"><code>btreeInt.h</code></a>]</span></td></tr>
+      <tr><td>In-memory page with parsed cells</td><td><code>struct MemPage</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btreeInt.h"><code>btreeInt.h</code></a>]</span></td></tr>
+      <tr><td>Point search / move cursor</td><td><code>sqlite3BtreeTableMoveto</code>,
+      <code>sqlite3BtreeIndexMoveto</code>, and internal <code>moveToChild</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
+      <tr><td>Insert an entry</td><td><code>sqlite3BtreeInsert</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
+      <tr><td>Delete an entry</td><td><code>sqlite3BtreeDelete</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
+      <tr><td>Choose and perform balancing</td><td><code>balance</code>,
+      <code>balance_nonroot</code>, <code>balance_deeper</code>, <code>balance_quick</code>
+      <span class="src">[src: pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>]</span></td></tr>
     </tbody>
   </table>
   </div>
-  <p>SQLite's rebalancing is famously consolidated: instead of separate "split" and "merge" routines, a
-  <code>balance</code> routine redistributes cells across a node and its siblings, which can both split
-  (add a page) and merge (remove one). Reading how one routine subsumes both operations from 3.5 and 3.6
-  is the highlight of this dive. <span class="verify-tag">⚠️VERIFY</span> the exact routine names and
-  their division of labor against the current source.</p>
+  <p>The static <code>balance</code> dispatcher checks a modified cursor page and calls one of the
+  named balancing routines. <code>balance_nonroot</code> is the general sibling-redistribution path;
+  the source comments describe changing the number of pages as part of that work.
+  <code>balance_deeper</code> handles a root that must gain a child level, while
+  <code>balance_quick</code> is a specialized append case. Read their comments before mapping them to
+  textbook “split” or “merge”; SQLite's division of labor is more specific than those two labels.</p>
 
   <h2>What's different from your build (and fine to skip)</h2>
   <ul>
@@ -84,8 +98,9 @@
       <details><summary>Show answer</summary><div class="answer">A type byte at offset 0 (2/5/10/13); leaf
       headers are 8 bytes, interior 12 (extra right-most child pointer).</div></details>
       <p class="q">2. How does SQLite's <code>balance</code> relate to your split and merge?</p>
-      <details><summary>Show answer</summary><div class="answer">One redistribution routine covers both: it
-      can add a page (split) or remove one (merge) while rebalancing cells across siblings.</div></details>
+      <details><summary>Show answer</summary><div class="answer"><code>balance</code> dispatches to
+      specialized routines. The general non-root path redistributes cells among siblings and may
+      change how many pages represent them, covering effects analogous to textbook split or merge.</div></details>
       <p class="q">3. Where is the authoritative byte layout, vs the data structures?</p>
       <details><summary>Show answer</summary><div class="answer">The file-format §1.6 spec for on-disk
       bytes; <code>btreeInt.h</code> for in-memory structs like <code>MemPage</code>/<code>BtCursor</code>.</div></details>
@@ -98,7 +113,10 @@
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Source:</strong> <a href="https://www.sqlite.org/src/file/src/btree.c">btree.c</a>, <a href="https://www.sqlite.org/src/file/src/btreeInt.h">btreeInt.h</a>.</li>
+      <li><strong>Source:</strong> pinned SQLite 3.53.2
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>,
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.h"><code>btree.h</code></a>,
+      and <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btreeInt.h"><code>btreeInt.h</code></a>.</li>
       <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">file format §1.6</a>.</li>
       <li><strong>Forward link:</strong> 3.9 (a very different design: copy-on-write B+tree in LMDB), then the build.</li>
     </ul>

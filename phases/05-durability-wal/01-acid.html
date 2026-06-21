@@ -27,18 +27,21 @@
     <tbody>
       <tr><td><strong>Atomicity</strong></td><td>A transaction's changes are all applied or none are —
         no partial transaction is ever visible, even after a crash mid-write.</td><td>This phase (journal / WAL)</td></tr>
-      <tr><td><strong>Consistency</strong></td><td>A committed transaction takes the database from one
-        valid state to another (invariants like "every overflow chain terminates" hold).</td><td>Your code + atomicity; not a single mechanism</td></tr>
-      <tr><td><strong>Isolation</strong></td><td>Concurrent transactions don't see each other's
-        uncommitted state; the result is as if they ran in some serial order.</td><td>Phase 7 (locking / MVCC)</td></tr>
-      <tr><td><strong>Durability</strong></td><td>Once commit returns success, the change survives a
-        crash or power loss.</td><td>This phase (fsync of the log before commit)</td></tr>
+      <tr><td><strong>Consistency</strong></td><td>Application/schema and engine invariants are true
+        before commit and remain true afterward. Atomicity prevents a partial invariant update, but
+        does not invent or validate every business rule.</td><td>Transaction logic, validation, and atomicity</td></tr>
+      <tr><td><strong>Isolation</strong></td><td>Defines which effects concurrent transactions may
+        observe. Serializability is one strong level, not the definition of every isolation level.</td><td>Phase 7 policy (locking / MVCC)</td></tr>
+      <tr><td><strong>Durability</strong></td><td>Once a durable-mode commit returns success, the
+        change survives the crashes covered by the documented storage contract.</td><td>This phase's
+        ordered WAL synchronization protocol</td></tr>
     </tbody>
   </table>
   </div>
   <p>The classic ACID definition originates with Haerder &amp; Reuter's 1983 survey, which formalized
   the transaction guarantees databases are expected to provide.
-  <span class="src">[src: <a href="https://dl.acm.org/doi/10.1145/289.291">Haerder &amp; Reuter, "Principles of Transaction-Oriented Database Recovery", ACM Computing Surveys 15(4), 1983</a>]</span></p>
+  <span class="src">[src: <a href="https://doi.org/10.1145/289.291">Haerder &amp; Reuter,
+  "Principles of Transaction-Oriented Database Recovery", ACM Computing Surveys 15(4), 1983</a>]</span></p>
 
   <h2>Atomicity and durability are a pair</h2>
   <p>These two are what a crash-recovery mechanism provides, and they only mean something together:</p>
@@ -73,7 +76,8 @@
     <div class="checks">
       <p class="q">1. Which two ACID properties does this phase deliver, and which is deferred to Phase 7?</p>
       <details><summary>Show answer</summary><div class="answer">Atomicity and durability here; isolation
-      is Phase 7 (concurrency). Consistency emerges from atomicity plus your own invariant checks.</div></details>
+      is Phase 7 (concurrency). Consistency still depends on correct application/engine rules and
+      validation; atomicity only prevents a partial update from publishing.</div></details>
       <p class="q">2. Why are atomicity and durability useless without each other?</p>
       <details><summary>Show answer</summary><div class="answer">Durable-but-not-atomic could persist a
       half transaction; atomic-but-not-durable could lose a committed one on power loss. Commit must make
@@ -91,7 +95,7 @@
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Foundational:</strong> <a href="https://dl.acm.org/doi/10.1145/289.291">Haerder &amp; Reuter 1983</a> — origin of the ACID framing.</li>
+      <li><strong>Foundational:</strong> <a href="https://doi.org/10.1145/289.291">Haerder &amp; Reuter 1983</a> — origin of the ACID framing.</li>
       <li><strong>Practical:</strong> <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit"</a> — how one engine actually delivers atomicity + durability.</li>
       <li><strong>Forward link:</strong> 5.2 makes the crash model precise; 5.3–5.4 build the two mechanisms; Phase 7 adds isolation.</li>
     </ul>

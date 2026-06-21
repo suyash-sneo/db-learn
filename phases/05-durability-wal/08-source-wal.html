@@ -18,8 +18,10 @@
   <div class="box source">
     <div class="box-title">📂 Where to read</div>
     <p>The <strong>file-format spec §4</strong> defines the WAL bytes; <code>src/wal.c</code> implements
-    the read/append/recover/checkpoint logic.
-    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §4 "The Write-Ahead Log"</a>; <a href="https://www.sqlite.org/src/file/src/wal.c">src/wal.c</a>]</span></p>
+    the read/append/recover/checkpoint logic. Code links are pinned to SQLite 3.53.2, commit
+    <code>ccc132c5be20ab5c755c97a08d06b1b592fef330</code>.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §4</a>;
+    pinned <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/wal.c"><code>src/wal.c</code></a>]</span></p>
   </div>
 
   <h2>WAL header — 32 bytes (big-endian)</h2>
@@ -64,33 +66,35 @@
   rest of the chain, which is exactly what recovery uses to find the valid tail.
   <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §4.2 — checksum algorithm, endianness from magic, cumulative chaining</a>]</span></p>
 
-  <span class="code-label">checksum shape (spec algorithm; verify exact constants in source)</span>
+  <span class="code-label">checksum shape (spec algorithm)</span>
 <pre><code><span class="tok-c">// s0, s1 carry from the previous frame (or header for frame 1)</span>
 <span class="tok-c">// for each pair of 32-bit words (x0, x1) in the buffer:</span>
 <span class="tok-c">//   s0 += x0 + s1;</span>
 <span class="tok-c">//   s1 += x1 + s0;</span>
 <span class="tok-c">// (interpret words big- or little-endian per the magic's low bit)</span></code></pre>
 
-  <h2>Code routines to grep (verify each name &amp; signature)</h2>
+  <h2>Verified code routines in SQLite 3.53.2</h2>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Concept</th><th>Look for in wal.c</th></tr></thead>
     <tbody>
-      <tr><td>Compute frame/header checksum</td><td><code>walChecksumBytes</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Append a frame to the WAL</td><td><code>walWriteOneFrame</code> / <code>walFrames</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Recover/scan the WAL on open</td><td><code>walIndexRecover</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Run a checkpoint</td><td><code>walCheckpoint</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>Find a page's newest frame (read path)</td><td><code>walFindFrame</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
-      <tr><td>The wal-index in shared memory</td><td><code>walIndexHash</code> / <code>WalIndexHdr</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Compute frame/header checksum</td><td><code>walChecksumBytes</code></td></tr>
+      <tr><td>Append frame(s)</td><td><code>walWriteOneFrame</code> / <code>walFrames</code></td></tr>
+      <tr><td>Recover/scan on open</td><td><code>walIndexRecover</code></td></tr>
+      <tr><td>Run a checkpoint</td><td><code>walCheckpoint</code></td></tr>
+      <tr><td>Find a page's newest frame</td><td><code>walFindFrame</code></td></tr>
+      <tr><td>Wal-index header/hash lookup</td><td><code>WalIndexHdr</code>,
+      <code>walHash</code>, and <code>walHashGet</code></td></tr>
     </tbody>
   </table>
   </div>
+  <p class="src">[src: all symbols in the table above were checked in pinned SQLite 3.53.2
+  <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/wal.c"><code>src/wal.c</code></a>]</p>
 
   <div class="box warn">
     <div class="box-title">⚠️ Source dive discipline</div>
-    <p>The byte offsets and the magic/version constants above come from the <em>spec</em> and are the
-    contract — cite §4.1/§4.2 for them. The function names carry ⚠️VERIFY because the exact current symbol
-    and signature must be confirmed against the file; treat them as search anchors, not facts.</p>
+    <p>The byte offsets and constants above come from the specification. The function names were checked
+    at the pinned revision, but their internal contracts are not part of SQLite's stable public API.</p>
   </div>
 
   <h2>What to mirror in your build vs simplify</h2>
@@ -125,7 +129,8 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">file format §4</a> (WAL layout) — authoritative.</li>
-      <li><strong>Source:</strong> <a href="https://www.sqlite.org/src/file/src/wal.c">wal.c</a> — append/recover/checkpoint logic.</li>
+      <li><strong>Source:</strong> pinned SQLite 3.53.2
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/wal.c"><code>wal.c</code></a>.</li>
       <li><strong>Forward link:</strong> the build assembles header + frames + checksums + recovery + checkpoint into a working WAL with a crash test.</li>
     </ul>
   </div>

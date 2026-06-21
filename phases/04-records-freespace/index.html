@@ -15,15 +15,14 @@
   <p class="lead">Phase 3 stored small, inline entries by bounding their size. Real data is messy:
   variable-length records, documents bigger than a page, deletions that leave holes. This phase makes
   your storage honest — slotted pages for variable-length records, overflow pages for big ones,
-  compaction for the holes, and a freelist so freed pages get reused instead of growing the file
-  forever.</p>
+  compaction for the holes, and a freelist so freed pages can be reused before extending the file.</p>
 
   <div class="box deeper">
     <div class="box-title">Why this comes after the B+tree</div>
     <p>You needed a working tree first to feel the pain: bounded entry sizes, no space reclamation,
     pages that fragment as you delete. Phase 4 lifts those restrictions. Slotted pages and the freelist
-    are not glamorous, but they are what separates a toy from a database that can run for months without
-    bloating.</p>
+    are not glamorous, but they are required to reuse internal and whole-page free space instead of
+    forgetting it.</p>
   </div>
 
   <div class="box rust">

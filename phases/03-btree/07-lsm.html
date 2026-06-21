@@ -15,16 +15,18 @@
   between B+trees and LSMs, and articulate <em>why this project deliberately chose a B+tree</em>.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>"B-tree or LSM?" is the central storage-engine decision. You've committed to a B+tree, but you
-  should be able to defend that choice and recognize when the other would be better — both because it
-  deepens understanding and because reviewers will ask.</p>
+  <p>B+trees and LSM trees are two major families of ordered storage structures. Neither dominates
+  every workload. You should be able to identify where each family moves its costs, then state which
+  constraints—not slogans—drive this curriculum's choice.</p>
 
   <h2>The LSM idea in one paragraph</h2>
-  <p>A Log-Structured Merge tree never updates data in place. Writes go to an in-memory sorted structure
-  (the "memtable") plus a sequential write-ahead log. When the memtable fills, it is flushed to disk as
-  an immutable sorted file (an "SSTable"). Over time many SSTables accumulate and are periodically merged
-  ("compaction") into fewer, larger sorted files, discarding overwritten and deleted entries. Deletes are
-  recorded as "tombstone" markers that suppress older values until compaction removes them.</p>
+  <p>In the classic LSM design, incoming updates are buffered in a memory-resident component and made
+  recoverable by a log. Full memory components are written as sorted on-disk runs. Reads may consult
+  multiple components, while background or scheduled merges reorganize runs and eventually discard
+  overwritten values and deletion markers (“tombstones”). Concrete LSM engines differ in levels,
+  tiering, Bloom filters, and compaction scheduling.
+  <span class="src">[src: O'Neil et al.,
+  <a href="https://doi.org/10.1007/BF01136466">“The Log-Structured Merge-Tree” (1996)</a>]</span></p>
 
   <figure>
   <svg viewBox="0 0 560 170" role="img" aria-label="LSM write path: memtable flushes to immutable SSTables which compact">
@@ -46,39 +48,50 @@
   <table>
     <thead><tr><th></th><th>B+tree</th><th>LSM tree</th></tr></thead>
     <tbody>
-      <tr><td>Writes</td><td>Update in place; may do random page writes; can re-write a page for one change (write amplification)</td><td>Sequential appends; generally lower write amplification, higher raw throughput</td></tr>
-      <tr><td>Reads (point)</td><td>One root-to-leaf descent</td><td>May check memtable + several SSTables (mitigated by Bloom filters)</td></tr>
-      <tr><td>Range scans</td><td>Excellent: follow linked leaves</td><td>Must merge across multiple sorted files</td></tr>
-      <tr><td>Space</td><td>Can have partially-empty pages (internal fragmentation)</td><td>Temporary space amplification from un-compacted overwrites/tombstones</td></tr>
-      <tr><td>Background work</td><td>Mostly none</td><td>Continuous compaction (CPU/IO cost, tuning)</td></tr>
+      <tr><td>Writes</td><td>Modify page-sized nodes; splits and logging can rewrite more than the changed key</td><td>Buffer and flush sorted runs; compaction may rewrite the same data multiple times</td></tr>
+      <tr><td>Point reads</td><td>Follow one root-to-leaf path, subject to caching</td><td>May probe memory plus multiple runs; indexes/Bloom filters reduce unnecessary probes</td></tr>
+      <tr><td>Range scans</td><td>Walk ordered leaves in this project's layout</td><td>Merge ordered results from the relevant runs</td></tr>
+      <tr><td>Space</td><td>Partially filled pages and old versions/logs can amplify space</td><td>Obsolete versions and tombstones remain until compaction</td></tr>
+      <tr><td>Maintenance</td><td>May still need checkpointing, vacuum, or page reclamation</td><td>Compaction policy is central and consumes I/O/CPU</td></tr>
     </tbody>
   </table>
   </div>
-  <p>The classic framing is the <strong>RUM conjecture</strong> / read-write-space amplification
-  trade-off: you can optimize for read, write, or space, but improving one tends to cost another. LSMs
-  trade read and space cost for write throughput; B+trees trade write amplification for simpler, faster
-  reads and scans. <span class="verify-tag">⚠️VERIFY</span> attribute the RUM conjecture precisely
-  (Athanassoulis et al., 2016) before citing it as a hard result.</p>
+  <p>The <strong>RUM conjecture</strong> frames access methods in terms of read, update, and memory
+  overhead: reducing two generally increases the third. It is a design lens, not a benchmark result
+  proving one family always wins.
+  <span class="src">[src: Athanassoulis et al.,
+  <a href="https://stratos.seas.harvard.edu/publications/designing-access-methods-rum-conjecture">“Designing Access Methods: The RUM Conjecture”
+  (2016)</a>]</span> Write amplification in particular is not inherently lower for every LSM:
+  compaction strategy, update distribution, run sizing, and workload determine how often bytes are
+  rewritten.</p>
 
   <h2>Who uses which</h2>
   <ul>
-    <li><strong>B+tree engines:</strong> SQLite, classic relational engines, LMDB, Berkeley DB. Strong
-    reads and range scans; the default for embedded read-heavy workloads.</li>
-    <li><strong>LSM engines:</strong> RocksDB/LevelDB, Cassandra, and notably <strong>Isar</strong>'s
-    storage in some versions. Strong write throughput; popular for write-heavy and large-dataset stores.
-    <span class="verify-tag">⚠️VERIFY</span> Isar's exact storage engine and version before stating it
-    relies on a specific LSM/B-tree design — Isar's internals differ across major versions (see 6.8).</li>
+    <li><strong>B+tree examples:</strong> SQLite and LMDB are the source teachers used in this phase.</li>
+    <li><strong>LSM examples:</strong> RocksDB and LevelDB document memtables, sorted-table files, and
+    compaction as core structures.</li>
   </ul>
+  <div class="box warn">
+    <div class="box-title">⚠️ Isar is not the LSM example here</div>
+    <p>Isar v3.1.0+1 pins its native core to <code>mdbx-sys</code>, the libmdbx binding. The current
+    Isar main branch includes native libmdbx and SQLite backend dependencies. Those checked revisions
+    do not support describing Isar as an LSM engine.
+    <span class="src">[src: Isar v3 commit
+    <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/packages/isar_core/Cargo.toml"><code>packages/isar_core/Cargo.toml</code></a>;
+    current-main commit
+    <a href="https://github.com/isar/isar/blob/713001bf1615ea15460d9bc8d3fb9c8cb4150a2e/packages/isar_core/Cargo.toml"><code>Cargo.toml</code></a>]</span></p>
+  </div>
 
   <h2>Why this project chose a B+tree</h2>
   <ol>
-    <li><strong>Workload fit.</strong> An embedded, on-device database for a mobile app is read-heavy and
-    relies on range/ordered queries — the B+tree's strengths.</li>
-    <li><strong>No background threads needed.</strong> Compaction implies ongoing background work and
-    tuning; a B+tree needs none, which suits a single-file embedded engine and a from-scratch learning
-    project.</li>
-    <li><strong>Simpler crash story.</strong> One in-place file with a WAL (Phase 5) is conceptually
-    tighter than coordinating many immutable files plus a log plus compaction.</li>
+    <li><strong>Required behavior.</strong> The project needs ordered point/range access, which a
+    page-oriented B+tree exposes directly.</li>
+    <li><strong>Scope control.</strong> A minimal B+tree plus one WAL keeps the exercise focused on
+    pages, splits, logging, and recovery. A useful LSM would add run files, manifests, compaction, and
+    tombstone lifecycle.</li>
+    <li><strong>Single-file goal.</strong> The selected design maps tree pages and WAL frames into the
+    single-database-file architecture being taught. LSMs can be embedded, but their common multi-run
+    organization would require a different file/metadata design.</li>
     <li><strong>It's the better teacher.</strong> The B+tree forces you to confront pages, splitting,
     and balance directly — the foundational ideas. An LSM could be a future v2.</li>
   </ol>
@@ -97,15 +110,21 @@
       contiguous ordered walk, whereas an LSM must merge across sorted files.</div></details>
       <p class="q">4. Give one concrete reason this project picked a B+tree.</p>
       <details><summary>Show answer</summary><div class="answer">Any of: read/range-heavy mobile workload,
-      no background compaction, simpler single-file crash story, better learning value.</div></details>
+      direct ordered access, narrower implementation scope, alignment with the single-file design, or
+      its value for learning page splits and balance.</div></details>
     </div>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Paper:</strong> O'Neil et al., "The Log-Structured Merge-Tree (LSM-Tree)" (1996); Athanassoulis et al., "Designing Access Methods: The RUM Conjecture" (2016). <span class="verify-tag">⚠️VERIFY</span> citations before quoting.</li>
-      <li><strong>Doc:</strong> <a href="https://github.com/facebook/rocksdb/wiki">RocksDB wiki</a> for a real LSM's compaction model.</li>
+      <li><strong>Papers:</strong> O'Neil et al.,
+      <a href="https://doi.org/10.1007/BF01136466">“The Log-Structured Merge-Tree”</a> (1996);
+      Athanassoulis et al.,
+      <a href="https://stratos.seas.harvard.edu/publications/designing-access-methods-rum-conjecture">“Designing Access Methods: The RUM
+      Conjecture”</a> (2016).</li>
+      <li><strong>Doc:</strong> <a href="https://github.com/facebook/rocksdb/wiki/Leveled-Compaction">RocksDB leveled compaction</a>
+      for one concrete LSM policy.</li>
       <li><strong>Forward link:</strong> 6.8 (Isar's storage), Phase 5 (the WAL that makes the B+tree crash-safe).</li>
     </ul>
   </div>

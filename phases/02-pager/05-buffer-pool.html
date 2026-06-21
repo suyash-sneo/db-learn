@@ -16,10 +16,10 @@
   — without ever losing a change.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>Disk is orders of magnitude slower than RAM. A B+tree lookup touches the same root and upper
-  nodes on every query; reading them from disk each time would be catastrophic. The buffer pool keeps
-  hot pages in memory so most accesses are RAM-speed, and it's the single point that decides when a
-  modified page is allowed to go back to disk — which makes it central to durability later.</p>
+  <p>Storage access is generally much more expensive than reading an already-resident memory buffer.
+  A B+tree lookup repeatedly visits the root and upper levels, so caching those pages avoids repeated
+  backend reads. The buffer pool is also the point that tracks which in-memory copies differ from the
+  main file, making its writeback rules part of the later durability design.</p>
 
   <h2>What the buffer pool does</h2>
   <p>It sits between the engine and the VFS and maintains a fixed-capacity set of in-memory page
@@ -29,8 +29,9 @@
     <li>If not (a "miss"), find a free frame (evicting one if necessary), read page <code>n</code> from
     the VFS into it, record the mapping, and return it.</li>
   </ol>
-  <p>On modification, the engine marks the page <strong>dirty</strong>. Dirty pages must be written
-  back before their frame can be reused, and must be flushed at commit time.</p>
+  <p>On modification, the engine marks the page <strong>dirty</strong>. A dirty frame cannot simply be
+  discarded. What may be written, where it may be written, and when depends on the recovery protocol:
+  Phase 2 temporarily writes directly to the main file, while Phase 5 introduces WAL ordering.</p>
 
   <figure>
   <svg viewBox="0 0 560 200" role="img" aria-label="Buffer pool with page table mapping page numbers to frames">
@@ -64,8 +65,10 @@
     the borrow checker enforces. A simple design hands out a guard object (like a
     <code>RefMut</code>-style handle) whose <code>Drop</code> unpins the page, so you cannot forget to
     unpin. Designs using <code>Rc&lt;RefCell&lt;Page&gt;&gt;</code> or returning indices instead of
-    references are common; each trades ergonomics against checking. You'll feel this tension in the
-    build — it's a genuine design exercise, not boilerplate.</p>
+    references are possible; each trades ergonomics against runtime checking and ownership complexity.
+    The Phase 2 build chooses a simpler contract: reads return owned bytes and edits happen inside a
+    closure, so no borrowed page escapes the pager. A production guard design still needs a
+    <em>count</em>, not a Boolean, because more than one caller may hold the same page.</p>
   </div>
 
   <h2>Eviction policies</h2>
@@ -85,12 +88,12 @@
 
   <div class="box warn">
     <div class="box-title">⚠️ The one invariant you cannot break</div>
-    <p>A <strong>dirty</strong> page must be written back to the VFS <em>before</em> its frame is
-    reused for another page, or the modification is lost. Eviction of a dirty page is therefore
-    "write it out, then reuse the frame." Eviction of a clean page can just drop it (the disk copy is
-    already current). Also note: writing a dirty page out during eviction is <em>not</em> a commit —
-    durability still depends on <code>sync</code> at the right time (2.6, Phase 5). Eviction order and
-    commit order are different concerns and must not be conflated.</p>
+    <p>A dirty page must not be forgotten when its frame is reused. In the pre-WAL Phase 2 exercise,
+    eviction writes that page to the main file first. Once Phase 5 exists, an uncommitted dirty page
+    may reach the main file only when the WAL protocol permits it; otherwise a crash could expose an
+    uncommitted value. This is the database's <strong>STEAL/no-STEAL</strong> policy. A clean frame can
+    be dropped because the authoritative storage copy is current. In either design, writeback is not
+    the same as commit: commit requires the recovery protocol's ordering and synchronization steps.</p>
   </div>
 
   <h2>Clean vs dirty vs durable</h2>
@@ -112,8 +115,9 @@
       <details><summary>Show answer</summary><div class="answer">Eviction of a frame while a caller still
       holds a reference to it — which would leave a dangling/invalid view.</div></details>
       <p class="q">3. What must happen before a dirty frame is reused for another page?</p>
-      <details><summary>Show answer</summary><div class="answer">Its current contents must be written
-      back to the VFS, or the modification is lost.</div></details>
+      <details><summary>Show answer</summary><div class="answer">The change must be preserved according
+      to the active recovery policy. Phase 2 writes it to the main file before reuse; after WAL is
+      introduced, the log/order rules decide whether main-file writeback is legal.</div></details>
       <p class="q">4. Is writing a dirty page during eviction the same as committing it?</p>
       <details><summary>Show answer</summary><div class="answer">No. The write reaches the OS but
       durability still requires a <code>sync</code> at a defined commit point; eviction order and
@@ -125,7 +129,10 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Book:</strong> <em>Database Internals</em> (Petrov), "Buffer management" — pinning, eviction, the LRU/Clock family.</li>
-      <li><strong>Course:</strong> CMU 15-445 "Database Storage / Buffer Pools" lectures cover this design in depth. <span class="verify-tag">⚠️VERIFY</span> the specific lecture number/timestamp before citing one.</li>
+      <li><strong>Course:</strong> CMU 15-445/645 Spring 2026,
+      <a href="https://15445.courses.cs.cmu.edu/spring2026/slides/04-bufferpool.pdf">Lecture 4:
+      Buffer Pool Management</a> — buffer pools, page tables, dirty flags, pin/reference counters, and
+      replacement policies.</li>
       <li><strong>Forward link:</strong> 2.6 (sync vs eviction), Phase 5 (the WAL changes when dirty pages may go to the main file).</li>
     </ul>
   </div>

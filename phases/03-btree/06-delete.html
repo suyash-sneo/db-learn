@@ -11,36 +11,39 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.6</div>
   <h1>3.6 — Delete, merge, rebalance</h1>
-  <div class="goal"><b>Goal:</b> Remove a key from a leaf, and when a node falls below its minimum
-  occupancy, restore the invariant by borrowing from a sibling or merging two nodes — the mirror image
-  of splitting.</div>
+  <div class="goal"><b>Goal:</b> Understand the deletion choices—simple removal, redistribution,
+  merge, and root shrink—without pretending that every byte-oriented B+tree uses one universal
+  minimum-occupancy rule.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>Deletion is the operation people most often get wrong or skip. A naive delete leaves nodes too
-  empty, degrading fanout and eventually breaking the tree's guarantees. To keep lookups shallow under
-  churn, you must rebalance on delete just as you split on insert.</p>
+  <p>Deletion changes more than one leaf entry when it also changes a child's smallest key, empties a
+  page, or triggers a space-utilization policy. A tree can remain search-correct with sparse pages if
+  separators and links remain correct, but its space use and worst-case height bound become weaker.
+  This lesson gives you the full design vocabulary before you choose an implementation policy.</p>
 
   <h2>The occupancy invariant</h2>
-  <p>A B+tree keeps every node (except the root) at least <strong>half full</strong> — this lower bound
-  is what guarantees the tree's logarithmic height. Insert maintains it by splitting full nodes; delete
-  maintains it by fixing under-full nodes. The minimum is usually expressed as ⌈order/2⌉ entries; with
-  variable-length entries it's often a byte threshold (e.g. a node may not drop below a quarter or half
-  of usable bytes). <span class="verify-tag">⚠️VERIFY</span> the exact threshold you choose and apply it
-  consistently.</p>
+  <p>In a textbook fixed-order B-tree/B+tree, the definition includes a minimum number of
+  children/entries for every non-root node, commonly around half of maximum capacity. That lower bound
+  is part of the proof that height remains logarithmic. A byte-oriented page with variable cells does
+  not have one natural “order”: ten tiny cells and ten large cells use different space. Its format must
+  define a policy explicitly—for example, minimum encoded bytes, minimum entry count, or lazy cleanup.
+  Search correctness depends on valid ordering and separators; utilization guarantees depend on the
+  chosen policy.</p>
 
   <h2>The simple case: leaf still has enough</h2>
-  <p>Descend to the leaf, remove the entry. If the leaf is still at or above minimum occupancy, you're
-  done — no structural change. As with insert, most deletes are this simple.</p>
+  <p>Descend to the leaf and remove the entry. If the leaf remains acceptable under your chosen policy,
+  no page count changes. You may still need to update an ancestor separator when the removed key was the
+  first key of a non-leftmost leaf.</p>
 
   <h2>Underflow: borrow, then merge</h2>
-  <p>If removing leaves the node below minimum, restore the invariant in this order:</p>
+  <p>If the policy classifies the node as underfull, two standard repairs are:</p>
   <ol>
-    <li><strong>Borrow (redistribute)</strong> from an adjacent sibling that has more than the minimum:
-    move one entry from the rich sibling into the poor node, and update the parent's separator to match
-    the new boundary. This fixes the underflow without changing the number of nodes.</li>
-    <li><strong>Merge</strong> if neither sibling can spare an entry: combine the under-full node with a
-    sibling into one node (they jointly fit, since both were near the minimum), and remove the now-unused
-    separator and child pointer from the parent.</li>
+    <li><strong>Redistribute</strong> with an adjacent sibling: move one or more boundary entries so
+    both pages satisfy the policy, then derive the parent separator from the new right-child minimum.
+    Variable-size cells may require moving more than one entry.</li>
+    <li><strong>Merge</strong> when the encoded contents of two siblings fit in one page: combine them,
+    repair the leaf link if these are leaves, return the unused page to free-space management, and
+    remove the corresponding separator and child pointer from the parent.</li>
   </ol>
 
   <figure>
@@ -59,21 +62,28 @@
   </figure>
 
   <h2>The cascade and shrinking the tree</h2>
-  <p>Removing a separator from a parent may push the <em>parent</em> below minimum, so borrow/merge can
-  cascade upward exactly as splits cascade in insert. The terminal case: if the root is an internal node
-  that ends up with a single child (no separators left), delete the root and make that single child the
-  new root — the tree shrinks by one level. This is the only way a B+tree decreases in height, mirroring
-  how root splits are the only way it grows.</p>
+  <p>Removing a separator from a parent may make the parent underfull, so repair can cascade upward.
+  If an internal root ends with one child and no separators, that child can become the new root and the
+  old root page can be freed. This is the structural inverse of creating a new root after a split.</p>
 
   <div class="box deeper">
     <div class="box-title">Many real databases simplify deletion</div>
-    <p>Full borrow/merge is the textbook algorithm, but production systems often relax it. Some never
-    merge eagerly — they let nodes get sparse and reclaim space lazily (vacuum/compaction). SQLite
-    rebalances on delete via its <code>balance</code> routine but leaves freed space to be reused rather
-    than always shrinking the file. <span class="verify-tag">⚠️VERIFY</span> SQLite's exact delete/balance
-    behavior in <code>btree.c</code> before asserting specifics. For your build, implementing borrow and
-    merge teaches the real invariant; a simpler "delete and tolerate sparse nodes" variant is an
-    acceptable, clearly-documented fallback if time-boxed.</p>
+    <p>Production policies vary. In SQLite 3.53.2, <code>sqlite3BtreeDelete</code> participates in the
+    same balancing machinery used after other page changes; <code>balance_nonroot</code> redistributes
+    cells among sibling pages and can change the number of pages. Freed database pages are managed
+    separately from reducing the file's high-water mark.
+    <span class="src">[src: pinned SQLite 3.53.2
+    <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>sqlite3BtreeDelete</code>,
+    <code>balance_nonroot</code>, and balance dispatcher in <code>src/btree.c</code></a>]</span>
+    That is a source-study reference, not a requirement to reproduce SQLite's algorithm.</p>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">Build scope: deletion is deliberately deferred</div>
+    <p>The Phase 3 build requires persistent search, insert, split, duplicate-key replacement, and
+    range scan. It does not require full B+tree deletion. Implementing delete before the node codec,
+    split propagation, persistence, and separator convention are stable multiplies the debugging
+    surface. Keep this lesson as the specification vocabulary for a later deletion milestone.</p>
   </div>
 
   <div class="box warn">
@@ -87,12 +97,13 @@
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
-      <p class="q">1. What invariant guarantees the tree stays shallow under deletion?</p>
-      <details><summary>Show answer</summary><div class="answer">Every non-root node stays at least
-      ~half full (minimum occupancy), preserving logarithmic height.</div></details>
+      <p class="q">1. Why is “half full” not a complete rule for this variable-cell format?</p>
+      <details><summary>Show answer</summary><div class="answer">Half could mean entries or encoded
+      bytes, and variable-size cells make those different. The format must define its occupancy policy
+      before underflow can be detected.</div></details>
       <p class="q">2. In what order do you try to fix an under-full node?</p>
       <details><summary>Show answer</summary><div class="answer">First borrow/redistribute from a sibling
-      with spare entries; if none can spare one, merge with a sibling.</div></details>
+      with spare encoded capacity; if two siblings fit in one page, merge is another option.</div></details>
       <p class="q">3. How does a B+tree shrink in height?</p>
       <details><summary>Show answer</summary><div class="answer">When the root internal node is reduced to
       a single child, that child becomes the new root.</div></details>
@@ -106,7 +117,9 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Book:</strong> <em>Database Internals</em>, "Node Merges / Rebalancing on delete."</li>
-      <li><strong>Source:</strong> SQLite <a href="https://www.sqlite.org/src/file/src/btree.c">btree.c</a> <code>balance</code> family (read in 3.8).</li>
+      <li><strong>Source:</strong> pinned SQLite 3.53.2
+      <a href="https://github.com/sqlite/sqlite/blob/ccc132c5be20ab5c755c97a08d06b1b592fef330/src/btree.c"><code>btree.c</code></a>
+      balance family (read in 3.8).</li>
       <li><strong>Forward link:</strong> 3.7 (LSM trees defer deletes differently), Phase 4 (freed pages return to the freelist).</li>
     </ul>
   </div>

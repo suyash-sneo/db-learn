@@ -28,7 +28,8 @@
     used cells). Optionally a pointer to a freed-cell list within the page.</li>
     <li><strong>Slot array</strong> (grows toward higher offsets, just after the header): one small entry
     per cell, typically a 2-byte offset (and sometimes a length) pointing to where the cell lives. The
-    slot array is kept in <em>logical order</em> (e.g. sorted by key for a B+tree node).</li>
+    slot array is kept in the page type's <em>logical order</em>: sorted by key for the Phase 3
+    B+tree, but stable insertion/identity order for record pages.</li>
     <li><strong>Cell content</strong> (grows toward lower offsets, from the end of the page): the actual
     variable-length record bytes, placed wherever they fit. Cells need not be in key order physically.</li>
   </ol>
@@ -68,10 +69,17 @@
   indirection, O(1).</p>
 
   <h3>Delete a cell</h3>
-  <p>Remove its slot (shift later slots down by one) and decrement the count. The cell's bytes are now
-  unreferenced "dead" space. You do <em>not</em> have to move other cells immediately — that's the
-  point of compaction being a separate, deferrable step (4.4). Optionally, thread the freed region onto
-  an in-page freeblock list so a later insert can reuse it without full compaction.</p>
+  <p>Deletion depends on what the slot number means:</p>
+  <ul>
+    <li><strong>Ordered B+tree page:</strong> the external identity is the key, not the slot number.
+    Removing a slot and shifting later slots is acceptable because search re-derives positions.</li>
+    <li><strong>Record page with <code>RecordId(page, slot)</code>:</strong> shifting slots would
+    retarget every later identifier. Mark the slot as a tombstone instead and leave its index in place.
+    The build uses a 4-byte slot—<code>offset:u16, length:u16</code>—where
+    <code>offset == 0</code> means deleted. Compaction changes live offsets, not slot indices.</li>
+  </ul>
+  <p>In either case, the old cell bytes become dead space until compaction or an in-page freeblock
+  policy reclaims them.</p>
 
   <div class="box warn">
     <div class="box-title">⚠️ Two offsets, two directions — don't cross them</div>
@@ -106,9 +114,10 @@
       <p class="q">1. Why do slots grow from the front and cells from the back?</p>
       <details><summary>Show answer</summary><div class="answer">So both can grow into a shared middle gap;
       free space is simply the distance between them, easy to compute and check.</div></details>
-      <p class="q">2. Why can deletion skip moving other cells?</p>
-      <details><summary>Show answer</summary><div class="answer">Removing the slot makes the cell
-      unreferenced "dead" space; reclaiming it is deferred to compaction or an in-page freeblock list.</div></details>
+      <p class="q">2. Why must a stable record page tombstone a slot instead of removing it?</p>
+      <details><summary>Show answer</summary><div class="answer">Removing it would shift later indices
+      and make existing <code>RecordId(page, slot)</code> values point at different records. A
+      tombstone preserves every other slot number.</div></details>
       <p class="q">3. What invariant must every insert preserve?</p>
       <details><summary>Show answer</summary><div class="answer"><code>slot_array_end ≤
       cell_content_start</code> — the free gap must stay non-negative after adding both the cell and its
