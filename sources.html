@@ -65,6 +65,12 @@
     <li><a href="https://dart.dev/interop/c-interop">Dart C interop guide</a> —
     <code>dart:ffi</code> concepts and <code>package:ffigen</code> for generating Dart bindings from
     C headers.</li>
+    <li><a href="https://dart.dev/language/isolates">Dart isolates</a> and
+    <a href="https://dart.dev/language/concurrency">concurrency model</a> — separate memory, message
+    passing, and <code>Isolate.run</code>.</li>
+    <li><a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">Flutter — developing
+    packages &amp; plugins</a> — FFI plugins, per-platform native build (CMake/Gradle, CocoaPods), and
+    bundling. Packaging mechanics are version-sensitive.</li>
     <li><a href="https://api.dart.dev/dart-ffi/">dart:ffi API</a>,
     <a href="https://api.dart.dev/dart-ffi/Size-class.html"><code>Size</code></a>, and
     <a href="https://pub.dev/packages/ffi">package:ffi</a>.</li>
@@ -106,8 +112,24 @@
     <li><a href="http://www.lmdb.tech/doc/">LMDB documentation</a> and
     <a href="https://libmdbx.dqdkfa.ru/">libmdbx documentation</a> — references for embedded
     B-tree/MVCC designs. Later lessons must cite the exact version and source file they discuss.</li>
-    <li><a href="https://www.mongodb.com/docs/manual/data-modeling/">MongoDB data modeling</a> and
-    <a href="https://www.mongodb.com/docs/manual/crud/">CRUD operations</a>.</li>
+    <li><a href="https://www.mongodb.com/docs/manual/data-modeling/">MongoDB data modeling</a>,
+    <a href="https://www.mongodb.com/docs/manual/core/document/">documents</a>,
+    <a href="https://www.mongodb.com/docs/manual/crud/">CRUD operations</a>, and the
+    <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">aggregation pipeline</a>.</li>
+  </ul>
+
+  <h2>Concurrency, isolation, and transactions</h2>
+  <ul>
+    <li><a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL — Transaction
+    Isolation</a> and <a href="https://www.postgresql.org/docs/current/mvcc-intro.html">MVCC
+    introduction</a> — precise SQL-standard isolation levels, phenomena, and an MVCC implementation.</li>
+    <li><a href="https://www.sqlite.org/lockingv3.html">SQLite locking v3</a> (the five lock states) and
+    <a href="https://www.sqlite.org/wal.html">WAL</a> / <a href="https://www.sqlite.org/isolation.html">isolation</a>
+    for snapshot-style concurrency.</li>
+    <li><a href="https://doc.rust-lang.org/book/ch16-00-concurrency.html">Rust Book ch. 16 — Fearless
+    Concurrency</a>, <a href="https://doc.rust-lang.org/std/sync/index.html">std::sync</a>
+    (<code>Arc</code>, <code>Mutex</code>, <code>RwLock</code>, <code>Condvar</code>), and the
+    <a href="https://doc.rust-lang.org/nomicon/send-and-sync.html">Rustonomicon Send/Sync</a> chapter.</li>
   </ul>
 
   <h2>Conceptual backbone</h2>

@@ -30,6 +30,12 @@
     is the source-level contract; the ABI is what survives after compilation. Stable C ABIs are
     why a Rust library can be called from Dart, Python, or Swift.</dd>
 
+    <dt data-term="access path residual filter scan index">Access path / residual filter</dt>
+    <dd>A query plan's two parts: the <em>access path</em> generates candidate documents (a full scan
+    or an index scan), and the <em>residual filter</em> is the part of the predicate the access path
+    didn't enforce, applied by the evaluator to each candidate. Every plan must return the same set as
+    a full scan.</dd>
+
     <dt data-term="acid atomicity consistency isolation durability">ACID</dt>
     <dd>Atomicity, Consistency, Isolation, Durability — the four guarantees a transactional
     store aims for. At the storage layer you mostly implement <em>atomicity</em> (all-or-nothing)
@@ -85,15 +91,30 @@
     resetting or reusing the WAL. Balances read speed against WAL growth.
     <span class="src">[src: <a href="https://www.sqlite.org/wal.html#ckpt">SQLite WAL checkpointing</a>]</span></dd>
 
+    <dt data-term="collection documents heap primary index">Collection</dt>
+    <dd>A named group of documents, implemented as a record heap (the document bytes) plus a primary
+    index mapping each <code>_id</code> to the record's location, plus any secondary indexes. The
+    document-database analogue of a table.</dd>
+
     <dt data-term="cow copy-on-write">Copy-on-write (CoW)</dt>
     <dd>Instead of overwriting a page in place, write a modified copy to a new location and
     re-point references. CoW can support snapshots and crash-safe commit protocols, but neither
     property is automatic: the engine still needs ordering, atomic root publication, synchronization,
     and reclamation rules.</dd>
 
+    <dt data-term="cursor iterator results streaming">Cursor</dt>
+    <dd>A stateful handle that yields query results one (or a batch) at a time instead of materializing
+    the whole result set, bounding memory. Across the FFI it's an opaque handle valid only while its
+    database is open, with a documented invalidation policy if the data changes mid-iteration.</dd>
+
     <dt data-term="dirty page">Dirty page</dt>
     <dd>A cached page whose in-memory copy differs from disk because it was modified. Must be
     flushed before it can be safely evicted or before commit.</dd>
+
+    <dt data-term="document schemaless self-describing">Document</dt>
+    <dd>A self-describing, variable-length record — a serialized tree of fields and values, where each
+    document carries its own structure (schemaless), unlike a relational row whose meaning comes from a
+    fixed table schema. Stored as opaque bytes by the lower layers.</dd>
 
     <dt data-term="extern c no_mangle repr">extern "C" / #[unsafe(no_mangle)] / #[repr(C)]</dt>
     <dd>The three Rust attributes that produce C-compatible output:
@@ -103,6 +124,11 @@
     <dt data-term="ffi foreign function interface">FFI (Foreign Function Interface)</dt>
     <dd>The mechanism by which code in one language calls code in another, typically through a C
     ABI. Here: Dart calling your Rust engine.</dd>
+
+    <dt data-term="ffigen dart bindings generation">ffigen</dt>
+    <dd>The Dart-side generator that reads a C header and emits Dart <code>dart:ffi</code> bindings —
+    the symmetric counterpart to cbindgen (which generates the header from Rust). Like cbindgen it
+    transcribes declarations and does not verify your ownership or safety contracts.</dd>
 
     <dt data-term="freelist free page trunk">Freelist</dt>
     <dd>The list of pages inside the file that are currently unused and available for reuse, so
@@ -114,6 +140,42 @@
     <dd>An operating-system request to synchronize file data with its backing storage. It is necessary
     in many durability protocols, but the actual guarantee depends on the OS, filesystem, device, and
     whether related directory metadata also needs synchronization.</dd>
+
+    <dt data-term="id primary key _id document">_id (primary key)</dt>
+    <dd>A document's required, unique primary key and the key of the collection's primary index. This
+    curriculum simplifies it to an auto-assigned integer; MongoDB uses an <code>ObjectId</code> by
+    default. The lookup is two-step: <code>_id</code> → record location → bytes.</dd>
+
+    <dt data-term="isolate dart concurrency message passing">Isolate (Dart)</dt>
+    <dd>Dart's unit of concurrency: a worker with its own memory and event loop that can't see another
+    isolate's memory. Isolates communicate by passing messages over ports, not by sharing mutable
+    state. Heavy database work is offloaded to a worker isolate to keep the UI responsive.</dd>
+
+    <dt data-term="isolation level read committed repeatable read serializable">Isolation level</dt>
+    <dd>How much of concurrent transactions' effects a transaction may observe — a spectrum
+    (Read Uncommitted → Read Committed → Repeatable Read → Serializable) defined by which anomalies it
+    permits, not an on/off property. Serializable is the strongest, not the definition of "isolated."</dd>
+
+    <dt data-term="lock states shared reserved pending exclusive sqlite">Lock states (SQLite)</dt>
+    <dd>SQLite's rollback-journal locking ladder: UNLOCKED, SHARED (many readers), RESERVED (one
+    intending writer, coexists with readers), PENDING (blocks new readers while draining), EXCLUSIVE
+    (alone, for the actual write). Encodes "many readers OR one writer."
+    <span class="src">[src: <a href="https://www.sqlite.org/lockingv3.html">SQLite lockingv3</a>]</span></dd>
+
+    <dt data-term="lost update race read-modify-write">Lost update</dt>
+    <dd>A concurrency anomaly where two transactions both read a value, modify it, and write back, so
+    one update silently overwrites the other. The canonical reason a read-modify-write must be
+    protected as a unit.</dd>
+
+    <dt data-term="messagepack serialization compact">MessagePack</dt>
+    <dd>A compact, self-describing binary serialization format (type tags inline, like JSON but
+    smaller). One candidate document codec, alongside JSON text and BSON.
+    <span class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec</a>]</span></dd>
+
+    <dt data-term="mvcc multiversion concurrency control snapshot">MVCC</dt>
+    <dd>Multi-version concurrency control: a write creates a new <em>version</em> rather than
+    overwriting, so readers keep reading a stable older version while writers proceed — readers and
+    writers don't block each other. Old versions are reclaimed once no snapshot needs them.</dd>
 
     <dt data-term="opaque handle pointer">Opaque handle</dt>
     <dd>A pointer the other language holds but cannot inspect — it only passes it back to your
@@ -144,6 +206,21 @@
     <code>extern "C-unwind"</code> is the explicit unwind-permitting ABI. An embedded library may use
     <code>catch_unwind</code> to map unwinding panics to an error code, provided state remains valid.</dd>
 
+    <dt data-term="posting list index duplicates">Posting list</dt>
+    <dd>For a secondary index, the set of <code>_id</code>s sharing one field value, stored as the
+    index entry's value. An alternative to encoding duplicates as composite <code>(value, _id)</code>
+    keys.</dd>
+
+    <dt data-term="predicate filter query matches">Predicate / filter</dt>
+    <dd>A query expressed as a boolean test <code>matches(doc)</code> — a tree of comparisons combined
+    with AND/OR/NOT. The evaluator applies it; a full scan plus the predicate is the correctness oracle
+    every optimized plan must match.</dd>
+
+    <dt data-term="query planner optimizer plan">Query planner</dt>
+    <dd>The component that chooses how to answer a query — most importantly, use a secondary index or
+    full-scan — based on selectivity, then applies the rest of the predicate as a residual filter. This
+    curriculum builds a rule-based planner, not a cost-based optimizer.</dd>
+
     <dt data-term="repr c layout">repr(C)</dt>
     <dd>An attribute selecting Rust's C-compatible representation rules for a type. It is necessary
     when sharing concrete layout, but safety also requires matching field declarations, target ABI,
@@ -163,6 +240,35 @@
     <dt data-term="serde serialize deserialize">serde</dt>
     <dd>Rust's standard serialization framework. <code>#[derive(Serialize, Deserialize)]</code>
     plus a format crate (e.g. <code>serde_json</code>) converts structs to/from bytes.</dd>
+
+    <dt data-term="schemaless schema-on-read flexible">Schemaless</dt>
+    <dd>Structure lives in each document, not in an engine-enforced table schema: two documents in one
+    collection may have different fields. The engine stores opaque bytes; meaning is the application's
+    responsibility.</dd>
+
+    <dt data-term="secondary index field value lookup">Secondary index</dt>
+    <dd>An index on a non-primary field, mapping a field's values to the <code>_id</code>s of documents
+    holding them, so queries on that field avoid a full scan. Unique, composite (leftmost-prefix), and
+    multi-entry (array) variants exist; each write must keep every index consistent.</dd>
+
+    <dt data-term="selectivity fraction matches">Selectivity</dt>
+    <dd>The fraction of documents a condition keeps. Highly selective + indexed → use the index; low
+    selectivity or no index → full scan. The core intuition a planner uses to pick an access path.</dd>
+
+    <dt data-term="send sync marker traits threads rust">Send / Sync</dt>
+    <dd>Rust marker traits for thread safety: <code>Send</code> means a value can be moved to another
+    thread; <code>Sync</code> means <code>&amp;T</code> can be shared across threads. The compiler uses
+    them to reject data races at compile time — memory safety, not logical database isolation.</dd>
+
+    <dt data-term="serializability serial order strongest">Serializability</dt>
+    <dd>The strongest isolation level: any concurrent execution produces the same effect as running the
+    transactions one at a time in some order. It is one level, not a synonym for "isolated."</dd>
+
+    <dt data-term="snapshot isolation reader version wal">Snapshot isolation</dt>
+    <dd>Each transaction reads as of a fixed point in time (a snapshot), so it sees a stable view while
+    writers proceed. SQLite WAL mode gives readers a snapshot at the last commit before they began, so
+    readers don't block the single writer and vice versa.
+    <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL</a>]</span></dd>
 
     <dt data-term="slotted page slot array">Slotted page</dt>
     <dd>A page layout for variable-length records: a slot/pointer array grows from one end, the

@@ -39,14 +39,31 @@
   <strong>June 20, 2026</strong>. Corrections include Rust 2024 unsafe attributes, non-null empty-slice
   rules, current FFI unwind behavior, <code>Box&lt;[u8]&gt;</code> buffer ownership, cbindgen's C++
   default, Dart <code>Size</code>/<code>ffigen</code>, mobile linking distinctions, and filesystem
-  durability caveats.</p>
+  durability caveats. Phases 2–8 are authored with precise claims sourced inline; their remaining
+  ⚠️VERIFY tags — concentrated in the source-dive lessons (Isar and SQLite internals) and in
+  version-sensitive Dart/Flutter packaging details — are indexed exactly below.</p>
 
   <div class="tablewrap">
   <table>
     <thead><tr><th>Outstanding location</th><th>Exact claim</th><th>Primary source to check</th></tr></thead>
     <tbody>
-      <tr><td colspan="3"><strong>None in authored Phase 0 or Phase 1 content.</strong> The remaining
-      appearances of ⚠️VERIFY in Lesson 0.1 explain the tag policy; they are not unverified claims.</td></tr>
+      <tr><td colspan="3"><strong>Phase 0 &amp; Phase 1:</strong> none. The remaining appearances of
+      ⚠️VERIFY in Lesson 0.1 explain the tag policy; they are not unverified claims.</td></tr>
+
+      <tr><td>6.8 (Source dive: Isar)</td><td>Exact Isar version/commit of any page cited; the storage engine each Isar version uses; on-disk document serialization format; how secondary indexes are keyed (composite <code>(value,id)</code> vs posting lists); what crosses the FFI boundary; the current license.</td><td>Read the <a href="https://github.com/isar/isar">isar/isar</a> core crate at a pinned tag; record the version beside each claim.</td></tr>
+
+      <tr><td>7.5 (Flutter isolates)</td><td>Exact threading/blocking wording — that a synchronous FFI call runs on the calling isolate's thread without yielding to the event loop until it returns.</td><td><a href="https://dart.dev/interop/c-interop">dart.dev — C interop</a> and the <a href="https://api.dart.dev/dart-ffi/dart-ffi-library.html">dart:ffi API reference</a> for the targeted Dart version.</td></tr>
+      <tr><td>7.5 (Flutter isolates)</td><td>Current capabilities/constraints of C-to-Dart callbacks and asynchronous FFI.</td><td><a href="https://dart.dev/interop/c-interop">dart:ffi docs</a> for the Dart version targeted.</td></tr>
+
+      <tr><td>7.6 (Source dive: SQLite locking)</td><td>The lock-level macro names and the <code>PENDING_BYTE</code>/<code>SHARED_FIRST</code>/<code>SHARED_SIZE</code> region values in <code>sqliteInt.h</code>.</td><td><a href="https://sqlite.org/src">sqlite.org/src</a> — <code>sqliteInt.h</code> at a pinned check-in.</td></tr>
+      <tr><td>7.6 (Source dive: SQLite locking)</td><td>The lock-escalation function name(s) (e.g. the <code>unixLock</code>/<code>unixUnlock</code> family) and the syscall used (<code>fcntl</code> POSIX advisory locks on the default Unix VFS).</td><td><code>os_unix.c</code> at a pinned check-in.</td></tr>
+      <tr><td>7.6 (Source dive: SQLite locking)</td><td>The specific <code>pager.c</code> functions that request the begin-read / begin-write / commit lock transitions.</td><td><code>pager.c</code> at a pinned check-in.</td></tr>
+      <tr><td>7.6 (Source dive: SQLite locking)</td><td>Any specific WAL-mode locking claim (shared-memory wal-index locking).</td><td><code>wal.c</code> at a pinned check-in; <a href="https://www.sqlite.org/wal.html">WAL docs</a> for the model.</td></tr>
+
+      <tr><td>8.5 (cbindgen + Dart binding)</td><td>Current ffigen configuration/options.</td><td><a href="https://pub.dev/packages/ffigen">pub.dev/packages/ffigen</a> for the version used.</td></tr>
+      <tr><td>8.7 (Packaging)</td><td>The exact Flutter FFI plugin template name, directory layout, and build-hook/native-assets mechanism.</td><td><a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">docs.flutter.dev — developing packages</a> for the Flutter version targeted.</td></tr>
+      <tr><td>8.7 (Packaging)</td><td>The iOS library-loading choice (<code>DynamicLibrary.open</code> vs <code>.process()</code>/<code>.executable()</code>) for the chosen linkage.</td><td><a href="https://api.dart.dev/dart-ffi/DynamicLibrary-class.html">DynamicLibrary API</a> + Flutter iOS packaging docs.</td></tr>
+      <tr><td>8.7 (Packaging)</td><td>Current Android ABI coverage and 16 KB page-size requirements for the target API level.</td><td>Android NDK / Play requirements docs for the target API level.</td></tr>
     </tbody>
   </table>
   </div>

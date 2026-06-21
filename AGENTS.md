@@ -91,8 +91,13 @@ The full brief that generated this site is in [`docs/original-prompt.md`](docs/o
 - ✅ **Shared infra** — style.css, app.js, index, outline, sources, glossary, verification.
 - ✅ **Phase 0 — Just-enough Rust** — index + 9 lessons + build (file-backed KV store).
 - ✅ **Phase 1 — FFI spike** — index + 10 lessons + build (byte-buffer echo Rust→C ABI→Dart).
-- ⏳ **Phases 2–8** — listed in `PHASES` as `"soon"`; appear in the drawer/outline; **awaiting the
-  owner's sign-off on design + teaching depth before authoring** (per step 3 of the brief).
+- ✅ **Phase 2 — Pager**, **Phase 3 — B+tree**, **Phase 4 — Records & free space**, **Phase 5 —
+  Durability/WAL** — authored; Phases 2–5 rechecked in the June 20, 2026 Codex accuracy pass.
+- ✅ **Phase 6 — Document layer**, **Phase 7 — Concurrency**, **Phase 8 — Real C ABI + aggregation** —
+  authored (index + lessons + build each). All `PHASES` entries are `"done"`.
+- 📋 Outstanding ⚠️VERIFY items (source-dive internals + version-sensitive Dart/Flutter packaging) are
+  indexed exactly in `verification.html`. Phase 6 was authored before the Codex pass and has not had an
+  independent accuracy review.
 
 ## Workflow for adding a phase (2–8)
 
