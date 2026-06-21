@@ -18,10 +18,13 @@
   <h2>Why this matters to your DB</h2>
   <p>Your engine so far assumes one actor: one thread opens the file, reads and writes pages, commits.
   The moment a second actor touches the same file — another thread, another isolate, another process —
-  the interleaving of their individual steps becomes something neither of them controls. The hardware
-  and OS are free to run their instructions in any order consistent with each thread's own sequencing.
-  Most interleavings are fine; a few are catastrophic. Concurrency control is the discipline of
-  forbidding exactly the bad ones while allowing as many good ones as possible.</p>
+  their relative execution order is unspecified unless the actors coordinate. Compilers, CPUs, runtimes,
+  and the operating system all participate in that execution; source-code order in one actor does not by
+  itself create a synchronization edge with another actor. Most interleavings are harmless; some violate a database
+  invariant. Concurrency control identifies the conflicting operations and orders or rejects them.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/std/sync/index.html">std::sync —
+  synchronization primitives</a>; <a href="https://doc.rust-lang.org/std/sync/atomic/enum.Ordering.html">Rust
+  atomic memory orderings</a>]</span></p>
 
   <h2>Anatomy of a race: lost update</h2>
   <p>A "transaction" you think of as atomic is, at the machine level, many steps: read a page, modify
@@ -45,28 +48,40 @@
   correct serial result is 43; the interleaved result is 42.</figcaption>
   </figure>
 
-  <p>Nothing here is a "bug" in either transaction. Each one read, added one, and wrote — correct in
-  isolation. The corruption emerges only from the interleaving. This is the <strong>lost update</strong>
-  anomaly, and it is the canonical reason a read-modify-write must be protected as a unit.</p>
+  <p>Each transaction's arithmetic is correct by itself. The failure appears because the database did
+  not protect the whole read-modify-write as one conflict unit. This is a <strong>lost update</strong>.
+  Serializing only the final writes is insufficient: both transactions may already have computed from
+  the stale value. The lock, validation, or atomic operation must cover the dependency from read through
+  write.</p>
 
   <h2>The catalogue of failures</h2>
-  <p>It helps to name the failures precisely, because isolation levels (7.3) are defined as "which of
-  these may occur." The SQL standard frames concurrency phenomena as things that must not happen:</p>
+  <p>Isolation levels (7.3) are described by the phenomena they must prevent. The table below paraphrases
+  the SQL phenomena listed by PostgreSQL's standards-based isolation documentation:</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Phenomenon</th><th>What happens</th></tr></thead>
     <tbody>
-      <tr><td><strong>Dirty read</strong></td><td>"A transaction reads data written by a concurrent uncommitted transaction" — data that may be rolled back.</td></tr>
-      <tr><td><strong>Nonrepeatable read</strong></td><td>"A transaction re-reads data it has previously read and finds that data has been modified by another transaction (that committed since the initial read)."</td></tr>
-      <tr><td><strong>Phantom read</strong></td><td>"A transaction re-executes a query returning a set of rows that satisfy a search condition and finds that the set of rows … has changed due to another recently-committed transaction."</td></tr>
-      <tr><td><strong>Serialization anomaly</strong></td><td>"The result of successfully committing a group of transactions is inconsistent with all possible orderings of running those transactions one at a time."</td></tr>
+      <tr><td><strong>Dirty read</strong></td><td>A transaction observes another transaction's uncommitted write, which may later be rolled back.</td></tr>
+      <tr><td><strong>Nonrepeatable read</strong></td><td>The same transaction reads one item twice and sees a committed change made between those reads.</td></tr>
+      <tr><td><strong>Phantom read</strong></td><td>Repeating a predicate query produces a different matching set because another transaction committed inserts, deletes, or qualifying updates.</td></tr>
+      <tr><td><strong>Serialization anomaly</strong></td><td>The committed outcome cannot be explained by any one-at-a-time ordering of the transactions.</td></tr>
     </tbody>
   </table>
   </div>
-  <p class="src">[src: <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL — Transaction Isolation §13.2</a>, which quotes the SQL-standard phenomena]</p>
-  <p>Lost update is closely related — it is the write-write version of the read anomalies above, and
-  some systems treat it as a distinct phenomenon. The point is not to memorize a taxonomy but to see
-  that "concurrency correctness" decomposes into concrete, testable failures.</p>
+  <p class="src">[src: <a href="https://www.postgresql.org/docs/18/transaction-iso.html">PostgreSQL 18 —
+  Transaction Isolation, Table 13.1 and the phenomenon definitions</a>]</p>
+  <p>Lost update is another useful named failure, even though engines and literature classify it
+  differently. The practical lesson is to write down the histories your engine permits rather than
+  claim vaguely that it is “thread-safe.”</p>
+
+  <h2>A schedule is the object you reason about</h2>
+  <p>A <strong>schedule</strong> is the combined order of steps from concurrent transactions. A serial
+  schedule runs all of T1, then all of T2 (or the reverse). A concurrent schedule interleaves them. An
+  interleaved schedule is <strong>serializable</strong> when its externally visible effect matches some
+  serial schedule. This definition is stronger than “the file did not corrupt”: the B+tree can remain
+  structurally valid while the counter example still loses an update.
+  <span class="src">[src: <a href="https://www.postgresql.org/docs/18/transaction-iso.html">PostgreSQL 18 —
+  Serializable Isolation Level</a>]</span></p>
 
   <h2>Corruption vs. anomaly: two different stakes</h2>
   <p>There are really two levels of damage, and they need different defenses:</p>
@@ -79,19 +94,21 @@
     state that no serial execution would have produced (lost update, dirty read, …). The database is
     not broken, but an application invariant may be.</li>
   </ul>
-  <p>A single-writer rule (only one transaction may write at a time) is enough to prevent structural
-  corruption from concurrent writers, which is why it is the simplest correct design and the one your
-  build targets. Preventing the full set of logical anomalies is a stronger, separate requirement that
-  needs an isolation policy (7.3).</p>
+  <p>A single-writer rule prevents two cooperating writers from mutating storage structures
+  simultaneously, provided every write path obeys the same lock and the lock covers the complete storage
+  transaction. It does <em>not</em> by itself prevent readers from seeing partially published state, nor
+  does it prevent a lost update when an application reads outside the protected write transaction and
+  later writes a stale result. Structural exclusion, publication rules, and transaction isolation are
+  separate obligations.</p>
 
   <div class="box warn">
     <div class="box-title">⚠️ "It worked when I tested it" is not evidence of correctness</div>
-    <p>Concurrency bugs are timing-dependent: a racy program can produce the right answer thousands of
-    times and the wrong answer once, on a different machine, under load. You cannot prove concurrency
-    correctness by running it and observing success. You establish it by <em>argument</em> — showing
-    which interleavings are possible and that each preserves your invariants — and you defend it with
-    primitives whose guarantees are specified. This is also why the in-memory tests in this phase's
-    build validate <em>logic</em>, not real parallel timing.</p>
+    <p>Concurrency bugs are timing-dependent: a racy program may pass repeatedly and still have an
+    allowed failing execution. Tests are useful for exercising transitions and known regressions, but
+    observed passes do not prove every schedule safe. Establish correctness by stating invariants,
+    identifying every state transition and synchronization edge, and then using tests to challenge that
+    argument. The build includes deterministic policy tests and a small threaded stress check; neither
+    substitutes for the argument.</p>
   </div>
 
   <h2>What "doing nothing" actually costs</h2>
@@ -110,26 +127,37 @@
       a read-modify-write is several steps; if both read the old value before either writes, the second
       write overwrites the first. The fault is in the unguarded interleaving, not the logic.</div></details>
       <p class="q">2. Distinguish structural corruption from a logical anomaly.</p>
-      <details><summary>Show answer</summary><div class="answer">Structural corruption leaves the on-disk
-      data structures themselves invalid (torn split, double free) so even serial reads break. A logical
-      anomaly keeps structures valid but lets a transaction observe a state no serial order would produce.</div></details>
+      <details><summary>Show answer</summary><div class="answer">Structural corruption leaves storage
+      structures invalid, so later ordinary reads can fail. A logical anomaly can leave every page valid
+      while producing an application-visible history that violates the promised isolation rule.</div></details>
       <p class="q">3. Name three of the standard concurrency phenomena.</p>
       <details><summary>Show answer</summary><div class="answer">Any three of: dirty read, nonrepeatable
       read, phantom read, serialization anomaly (and the related lost update).</div></details>
       <p class="q">4. Why can't you establish concurrency correctness by testing alone?</p>
       <details><summary>Show answer</summary><div class="answer">Races are timing-dependent; a wrong
       interleaving may occur rarely and only under specific load/hardware. Correctness comes from reasoning
-      about possible interleavings plus primitives with specified guarantees, not from observed passes.</div></details>
+      about possible schedules and synchronization guarantees; tests only sample executions.</div></details>
     </div>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Spec/docs:</strong> <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL §13.2</a> for the standard phenomena in precise wording.</li>
+      <li><strong>Spec/docs:</strong> <a href="https://www.postgresql.org/docs/18/transaction-iso.html">PostgreSQL 18 §13.2</a> for the standard phenomena in precise wording.</li>
+      <li><strong>Language:</strong> <a href="https://doc.rust-lang.org/std/sync/index.html">std::sync</a>
+      and <a href="https://doc.rust-lang.org/std/sync/atomic/enum.Ordering.html">atomic memory
+      orderings</a>.</li>
       <li><strong>Book:</strong> <em>Designing Data-Intensive Applications</em> (weak isolation &amp; race conditions) and <em>Database Internals</em> (concurrency control).</li>
-      <li><strong>Forward link:</strong> 7.2 (locking) and 7.3 (isolation/MVCC) are the two ways to forbid the failures named here.</li>
+      <li><strong>Forward link:</strong> 7.2 studies exclusion locks; 7.3 separates isolation levels,
+      versioning, and SQLite WAL snapshots. These mechanisms are often combined.</li>
     </ul>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <p>A Rust data race is undefined behavior, but a database race can occur in memory-safe Rust when
+    individually synchronized operations are composed incorrectly. Keep both questions separate:
+    “Can these bytes be accessed safely?” and “Can this transaction history occur?”</p>
   </div>
 
   <div class="pager" id="pager"></div>

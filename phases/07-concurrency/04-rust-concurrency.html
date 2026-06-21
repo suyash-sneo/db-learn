@@ -19,16 +19,15 @@
   <h2>Why this matters to your DB</h2>
   <p>Phase 1 wrapped the engine in an opaque handle and noted that boundary code creating <code>&amp;mut
   Db</code> is not concurrently usable. To support more than one actor you need a deliberate
-  synchronization design. Rust is unusually well-suited here: its type system rejects data races at
-  compile time, so "did I forget a lock?" becomes a build error rather than a once-in-a-million
-  corruption. But the compiler protects <em>memory</em> safety, not your <em>database</em> invariants —
-  you must still choose the locking granularity and the isolation model. This lesson is about using the
-  language's guarantees without overclaiming them.</p>
+  synchronization design. Safe Rust's type system prevents data races in the Rust memory it can reason
+  about. Unsafe code, raw pointers, FFI callers, files shared with another process, and logically
+  incorrect lock scopes remain your responsibility. The compiler protects memory safety within its
+  contracts, not your database's transaction invariants.</p>
 
   <h2>What Rust guarantees: data-race freedom</h2>
   <p>Rust's ownership and borrowing rules extend to threads. The core guarantee, in the Rust Book's
-  framing, is that safe Rust prevents <strong>data races</strong> — concurrent unsynchronized access to
-  the same memory where at least one access is a write — at compile time.
+  framing, is that safe Rust prevents <strong>data races</strong>: concurrent accesses to one memory
+  location where at least one is a write and the accesses are not synchronized.
   <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch16-00-concurrency.html">The Rust Programming Language, ch. 16 "Fearless Concurrency"</a>]</span>
   Two marker traits encode the rules:</p>
   <ul>
@@ -37,19 +36,21 @@
     <li><strong><code>Sync</code></strong>: a type is safe to <em>share by reference</em>
     (<code>&amp;T</code>) across threads — equivalently, <code>&amp;T</code> is <code>Send</code>.</li>
   </ul>
-  <p>These are auto-derived for types built entirely from <code>Send</code>/<code>Sync</code> parts, and
+  <p>These unsafe auto traits are inferred for many composite types from their fields, and
   the compiler refuses to move a non-<code>Send</code> value across a thread boundary or share a
-  non-<code>Sync</code> value. <code>Rc</code> is neither (non-atomic refcount); <code>Arc</code> is both
-  (atomic refcount).
-  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch16-04-extensible-concurrency-sync-and-send.html">Rust Book ch. 16.4 — <code>Send</code> and <code>Sync</code></a>]</span></p>
+  non-<code>Sync</code> value through APIs that require those bounds. <code>Rc&lt;T&gt;</code> is neither
+  because its reference count is non-atomic. <code>Arc&lt;T&gt;</code> uses an atomic reference count, but
+  it is <code>Send</code>/<code>Sync</code> only when <code>T</code> has the required traits; wrapping
+  <code>RefCell&lt;T&gt;</code> in <code>Arc</code> does not make the inner mutation thread-safe.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch16-04-extensible-concurrency-sync-and-send.html">Rust Book ch. 16.4</a>;
+  <a href="https://doc.rust-lang.org/std/sync/struct.Arc.html#thread-safety">std::sync::Arc — thread safety</a>]</span></p>
 
   <div class="box warn">
     <div class="box-title">⚠️ Data-race freedom is not database consistency</div>
-    <p>The compiler guarantees you won't have two threads scribbling the same bytes unsynchronized. It
-    does <strong>not</strong> guarantee your transactions are isolated, that you took the lock at the right
-    granularity, or that two well-synchronized writers can't still produce a lost update at the
-    <em>logical</em> level. Memory safety and logical correctness are different layers; Rust gives you the
-    first for free in safe code and leaves the second to your design.</p>
+    <p>Two methods may each lock correctly and still form a lost update if the application reads under
+    one guard, drops it, computes, then writes under another. Rust also cannot make an advisory file lock
+    mandatory for a noncooperating process. Memory safety, file-level exclusion, and transaction
+    isolation are different claims.</p>
   </div>
 
   <h2>The shared-state toolkit</h2>
@@ -57,60 +58,71 @@
   <table>
     <thead><tr><th>Primitive</th><th>What it gives</th><th>Use for</th></tr></thead>
     <tbody>
-      <tr><td><code>Arc&lt;T&gt;</code></td><td>thread-safe shared ownership (atomic refcount)</td><td>handing the same engine handle to multiple threads</td></tr>
-      <tr><td><code>Mutex&lt;T&gt;</code></td><td>mutual exclusion: one accessor at a time, read or write</td><td>the single-writer model; simplest correct choice</td></tr>
-      <tr><td><code>RwLock&lt;T&gt;</code></td><td>many readers <em>or</em> one writer</td><td>read-heavy access where reads must not block each other</td></tr>
-      <tr><td><code>atomics</code> (<code>AtomicU64</code>, …)</td><td>lock-free single-value updates</td><td>counters, flags (e.g. an id allocator)</td></tr>
+      <tr><td><code>Arc&lt;T&gt;</code></td><td>shared ownership via an atomic reference count; no automatic synchronization of <code>T</code></td><td>giving several threads ownership of the same synchronized wrapper</td></tr>
+      <tr><td><code>Mutex&lt;T&gt;</code></td><td>one lock guard at a time</td><td>protecting one state machine or coarse engine critical section</td></tr>
+      <tr><td><code>RwLock&lt;T&gt;</code></td><td>shared read guards or one exclusive write guard</td><td>in-process state with genuinely read-only operations</td></tr>
+      <tr><td><code>atomics</code> (<code>AtomicU64</code>, …)</td><td>atomic operations on one value with an explicit memory ordering</td><td>small counters/flags whose invariant really fits one atomic value</td></tr>
     </tbody>
   </table>
   </div>
-  <p>The combination <code>Arc&lt;Mutex&lt;Engine&gt;&gt;</code> is the standard "share one mutable thing
-  across threads" pattern: <code>Arc</code> for shared ownership, <code>Mutex</code> for safe mutation.
-  <code>RwLock</code> swaps the mutex for the "many readers or one writer" policy — which maps directly
-  onto SQLite's SHARED-vs-EXCLUSIVE distinction (7.2).
+  <p><code>Arc&lt;Mutex&lt;Engine&gt;&gt;</code> is a common coarse-grained starting point:
+  <code>Arc</code> supplies ownership and <code>Mutex</code> supplies mutual exclusion. An
+  <code>RwLock</code> permits multiple in-process read guards, but it does not reproduce SQLite's
+  RESERVED/PENDING ladder, snapshots, or cross-process file locks. The standard library also leaves
+  <code>RwLock</code> priority policy to the operating system, so do not promise writer fairness.
   <span class="src">[src: <a href="https://doc.rust-lang.org/book/ch16-03-shared-state.html">Rust Book ch. 16.3 — Shared-State Concurrency</a>; <a href="https://doc.rust-lang.org/std/sync/struct.RwLock.html">std::sync::RwLock</a>]</span></p>
 
-  <pre><code><span class="tok-c">// The canonical shared-handle shape (illustrative — not your engine's logic).</span>
+  <pre><code><span class="tok-c">// Toy shared value: demonstrates the wrapper shape, not database isolation.</span>
 <span class="tok-k">use</span> std::sync::{Arc, RwLock};
 
-<span class="tok-k">let</span> engine = Arc::<span class="tok-f">new</span>(RwLock::<span class="tok-f">new</span>(open_engine()?));
+<span class="tok-k">let</span> counter = Arc::<span class="tok-f">new</span>(RwLock::<span class="tok-f">new</span>(0_u64));
 
-<span class="tok-c">// reader thread:</span>
-<span class="tok-k">let</span> r = Arc::<span class="tok-f">clone</span>(&amp;engine);
-<span class="tok-k">let</span> guard = r.<span class="tok-f">read</span>().<span class="tok-f">unwrap</span>();   <span class="tok-c">// many readers may hold this at once</span>
-
-<span class="tok-c">// writer thread:</span>
-<span class="tok-k">let</span> w = Arc::<span class="tok-f">clone</span>(&amp;engine);
-<span class="tok-k">let mut</span> guard = w.<span class="tok-f">write</span>().<span class="tok-f">unwrap</span>(); <span class="tok-c">// exclusive; waits for readers to drain</span></code></pre>
+{
+    <span class="tok-k">let</span> r = Arc::<span class="tok-f">clone</span>(&amp;counter);
+    <span class="tok-k">let</span> guard = r.<span class="tok-f">read</span>().<span class="tok-f">unwrap</span>();
+    <span class="tok-m">assert_eq!</span>(*guard, 0); <span class="tok-c">// read guard drops at this brace</span>
+}
+{
+    <span class="tok-k">let</span> w = Arc::<span class="tok-f">clone</span>(&amp;counter);
+    <span class="tok-k">let mut</span> guard = w.<span class="tok-f">write</span>().<span class="tok-f">unwrap</span>();
+    *guard += 1; <span class="tok-c">// exclusive within this one RwLock</span>
+}</code></pre>
 
   <h2>The guard pattern and poisoning</h2>
-  <p>Locking returns an RAII <em>guard</em>; the lock is released when the guard is dropped, so you cannot
-  forget to unlock. Two precise caveats for a database:</p>
+  <p>Locking returns an RAII <em>guard</em>; dropping the guard releases the lock. Three caveats matter:</p>
   <ul>
-    <li><strong>Poisoning.</strong> If a thread panics while holding a <code>Mutex</code>/<code>RwLock</code>,
-    the lock becomes <em>poisoned</em>; subsequent <code>lock()</code>/<code>write()</code> calls return an
-    <code>Err</code>. This is std's way of warning that the protected data may be in a half-updated state —
-    which is exactly the situation AGENTS calls out: do not keep using a handle whose invariants a panic may
-    have broken. Decide deliberately whether to propagate the error or treat the engine as failed.
-    <span class="src">[src: <a href="https://doc.rust-lang.org/std/sync/struct.Mutex.html#poisoning">std::sync::Mutex — Poisoning</a>]</span></li>
+    <li><strong>Poisoning is advisory, not proof.</strong> A standard <code>Mutex</code> is normally
+    poisoned when a panic unwinds through its guard; <code>RwLock</code> poisoning is triggered by a
+    panic while exclusively locked, not by a reader panic. The standard docs also list circumstances in
+    which poisoning detection is not guaranteed. Treat a poison error as a warning that invariants may be
+    broken, never as the mechanism that makes unsafe recovery sound.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/std/sync/struct.Mutex.html#poisoning">Mutex
+    poisoning</a>; <a href="https://doc.rust-lang.org/std/sync/struct.RwLock.html#poisoning">RwLock
+    poisoning</a>]</span></li>
     <li><strong>Deadlock is still possible.</strong> The borrow checker prevents data races, not deadlocks:
-    acquiring two locks in inconsistent orders, or re-locking a non-reentrant <code>Mutex</code> on the same
-    thread, can hang. Lock ordering is your responsibility.</li>
+    acquiring two locks in inconsistent orders can create a cycle. Calling <code>lock</code> again from
+    the same thread while it already holds a standard <code>Mutex</code> is explicitly unspecified: it
+    may panic or deadlock.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/std/sync/struct.Mutex.html#method.lock">Mutex::lock</a>]</span></li>
+    <li><strong>Atomics cover only the stated atomic value.</strong> An atomic ID increment does not make
+    a multi-step record insertion atomic, and relaxed ordering does not publish unrelated state. Use
+    atomics only with a written memory-ordering argument.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/std/sync/atomic/">std::sync::atomic</a>]</span></li>
   </ul>
 
   <h2>How this maps onto the build</h2>
-  <p>The build implements a <strong>single-writer, multi-reader</strong> policy in-process. A
-  <code>RwLock</code> (or an explicit lock-state field guarded by a <code>Mutex</code>) models the SHARED
-  vs. EXCLUSIVE distinction; <code>Arc</code> lets multiple threads hold the handle. Because the tests run
-  in one process with in-memory state, they exercise the <em>policy logic</em> — who is allowed in when —
-  not real cross-process OS file locking or true hardware parallelism. The build page states this limit
-  explicitly.</p>
+  <p>The build separates a pure lock-state table from an
+  <code>Arc&lt;Mutex&lt;LockTable&gt;&gt;</code> wrapper. The table makes compatibility rules
+  deterministic and testable; the mutex prevents data races in that table; RAII guards release owner
+  records. This still provides only in-process coordination. It neither locks the database file against
+  another process nor creates WAL reader snapshots.</p>
 
   <div class="box rust">
     <div class="box-title">🦀 Rust just-in-time</div>
     <ul>
-      <li><code>Arc::clone(&amp;x)</code> bumps the refcount and is cheap; it does not deep-copy the data.
-      Prefer it over <code>x.clone()</code> to make the intent ("another owner") obvious.</li>
+      <li><code>Arc::clone(&amp;x)</code> increments the strong count and does not deep-copy
+      <code>T</code>. The allocation is released after the final strong owner is dropped.
+      <span class="src">[src: <a href="https://doc.rust-lang.org/std/sync/struct.Arc.html">Arc</a>]</span></li>
       <li><code>lock()</code>/<code>read()</code>/<code>write()</code> return a <code>Result</code> because
       of poisoning — handle it, don't blanket-<code>unwrap()</code> in engine code.</li>
       <li>A guard borrows the lock; keep its scope as small as possible so you hold the lock briefly
@@ -131,13 +143,14 @@
       granularity, isolation, and deadlock freedom. It prevents unsynchronized memory access, not bad
       concurrency design.</div></details>
       <p class="q">3. Why might <code>RwLock</code> fit this engine better than <code>Mutex</code>?</p>
-      <details><summary>Show answer</summary><div class="answer">It allows many concurrent readers while still
-      giving the writer exclusivity — directly modeling SQLite's SHARED-vs-EXCLUSIVE policy, which a plain
-      <code>Mutex</code> (one accessor of any kind) does not.</div></details>
+      <details><summary>Show answer</summary><div class="answer">It can allow several in-process read guards
+      while giving one write guard exclusivity. It does not model RESERVED/PENDING, snapshots, or
+      cross-process locking, and its fairness policy is unspecified.</div></details>
       <p class="q">4. What is lock poisoning and why does it matter for a database handle?</p>
-      <details><summary>Show answer</summary><div class="answer">If a thread panics while holding the lock, later
-      lock attempts return <code>Err</code> to signal the protected data may be half-updated. For a DB it's a
-      cue not to keep using a possibly-inconsistent handle — handle the error deliberately.</div></details>
+      <details><summary>Show answer</summary><div class="answer">A standard <code>Mutex</code> normally
+      reports poison after a panic unwinds through its guard; an <code>RwLock</code> does so for a writer
+      panic, not a reader panic. Poisoning is advisory and not guaranteed to detect every
+      invariant-breaking panic, so database recovery still needs a rollback-or-fail-closed policy.</div></details>
     </div>
   </div>
 

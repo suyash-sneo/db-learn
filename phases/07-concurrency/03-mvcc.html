@@ -3,83 +3,98 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>7.3 Isolation &amp; MVCC overview</title>
+<title>7.3 Isolation, snapshots &amp; MVCC</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p7:7.3", root: "../../" };</script>
 </head>
 <body>
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 7</a> › 7.3</div>
-  <h1>7.3 — Isolation &amp; MVCC overview</h1>
+  <h1>7.3 — Isolation, snapshots &amp; MVCC</h1>
   <div class="goal"><b>Goal:</b> Understand isolation as a <em>spectrum of levels</em> (not a single
-  on/off property), see how multi-version concurrency control (MVCC) and snapshot isolation let readers
-  and writers run concurrently without locking each other, and place SQLite's WAL mode on that map.</div>
+  on/off property), distinguish an isolation guarantee from a version-storage mechanism, and place
+  PostgreSQL-style MVCC and SQLite WAL snapshots accurately on that map.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>Locking (7.2) is correct but pessimistic: a writer's EXCLUSIVE lock stalls readers. The alternative
-  is to keep <em>multiple versions</em> of data so a reader can be handed a stable old version while a
-  writer produces a new one — nobody waits. This is MVCC, and it is how WAL mode (the durability
-  mechanism you already built in Phase 5) delivers concurrent reads and writes. Knowing where each
-  technique sits on the isolation spectrum lets you state honestly what your engine guarantees instead of
-  hand-waving "it's isolated."</p>
+  <p>Rollback-journal EXCLUSIVE locks temporarily exclude readers. Versioned designs can instead let a
+  reader keep using an older committed view while a writer prepares a newer one. That improves one kind
+  of concurrency, but it does not eliminate locks, waits, write conflicts, or isolation anomalies.
+  <strong>Isolation level</strong> describes permitted histories; <strong>MVCC</strong> and a
+  <strong>WAL snapshot</strong> are mechanisms that may help implement those histories.</p>
 
   <h2>Isolation is a level, not a boolean</h2>
-  <p>The SQL standard defines isolation levels by which of the 7.1 phenomena they permit. Stronger levels
-  forbid more anomalies and cost more concurrency.</p>
+  <p>The SQL standard defines minimum phenomena each level must prevent. An implementation may provide
+  stronger behavior than the minimum, so the level name alone is not a complete implementation spec.</p>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Level</th><th>Dirty read</th><th>Nonrepeatable read</th><th>Phantom read</th><th>Serialization anomaly</th></tr></thead>
     <tbody>
-      <tr><td>Read Uncommitted</td><td>allowed*</td><td>possible</td><td>possible</td><td>possible</td></tr>
-      <tr><td>Read Committed</td><td>not possible</td><td>possible</td><td>possible</td><td>possible</td></tr>
-      <tr><td>Repeatable Read</td><td>not possible</td><td>not possible</td><td>allowed*</td><td>possible</td></tr>
-      <tr><td>Serializable</td><td>not possible</td><td>not possible</td><td>not possible</td><td>not possible</td></tr>
+      <tr><td>Read Uncommitted</td><td>permitted by standard</td><td>possible</td><td>possible</td><td>possible</td></tr>
+      <tr><td>Read Committed</td><td>forbidden</td><td>possible</td><td>possible</td><td>possible</td></tr>
+      <tr><td>Repeatable Read</td><td>forbidden</td><td>forbidden</td><td>permitted by standard</td><td>possible</td></tr>
+      <tr><td>Serializable</td><td>forbidden</td><td>forbidden</td><td>forbidden</td><td>forbidden</td></tr>
     </tbody>
   </table>
   </div>
-  <p class="src">[src: <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL §13.2, Table 13.1</a>. *The standard permits these at that level; a given engine may forbid more than required — e.g. PostgreSQL's Repeatable Read disallows phantom reads, and its Read Uncommitted behaves like Read Committed.]</p>
+  <p class="src">[src: <a href="https://www.postgresql.org/docs/18/transaction-iso.html">PostgreSQL 18
+  Transaction Isolation, Table 13.1</a>. PostgreSQL documents that its Read Uncommitted behaves as Read
+  Committed and its Repeatable Read prevents phantoms.]</p>
 
   <div class="box warn">
     <div class="box-title">⚠️ "Isolated" does not mean "serializable"</div>
-    <p>A common error is to treat isolation as binary and equate it with serializability. Serializable is
-    only the <em>strongest</em> level: "any concurrent execution of a set of Serializable transactions is
-    guaranteed to produce the same effect as running them one at a time in some order."
-    <span class="src">[src: <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL §13.2</a>]</span>
-    Most databases default to a weaker level (often Read Committed). When you describe your engine, name
-    the exact level it provides and the anomalies it still allows — do not claim serializability you did
-    not implement.</p>
+    <p>A serializable implementation makes each committed concurrent history equivalent to some serial
+    ordering. A stable snapshot alone does not establish that property. When you describe your engine,
+    specify when the snapshot is chosen, how write-write and predicate conflicts are handled, and which
+    anomalies remain.
+    <span class="src">[src: <a href="https://www.postgresql.org/docs/18/transaction-iso.html">PostgreSQL 18
+    Transaction Isolation — Serializable</a>]</span></p>
   </div>
 
-  <h2>MVCC: keep old versions instead of overwriting in place</h2>
-  <p>Under MVCC, a write does not destroy the previous value; it creates a new <em>version</em> and leaves
-  the old one readable. Each transaction reads as of a <strong>snapshot</strong> — a consistent point in
-  time — so it sees a stable view even while writers move on. The mechanics:</p>
+  <h2>MVCC: visibility over multiple versions</h2>
+  <p>In a typical tuple-version MVCC design, updates create a new row version while older versions remain
+  available to transactions whose snapshots can still see them. The implementation needs:</p>
   <ul>
-    <li>Each version is tagged with the transaction/commit that produced it.</li>
-    <li>A transaction's snapshot determines which versions are visible to it (those committed "before" its
-    snapshot point).</li>
-    <li>Readers never block writers and writers never block readers, because they touch different
-    versions. Write-write conflicts still need resolution (a lock on the row being written, or
-    abort-on-conflict).</li>
-    <li>Obsolete versions no longer visible to any live snapshot are eventually reclaimed (garbage
-    collection / vacuuming).</li>
+    <li><strong>Version metadata</strong> that identifies which transaction created or invalidated a version.</li>
+    <li><strong>Visibility rules</strong> that choose one visible version for the reader's snapshot.</li>
+    <li><strong>Conflict handling</strong> for concurrent writers; multiple versions do not make two
+    writers to the same logical item automatically compatible.</li>
+    <li><strong>Reclamation</strong> that removes versions only after no relevant live snapshot can need them.</li>
   </ul>
-  <p>PostgreSQL is a canonical MVCC engine: it implements the isolation levels "using multiversion
-  concurrency control (MVCC)," where a query sees "a snapshot … as of the start" of the statement or
-  transaction depending on level.
-  <span class="src">[src: <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL §13.2</a>; <a href="https://www.postgresql.org/docs/current/mvcc-intro.html">§13.1 MVCC Introduction</a>]</span></p>
+  <p>PostgreSQL documents MVCC as its method for giving each statement a database snapshot while
+  minimizing read/write lock contention. At Read Committed it chooses a new snapshot for each command;
+  at Repeatable Read it uses the transaction's initial query snapshot.
+  <span class="src">[src: <a href="https://www.postgresql.org/docs/18/transaction-iso.html">PostgreSQL 18 §13.2</a>; <a href="https://www.postgresql.org/docs/18/mvcc-intro.html">§13.1 MVCC Introduction</a>]</span></p>
 
-  <h2>Snapshot isolation, concretely: SQLite WAL mode</h2>
-  <p>You already built a WAL in Phase 5. Its concurrency payoff is a form of snapshot isolation. When a
-  read begins in WAL mode, SQLite "remembers the location of the last valid commit record in the WAL …
-  the 'end mark' … unchanged for the duration of the transaction, thus ensuring that a single read
-  transaction only sees the database content as it existed at a single point in time."
-  <span class="src">[src: <a href="https://www.sqlite.org/wal.html">sqlite.org — WAL §"Concurrency"</a>]</span></p>
-  <p>Consequently, in WAL mode "readers do not block writers and a writer does not block readers," but
-  "there can only be one writer at a time" because there is a single WAL file.
-  <span class="src">[src: <a href="https://www.sqlite.org/wal.html">sqlite.org — WAL</a>]</span>
-  That is the precise shape your build adopts: <strong>multiple concurrent readers on snapshots, a single
-  writer.</strong></p>
+  <h2>Snapshot isolation can still allow write skew</h2>
+  <p>Suppose a rule requires at least one of two doctors, A or B, to remain on call. T1 and T2 both read
+  the same snapshot showing A and B on call. T1 turns A off; T2 turns B off. They update different rows,
+  so a policy that checks only same-row write conflicts may commit both. The final state violates the
+  rule even though each transaction read a stable snapshot. This is <strong>write skew</strong>: a
+  serialization anomaly that snapshot isolation alone may permit. Serializable Snapshot Isolation adds
+  conflict detection that can abort a dangerous transaction.
+  <span class="src">[src: <a href="https://www.postgresql.org/docs/18/transaction-iso.html#XACT-SERIALIZABLE">PostgreSQL 18 — Serializable Isolation Level</a>]</span></p>
+
+  <h2>SQLite WAL: page versions plus a fixed end mark</h2>
+  <p>When a SQLite WAL read transaction begins, it fixes an <strong>end mark</strong> at the last commit
+  visible then. For each page, the reader uses the newest applicable frame at or before that end mark,
+  otherwise the database-file page. Later commits append beyond the reader's end mark, so that reader
+  continues to see its earlier snapshot.
+  <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL §2.2</a>]</span></p>
+  <p>SQLite therefore documents WAL-mode isolation as snapshot isolation: readers may continue while one
+  writer appends, but writers are serialized. A read transaction cannot necessarily upgrade to a writer
+  after another connection has changed its snapshot; SQLite can return
+  <code>SQLITE_BUSY_SNAPSHOT</code>.
+  <span class="src">[src: <a href="https://www.sqlite.org/isolation.html">SQLite Isolation — WAL mode and
+  <code>SQLITE_BUSY_SNAPSHOT</code></a>]</span></p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ SQLite WAL is not PostgreSQL-style tuple MVCC</div>
+    <p>Both preserve older committed views, but the representation and lifetime differ. PostgreSQL keeps
+    row versions with visibility metadata and vacuums obsolete tuples. SQLite WAL keeps newer
+    <em>page images</em> in an append-only log until checkpoint/reset and uses the reader's end mark plus
+    the wal-index. Call SQLite WAL a snapshot mechanism or page-version design; do not infer a general
+    tuple-MVCC subsystem that SQLite does not claim.</p>
+  </div>
 
   <figure>
   <svg viewBox="0 0 560 170" role="img" aria-label="Writer appends a new version while readers stay on their snapshot">
@@ -92,21 +107,21 @@
     <line class="dg-edge" x1="135" y1="70" x2="135" y2="98"/><polygon class="dg-arrow" points="135,106 131,96 139,96"/>
     <text class="dg-txt-s" x="280" y="105">Writer produces v3</text>
     <line class="dg-edge-hot" x1="215" y1="70" x2="215" y2="98"/><polygon class="dg-arrow" points="215,106 211,96 219,96"/>
-    <text class="dg-txt-s" x="20" y="150">Neither waits: A reads its snapshot; the writer appends a newer version.</text>
+    <text class="dg-txt-s" x="20" y="150">A keeps its visibility boundary while the writer publishes a newer version.</text>
   </svg>
-  <figcaption>MVCC/snapshot isolation: a reader fixed on v2 is unaffected by a writer creating v3. The
-  single-writer rule (one WAL) prevents two writers from racing.</figcaption>
+  <figcaption>Versioned reading: a reader's visibility boundary remains at v2 while a serialized writer
+  publishes v3. The mechanism may be row versions or WAL page frames; their cleanup rules differ.</figcaption>
   </figure>
 
   <h2>Locking vs. MVCC — the trade-off</h2>
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Aspect</th><th>Pure locking (rollback journal)</th><th>MVCC / snapshot (WAL)</th></tr></thead>
+    <thead><tr><th>Aspect</th><th>SQLite rollback mode</th><th>SQLite WAL mode</th><th>Tuple MVCC example</th></tr></thead>
     <tbody>
-      <tr><td>Reader vs. writer</td><td>block each other during the write</td><td>do not block each other</td></tr>
-      <tr><td>Writers</td><td>one at a time (EXCLUSIVE)</td><td>one at a time (single WAL)</td></tr>
-      <tr><td>Reads see</td><td>current committed state under SHARED</td><td>a fixed snapshot for the transaction</td></tr>
-      <tr><td>Extra cost</td><td>contention/stalls</td><td>storing &amp; reclaiming old versions; checkpointing</td></tr>
+      <tr><td>Older view stored as</td><td>unchanged database while writer journals originals</td><td>database pages plus committed WAL frames up to an end mark</td><td>multiple row/tuple versions</td></tr>
+      <tr><td>Reader vs. writer</td><td>exclude each other while EXCLUSIVE is held</td><td>normally overlap</td><td>often overlap, subject to implementation conflicts</td></tr>
+      <tr><td>Writers</td><td>serialized</td><td>serialized</td><td>may overlap on nonconflicting data; conflicts still resolved</td></tr>
+      <tr><td>Reclamation</td><td>finalize rollback journal</td><td>checkpoint and eventually reset WAL</td><td>vacuum/garbage-collect invisible versions</td></tr>
     </tbody>
   </table>
   </div>
@@ -119,26 +134,36 @@
       which anomalies they allow. "Isolated" is meaningless without naming the level; serializable is just
       the strongest one, and many engines default to weaker levels.</div></details>
       <p class="q">2. How does MVCC let a reader and a writer run without blocking each other?</p>
-      <details><summary>Show answer</summary><div class="answer">A write creates a new version rather than
-      overwriting; the reader keeps reading its snapshot's (older) version while the writer produces the new
-      one, so neither waits.</div></details>
+      <details><summary>Show answer</summary><div class="answer">It retains older committed versions and
+      applies visibility rules so a reader can select its snapshot's version while a writer creates a newer
+      one. Writers still need conflict handling, and readers may still wait for unrelated resources.</div></details>
       <p class="q">3. What exactly is a WAL-mode reader's snapshot in SQLite?</p>
       <details><summary>Show answer</summary><div class="answer">The location of the last valid commit record
       in the WAL at read start (the "end mark"), held fixed for the transaction so it sees the database as of
       one point in time.</div></details>
       <p class="q">4. In WAL mode, how many concurrent writers are allowed, and why?</p>
-      <details><summary>Show answer</summary><div class="answer">One, because there is a single WAL file that
-      all writes append to; readers, however, can run concurrently with the writer.</div></details>
+      <details><summary>Show answer</summary><div class="answer">One writer at a time. SQLite serializes
+      writes to the WAL; readers can normally retain earlier snapshots concurrently.</div></details>
+      <p class="q">5. Why does a stable snapshot not imply serializability?</p>
+      <details><summary>Show answer</summary><div class="answer">Transactions can read the same snapshot and
+      make disjoint writes whose combination violates an invariant, as in the two-doctor write-skew
+      example. Serializable execution requires additional conflict handling.</div></details>
     </div>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Docs:</strong> <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL isolation</a>, <a href="https://www.sqlite.org/wal.html">SQLite WAL</a>, <a href="https://www.sqlite.org/isolation.html">SQLite isolation</a>.</li>
+      <li><strong>Docs:</strong> <a href="https://www.postgresql.org/docs/18/transaction-iso.html">PostgreSQL 18 isolation</a>, <a href="https://www.sqlite.org/wal.html">SQLite WAL</a>, <a href="https://www.sqlite.org/isolation.html">SQLite isolation</a>.</li>
       <li><strong>Book:</strong> <em>Designing Data-Intensive Applications</em> ch. 7 (snapshot isolation, SSI) and <em>Database Internals</em> (MVCC, optimistic concurrency).</li>
       <li><strong>Back/forward link:</strong> Phase 5 built the WAL; 7.4 maps these models onto Rust's primitives.</li>
     </ul>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <p>An <code>RwLock</code> can exclude a writer from in-memory readers, but it does not create snapshots.
+    Snapshot reads require immutable/versioned state plus a visibility boundary and reclamation policy.</p>
   </div>
 
   <div class="pager" id="pager"></div>

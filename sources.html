@@ -70,7 +70,11 @@
     C headers.</li>
     <li><a href="https://dart.dev/language/isolates">Dart isolates</a> and
     <a href="https://dart.dev/language/concurrency">concurrency model</a> — separate memory, message
-    passing, and <code>Isolate.run</code>.</li>
+    passing, unsendable FFI objects, blocking-operation guidance, and <code>Isolate.run</code>. Phase 7
+    was checked against the Dart 3.12.2 documentation shown on June 21, 2026.</li>
+    <li><a href="https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.isolateLocal.html"><code>NativeCallable.isolateLocal</code></a>
+    and <a href="https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.listener.html"><code>NativeCallable.listener</code></a>
+    — thread affinity versus asynchronous any-thread callback delivery in Dart 3.12.2.</li>
     <li><a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">Flutter — developing
     packages &amp; plugins</a> — FFI plugins, per-platform native build (CMake/Gradle, CocoaPods), and
     bundling. Packaging mechanics are version-sensitive.</li>
@@ -127,12 +131,17 @@
 
   <h2>Concurrency, isolation, and transactions</h2>
   <ul>
-    <li><a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL — Transaction
-    Isolation</a> and <a href="https://www.postgresql.org/docs/current/mvcc-intro.html">MVCC
+    <li><a href="https://www.postgresql.org/docs/18/transaction-iso.html">PostgreSQL 18 — Transaction
+    Isolation</a> and <a href="https://www.postgresql.org/docs/18/mvcc-intro.html">MVCC
     introduction</a> — precise SQL-standard isolation levels, phenomena, and an MVCC implementation.</li>
     <li><a href="https://www.sqlite.org/lockingv3.html">SQLite locking v3</a> (the five lock states) and
     <a href="https://www.sqlite.org/wal.html">WAL</a> / <a href="https://www.sqlite.org/isolation.html">isolation</a>
     for snapshot-style concurrency.</li>
+    <li><a href="https://sqlite.org/releaselog/3_53_0.html">SQLite 3.53.0</a>, source ID
+    <code>4525003a53a7fc63ca75c59b22c79608659ca12f0131f52c18637f829977f20b</code>, and its
+    <a href="https://www.sqlite.org/2026/sqlite-src-3530000.zip">official source archive</a> —
+    Phase 7's pinned <code>os.h</code>, <code>global.c</code>, <code>os_unix.c</code>,
+    <code>pager.c</code>, and <code>wal.c</code> source dive.</li>
     <li><a href="https://doc.rust-lang.org/book/ch16-00-concurrency.html">Rust Book ch. 16 — Fearless
     Concurrency</a>, <a href="https://doc.rust-lang.org/std/sync/index.html">std::sync</a>
     (<code>Arc</code>, <code>Mutex</code>, <code>RwLock</code>, <code>Condvar</code>), and the

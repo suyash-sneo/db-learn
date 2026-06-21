@@ -14,29 +14,28 @@
   <h1>Concurrency</h1>
   <p class="lead">Phase 5 gave you the <em>A</em> and <em>D</em> of ACID. This phase is about the
   <em>I</em>: what two or more transactions are allowed to observe about each other. You'll see why
-  uncontrolled concurrent access corrupts data, study the two dominant families of solution — locking
-  and multi-version concurrency control (MVCC) — using SQLite as the concrete reference, then map them
+  uncontrolled concurrent access corrupts data, study exclusion locks, snapshots, and multi-version
+  concurrency control (MVCC) without treating them as mutually exclusive, then map them
   onto the tools you actually have: Rust's ownership-based concurrency and Dart's isolate model across
-  the FFI boundary. The build is deliberately modest: a correct single-writer locking layer for one
-  embedded file, with an honest account of what it does and does not guarantee.</p>
+  the FFI boundary. The build is deliberately modest: an owner-aware, in-process lock policy for one
+  engine handle, with explicit cross-process and snapshot limitations.</p>
 
   <div class="box deeper">
     <div class="box-title">Why concurrency comes after durability</div>
-    <p>Isolation is only meaningful once atomic, durable commits exist (Phase 5): you cannot reason
-    about "what a concurrent transaction sees" until "a transaction" is a well-defined, all-or-nothing
-    unit. Concurrency control then decides which interleavings of those units are permitted. Putting it
-    here means every rule in this phase is layered on a commit protocol you already built and
-    understand.</p>
+    <p>Isolation can be specified independently of crash durability, but implementing a usable engine
+    requires the layers to agree on transaction boundaries. Putting concurrency after Phase 5 lets you
+    define lock scope around a commit/rollback protocol you already understand: acquire before the first
+    protected read or mutation, publish or roll back, then release.</p>
   </div>
 
   <div class="box rust">
     <div class="box-title">What you'll be able to do after Phase 7</div>
     <p>Name the concrete anomalies uncontrolled concurrency causes; explain SQLite's five rollback-journal
     lock states and how WAL mode changes the reader/writer story; describe the SQL isolation levels and
-    where MVCC and snapshot isolation sit among them; choose the right Rust synchronization primitive for
+    distinguish tuple MVCC from SQLite's WAL page snapshots; choose a Rust synchronization primitive for
     a shared handle and justify it with <code>Send</code>/<code>Sync</code>; reason about calling your
-    engine from multiple Dart isolates across the FFI; and implement a single-writer/multi-reader locking
-    layer with tests that are honest about their limits.</p>
+    engine from a long-lived Dart worker isolate across the FFI; and implement a single-writer lock
+    policy whose deterministic and threaded tests are honest about its limits.</p>
   </div>
 
   <div class="cardgrid" id="cards"></div>

@@ -257,7 +257,7 @@ pre code {
 .src {
   font-family: var(--mono); font-size: .76em; color: var(--text-faint);
   background: rgba(125,135,148,.12); border-radius: 4px; padding: .05em .4em;
-  white-space: nowrap;
+  white-space: normal; overflow-wrap: anywhere;
 }
 .verify-tag {
   font-family: var(--mono); font-size: .74em; font-weight: 700;

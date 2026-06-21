@@ -101,11 +101,11 @@ const PHASES = [
     lessons: [
       ["7.1","The concurrency problem","01-problem.html","done"],
       ["7.2","File locking & SQLite lock states","02-locking.html","done"],
-      ["7.3","Isolation & MVCC overview","03-mvcc.html","done"],
+      ["7.3","Isolation, snapshots & MVCC","03-mvcc.html","done"],
       ["7.4","Rust concurrency for this","04-rust-concurrency.html","done"],
       ["7.5","Flutter isolates across FFI","05-isolates.html","done"],
       ["7.6","Source dive: SQLite locking","06-source-locking.html","done"],
-      ["build","Build: the locking layer","build.html","done"],
+      ["build","Build: an in-process lock policy","build.html","done"],
     ] },
   { id: "p8", num: "8", title: "Real C ABI + aggregation", dir: "phases/08-c-abi-aggregation",
     lessons: [

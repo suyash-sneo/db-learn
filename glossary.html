@@ -45,6 +45,12 @@
     <dd>A sequence of stages (match → group → sort → …) that transform a stream of documents
     into a computed result. MongoDB's model; a v2 feature for your engine.</dd>
 
+    <dt data-term="advisory lock file os cooperating process">Advisory lock</dt>
+    <dd>An operating-system lock that coordinates programs which voluntarily follow the same locking
+    protocol; it does not prevent a noncooperating program from accessing the file through ordinary I/O.
+    SQLite's documented Unix locking path uses POSIX advisory locks.
+    <span class="src">[src: <a href="https://www.sqlite.org/lockingv3.html">SQLite lockingv3 §6</a>]</span></dd>
+
     <dt data-term="borrow borrowing reference rust">Borrow / borrowing</dt>
     <dd>In Rust, accessing a value through a reference (<code>&amp;T</code> or <code>&amp;mut T</code>)
     without taking ownership. The borrow checker enforces: many shared <code>&amp;</code> borrows
@@ -147,9 +153,11 @@
     default. The lookup is two-step: <code>_id</code> → record location → bytes.</dd>
 
     <dt data-term="isolate dart concurrency message passing">Isolate (Dart)</dt>
-    <dd>Dart's unit of concurrency: a worker with its own memory and event loop that can't see another
-    isolate's memory. Isolates communicate by passing messages over ports, not by sharing mutable
-    state. Heavy database work is offloaded to a worker isolate to keep the UI responsive.</dd>
+    <dd>Dart's unit of concurrency: an execution context with its own state and event loop. Isolates
+    communicate through asynchronous port messages. In Dart 3.12.2, FFI objects including
+    <code>Pointer</code> and <code>DynamicLibrary</code> are not sendable, so a database worker should
+    create and own its native bindings and handle.
+    <span class="src">[src: <a href="https://dart.dev/language/concurrency">Dart concurrency</a>]</span></dd>
 
     <dt data-term="isolation level read committed repeatable read serializable">Isolation level</dt>
     <dd>How much of concurrent transactions' effects a transaction may observe — a spectrum
@@ -174,9 +182,10 @@
     <span class="src">[src: pinned <a href="https://github.com/msgpack/msgpack/blob/8aa09e2a6a9180a49fc62ecfefe149f063cc5e4b/spec.md">MessagePack spec</a>]</span></dd>
 
     <dt data-term="mvcc multiversion concurrency control snapshot">MVCC</dt>
-    <dd>Multi-version concurrency control: a write creates a new <em>version</em> rather than
-    overwriting, so readers keep reading a stable older version while writers proceed — readers and
-    writers don't block each other. Old versions are reclaimed once no snapshot needs them.</dd>
+    <dd>Multi-version concurrency control: an implementation family that stores multiple logical data
+    versions and applies snapshot visibility rules. It can reduce read/write lock contention, but still
+    needs write-conflict handling and safe version reclamation. SQLite WAL's page-frame snapshots are
+    related versioning, not PostgreSQL-style tuple MVCC.</dd>
 
     <dt data-term="opaque handle pointer">Opaque handle</dt>
     <dd>A pointer the other language holds but cannot inspect — it only passes it back to your
@@ -260,17 +269,18 @@
     <dt data-term="send sync marker traits threads rust">Send / Sync</dt>
     <dd>Rust marker traits for thread safety: <code>Send</code> means a value can be moved to another
     thread; <code>Sync</code> means <code>&amp;T</code> can be shared across threads. The compiler uses
-    them to reject data races at compile time — memory safety, not logical database isolation.</dd>
+    them to reject unsafe thread crossings in safe Rust — memory safety, not logical database isolation.
+    <code>Arc&lt;T&gt;</code> has these traits only when <code>T</code> satisfies the required bounds.</dd>
 
     <dt data-term="serializability serial order strongest">Serializability</dt>
     <dd>The strongest isolation level: any concurrent execution produces the same effect as running the
     transactions one at a time in some order. It is one level, not a synonym for "isolated."</dd>
 
     <dt data-term="snapshot isolation reader version wal">Snapshot isolation</dt>
-    <dd>Each transaction reads as of a fixed point in time (a snapshot), so it sees a stable view while
-    writers proceed. SQLite WAL mode gives readers a snapshot at the last commit before they began, so
-    readers don't block the single writer and vice versa.
-    <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL</a>]</span></dd>
+    <dd>A transaction reads from a fixed committed snapshot while concurrent commits may advance the
+    current state. This does not by itself imply serializability; write skew can remain. SQLite WAL mode
+    gives a read transaction a fixed WAL end mark and serializes writers.
+    <span class="src">[src: <a href="https://www.sqlite.org/isolation.html">SQLite isolation</a>]</span></dd>
 
     <dt data-term="slotted page slot array">Slotted page</dt>
     <dd>A page layout for variable-length records: a slot/pointer array grows from one end, the
@@ -287,6 +297,11 @@
     updating the main file. In SQLite WAL mode, a transaction commits when a frame carrying a commit
     marker is written; later checkpointing copies pages back to the database.
     <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL</a>]</span></dd>
+
+    <dt data-term="write skew snapshot isolation anomaly invariant">Write skew</dt>
+    <dd>A serialization anomaly where transactions read the same snapshot, update different items, and
+    together violate an invariant even though they do not overwrite the same item. Snapshot isolation
+    may permit it; serializable conflict detection must prevent or abort the dangerous combination.</dd>
   </dl>
 
   <p class="muted small" id="nohits" hidden>No terms match that filter.</p>

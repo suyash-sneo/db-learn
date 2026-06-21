@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Build — the locking layer</title>
+<title>Build — an in-process lock policy</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p7:build", root: "../../" };</script>
 </head>
@@ -11,146 +11,204 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 7</a> › Build</div>
   <span class="pill">Build · AI off</span>
-  <h1>Build: a single-writer lock manager</h1>
-  <div class="goal"><b>Goal:</b> Implement the <em>policy</em> half of SQLite's rollback-journal locking
-  (7.2) as an in-process state machine: a lock manager that grants or refuses SHARED / RESERVED / PENDING
-  / EXCLUSIVE according to the compatibility rules, enforcing "many readers OR one writer." Then drive your
-  engine's reads and writes through it.</div>
+  <h1>Build: a single-writer lock policy</h1>
+  <div class="goal"><b>Goal:</b> Implement a deterministic owner-aware lock table, wrap it in
+  thread-safe in-process coordination, and route one document-store handle through RAII read/write
+  guards. The policy mirrors SQLite rollback-mode SHARED → RESERVED → PENDING → EXCLUSIVE transitions
+  without pretending to implement SQLite's VFS or cross-process locks.</div>
 
   <div class="box warn">
     <div class="box-title">⚠️ AI off</div>
-    <p>This page gives the state model, contracts, failing tests, and <code>todo!()</code> stubs only — no
-    worked lock manager. Concurrency control is correctness-critical; implement the transition logic
-    yourself. Cite <a href="https://www.sqlite.org/lockingv3.html">lockingv3</a> for the compatibility
-    rules you encode.</p>
+    <p>This page contains contracts, <code>todo!()</code> stubs, failing tests, and graduated hints.
+    Implement the state transitions yourself. Do not ask an AI to fill them in.</p>
   </div>
 
   <div class="box warn">
-    <div class="box-title">⚠️ What this build is and is not</div>
-    <p>You are modeling the <strong>decision logic</strong> of locking — given the locks currently held, is
-    a requested lock granted or refused? — as a deterministic in-process state machine. You are
-    <strong>not</strong> building OS cross-process file locking, and the tests do <strong>not</strong> use
-    real threads or real <code>fcntl</code> locks, so they validate the compatibility matrix and escalation
-    order, <em>not</em> true parallel timing or cross-process exclusion. A request that "would block" in a
-    real system is returned here as <code>Err(WouldBlock)</code> rather than parking a thread; a production
-    version would wait on a condition variable instead. The acceptance criteria include a manual note about
-    what real blocking and OS locking would require.</p>
+    <div class="box-title">⚠️ Exact scope</div>
+    <p>This build has two layers: a pure <code>LockTable</code> that decides legal transitions, and a
+    <code>LockManager</code> that shares that table through <code>Arc&lt;Mutex&lt;…&gt;&gt;</code>.
+    It coordinates threads using this manager instance. It does <strong>not</strong> coordinate another
+    process or an independently constructed manager, does not create reader snapshots, and returns
+    <code>WouldBlock</code> instead of waiting. Real file locking belongs in a later platform-specific
+    VFS layer.</p>
   </div>
 
-  <h2>The state model</h2>
-  <p>Five logical states, escalating; the manager tracks the locks currently held by all participants:</p>
+  <h2>The model you must implement</h2>
+  <p>Every holder has an <code>OwnerId</code>. A writer first holds SHARED, then uniquely holds RESERVED.
+  An EXCLUSIVE attempt enters PENDING; while PENDING, new SHARED requests fail. EXCLUSIVE becomes
+  grantable when the only remaining SHARED owner is the writer itself. This counts the writer's own read
+  lock explicitly rather than hiding it in a global boolean.</p>
   <div class="tablewrap"><table>
-    <thead><tr><th>Held / requested</th><th>Rule encoded</th></tr></thead>
+    <thead><tr><th>Request</th><th>Grant condition</th><th>Effect</th></tr></thead>
     <tbody>
-      <tr><td>SHARED</td><td>Granted unless a PENDING or EXCLUSIVE lock is held. Any number may be held at once.</td></tr>
-      <tr><td>RESERVED</td><td>Granted only if no RESERVED, PENDING, or EXCLUSIVE is held. Coexists with existing SHARED locks. At most one.</td></tr>
-      <tr><td>PENDING</td><td>The escalation step from RESERVED toward EXCLUSIVE. While held, <em>new</em> SHARED requests are refused; existing SHARED locks continue.</td></tr>
-      <tr><td>EXCLUSIVE</td><td>Granted only when no other lock of any kind is held (SHARED count is 0 and no other writer). At most one; coexists with nothing.</td></tr>
+      <tr><td>SHARED(owner)</td><td>owner is new; no PENDING or EXCLUSIVE writer</td><td>add owner to readers</td></tr>
+      <tr><td>RESERVED(owner)</td><td>owner already has SHARED; no writer exists</td><td>record the one RESERVED writer</td></tr>
+      <tr><td>EXCLUSIVE(owner)</td><td>owner holds RESERVED; no other SHARED owner remains</td><td>pass through PENDING, then replace the writer's SHARED+RESERVED state with EXCLUSIVE</td></tr>
+      <tr><td>failed EXCLUSIVE</td><td>another SHARED owner remains</td><td>keep this writer PENDING so new readers cannot jump ahead</td></tr>
+      <tr><td>release</td><td>the same owner currently holds that role</td><td>remove exactly that owner's state; dropping a writer clears its own SHARED plus writer state</td></tr>
     </tbody>
   </table></div>
-  <p class="src">[src: <a href="https://www.sqlite.org/lockingv3.html">sqlite.org — lockingv3</a> — the compatibility rules above are this page's stated semantics]</p>
-
-  <h2>Deliverable</h2>
-  <p>A Rust 2024 module <code>lockmgr</code>. A <code>LockManager</code> holds the current lock census and
-  hands out RAII guards; dropping a guard releases that lock. A reader takes a SHARED guard; a writer takes
-  RESERVED, then escalates to EXCLUSIVE (via PENDING) only when no SHARED locks remain. The write path is
-  expressed as explicit transitions so the escalation order is testable. Wire your Phase 6 document store so
-  that a read holds SHARED for its duration and a write holds the write path around the commit.</p>
+  <p class="src">[src: <a href="https://www.sqlite.org/lockingv3.html">SQLite lockingv3 §3 and §5</a>.
+  The owner-aware Rust API and fail-fast behavior are this curriculum's design choices.]</p>
 
   <h2>Ordered milestones</h2>
   <ol>
-    <li><strong>M1 — census + SHARED.</strong> Track <code>shared_count</code>, <code>reserved</code>,
-    <code>pending</code>, <code>exclusive</code>. Implement <code>acquire_shared</code> and its release;
-    refuse SHARED while PENDING/EXCLUSIVE is held.</li>
-    <li><strong>M2 — RESERVED.</strong> <code>acquire_reserved</code>: at most one, coexists with SHARED,
-    refused if another writer (reserved/pending/exclusive) is present.</li>
-    <li><strong>M3 — escalation to EXCLUSIVE.</strong> From RESERVED, move to PENDING (blocking new SHARED),
-    then to EXCLUSIVE only when <code>shared_count == 0</code>. If readers remain, the request is
-    <code>WouldBlock</code> — not granted.</li>
-    <li><strong>M4 — guards + invariants.</strong> RAII guards that release on drop; an internal
-    <code>assert_census_valid</code> that the held set is always one of the legal combinations.</li>
-    <li><strong>M5 — wire the engine.</strong> Route Phase 6 reads through a SHARED guard and writes through
-    the write path; show a read and a write cannot both hold incompatible locks.</li>
+    <li><strong>M1 — pure table.</strong> Implement owner allocation, SHARED acquisition/release, a
+    visible state summary, and invariant checks without threads or synchronization.</li>
+    <li><strong>M2 — writer path.</strong> Require SHARED before RESERVED; enforce one writer; implement
+    RESERVED → PENDING → EXCLUSIVE and retry from PENDING after readers drain.</li>
+    <li><strong>M3 — failure atomicity.</strong> A failed compound manager operation must undo only the
+    state it added. A failed second writer must not leak its temporary SHARED owner.</li>
+    <li><strong>M4 — synchronized wrapper.</strong> Put the table behind
+    <code>Arc&lt;Mutex&lt;LockTable&gt;&gt;</code>. Return <code>Poisoned</code> rather than silently
+    ignoring mutex poison. Allocate owner IDs without wrapping.</li>
+    <li><strong>M5 — RAII guards.</strong> Read and write guards release exactly their own owner state on
+    drop. A write guard retains PENDING after <code>WouldBlock</code> and can retry EXCLUSIVE.</li>
+    <li><strong>M6 — document-store integration.</strong> On one Phase 6 handle, hold a read guard for the
+    complete lookup/query and a write guard from before mutation begins through commit or rollback.</li>
   </ol>
 
   <h2>Acceptance criteria</h2>
   <ul>
-    <li>All supplied tests pass unchanged.</li>
-    <li>Any number of SHARED locks coexist; a new SHARED is refused while PENDING or EXCLUSIVE is held.</li>
-    <li>At most one RESERVED; it coexists with existing SHARED locks; a second writer is refused.</li>
-    <li>EXCLUSIVE is granted only when nothing else is held; the write path refuses (returns
-    <code>WouldBlock</code>) while readers remain.</li>
-    <li>The census is never in an illegal combination (e.g. EXCLUSIVE with a nonzero SHARED count).</li>
-    <li><strong>Manual note (write it in a comment or README):</strong> describe what a real implementation
-    would add — condition-variable waiting instead of <code>WouldBlock</code>, OS file locks for
-    cross-process exclusion, and the platform caveats (advisory locks, network filesystems) from 7.2 — and
-    state plainly that these tests do not cover real parallel timing.</li>
+    <li>All ten supplied unit tests pass unchanged.</li>
+    <li>The table never contains two writer owners, PENDING without a writer, or EXCLUSIVE alongside a
+    reader owner.</li>
+    <li>RESERVED requires the same owner to hold SHARED first. PENDING rejects new readers while allowing
+    existing readers to release.</li>
+    <li>A failed second-writer acquisition leaves no leaked reader owner.</li>
+    <li>Cloned managers share one table; the type is <code>Send + Sync</code>; the threaded race grants
+    exactly one reservation.</li>
+    <li>Owner allocation fails closed at exhaustion and never wraps to a reused ID.</li>
+    <li>Mutex poisoning is surfaced as <code>LockError::Poisoned</code>. Do not use
+    <code>PoisonError::into_inner</code> as an automatic “recovery.”</li>
+    <li><strong>Manual integration check:</strong> instrument one Phase 6 handle and demonstrate that
+    every public read/write path acquires the appropriate guard for the whole operation. Record that this
+    does not protect another process or separately created manager.</li>
   </ul>
 
   <h2>Stub: <code>src/lockmgr.rs</code></h2>
   <span class="code-label">src/lockmgr.rs — implement every todo!()</span>
-<pre><code><span class="tok-m">#[derive(Clone, Copy, Debug, PartialEq, Eq)]</span>
-<span class="tok-k">pub enum</span> <span class="tok-f">LockState</span> { Unlocked, Shared, Reserved, Pending, Exclusive }
+<pre><code><span class="tok-k">use</span> std::{
+    collections::<span class="tok-f">BTreeSet</span>,
+    sync::{<span class="tok-f">Arc</span>, <span class="tok-f">Mutex</span>},
+};
 
-<span class="tok-m">#[derive(Debug, PartialEq, Eq)]</span>
-<span class="tok-k">pub enum</span> <span class="tok-f">LockError</span> {
-    WouldBlock,         <span class="tok-c">// a real system would wait; here we refuse deterministically</span>
-    AlreadyWriter,      <span class="tok-c">// a second RESERVED/write path was attempted</span>
-    InvalidTransition,  <span class="tok-c">// e.g. escalate without holding RESERVED first</span>
-    NotHeld,            <span class="tok-c">// release of a lock that isn't held</span>
+<span class="tok-m">#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">OwnerId</span>(u64);
+
+<span class="tok-m">#[derive(Clone, Copy, Debug, PartialEq, Eq)]</span>
+<span class="tok-k">enum</span> <span class="tok-f">WriterPhase</span> { Reserved, Pending, Exclusive }
+
+<span class="tok-m">#[derive(Clone, Copy, Debug, PartialEq, Eq)]</span>
+<span class="tok-k">pub enum</span> <span class="tok-f">LockView</span> {
+    Unlocked,
+    Shared { readers: usize },
+    Reserved { readers: usize },
+    Pending { readers: usize },
+    Exclusive,
 }
-<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">LockError</span>&gt;;
 
-<span class="tok-c">// The current census of held locks across all participants.</span>
-<span class="tok-m">#[derive(Default, Debug)]</span>
+<span class="tok-m">#[derive(Clone, Copy, Debug, PartialEq, Eq)]</span>
+<span class="tok-k">pub enum</span> <span class="tok-f">LockError</span> {
+    WouldBlock,
+    AlreadyHeld,
+    AlreadyWriter,
+    InvalidTransition,
+    NotOwner,
+    OwnerExhausted,
+    Poisoned,
+}
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; =
+    std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">LockError</span>&gt;;
+
+<span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">LockTable</span> {
+    next_owner: u64,
+    readers: <span class="tok-f">BTreeSet</span>&lt;<span class="tok-f">OwnerId</span>&gt;,
+    writer: Option&lt;(<span class="tok-f">OwnerId</span>, <span class="tok-f">WriterPhase</span>)&gt;,
+}
+
+<span class="tok-k">impl</span> <span class="tok-f">LockTable</span> {
+    <span class="tok-k">pub fn</span> <span class="tok-f">new</span>() -&gt; <span class="tok-f">Self</span> {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: start IDs at 1; empty readers; no writer"</span>)
+    }
+    <span class="tok-m">#[cfg(test)]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">with_next_owner</span>(next_owner: u64) -&gt; <span class="tok-f">Self</span> {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"test constructor for exhaustion boundary"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">allocate_owner</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">OwnerId</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1/M4: checked increment; never emit 0 or wrap"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">acquire_shared</span>(&amp;<span class="tok-k">mut self</span>, owner: <span class="tok-f">OwnerId</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: reject duplicate owner and pending/exclusive; then add"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">acquire_reserved</span>(&amp;<span class="tok-k">mut self</span>, owner: <span class="tok-f">OwnerId</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: require owner's SHARED; enforce one writer"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">try_exclusive</span>(&amp;<span class="tok-k">mut self</span>, owner: <span class="tok-f">OwnerId</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: Reserved/Pending only; enter Pending; succeed only when writer is sole reader"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">release_shared</span>(&amp;<span class="tok-k">mut self</span>, owner: <span class="tok-f">OwnerId</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: owner-only release; don't detach an active writer's SHARED separately"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">release_writer</span>(&amp;<span class="tok-k">mut self</span>, owner: <span class="tok-f">OwnerId</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: clear this writer and its own SHARED state"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">view</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">LockView</span> {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1/M2: summarize the current legal state"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">assert_valid</span>(&amp;<span class="tok-k">self</span>) {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1/M2: encode every representation invariant"</span>)
+    }
+}
+
+<span class="tok-m">#[derive(Clone, Debug)]</span>
 <span class="tok-k">pub struct</span> <span class="tok-f">LockManager</span> {
-    shared_count: <span class="tok-f">u32</span>,
-    reserved: <span class="tok-f">bool</span>,
-    pending: <span class="tok-f">bool</span>,
-    exclusive: <span class="tok-f">bool</span>,
+    inner: <span class="tok-f">Arc</span>&lt;<span class="tok-f">Mutex</span>&lt;<span class="tok-f">LockTable</span>&gt;&gt;,
 }
 
 <span class="tok-k">impl</span> <span class="tok-f">LockManager</span> {
-    <span class="tok-k">pub fn</span> <span class="tok-f">new</span>() -&gt; <span class="tok-f">Self</span> { <span class="tok-f">Self</span>::<span class="tok-f">default</span>() }
-
-    <span class="tok-c">// The single source of truth: is `req` grantable given the census?</span>
-    <span class="tok-k">fn</span> <span class="tok-f">can_grant</span>(&amp;<span class="tok-k">self</span>, req: <span class="tok-f">LockState</span>) -&gt; <span class="tok-f">bool</span> {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M1-M3: encode the compatibility table from lockingv3"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">new</span>() -&gt; <span class="tok-f">Self</span> {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: Arc + Mutex + LockTable::new"</span>)
     }
-    <span class="tok-k">fn</span> <span class="tok-f">assert_census_valid</span>(&amp;<span class="tok-k">self</span>) {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: panic if the held set is an illegal combination (e.g. exclusive && shared_count&gt;0)"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">acquire_read</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">ReadGuard</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4/M5: lock table, allocate owner, acquire SHARED, return guard"</span>)
     }
-
-    <span class="tok-c">// ---- M1: shared (readers) ----</span>
-    <span class="tok-k">pub fn</span> <span class="tok-f">acquire_shared</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">SharedGuard</span>&lt;<span class="tok-k">'_</span>&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"refuse if pending||exclusive; else shared_count += 1; return guard"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">acquire_write</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">WriteGuard</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3-M5: atomically allocate + SHARED + RESERVED; roll back partial failure"</span>)
     }
-
-    <span class="tok-c">// ---- M2/M3: the write path (one writer) ----</span>
-    <span class="tok-k">pub fn</span> <span class="tok-f">acquire_reserved</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">WriteGuard</span>&lt;<span class="tok-k">'_</span>&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: refuse if reserved||pending||exclusive; coexists with shared; set reserved=true"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">view</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">LockView</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: surface poison; return table view"</span>)
     }
-
-    <span class="tok-c">// release paths used by the guards' Drop impls</span>
-    <span class="tok-k">fn</span> <span class="tok-f">release_shared</span>(&amp;<span class="tok-k">mut self</span>) { <span class="tok-m">todo!</span>(<span class="tok-s">"shared_count = shared_count.checked_sub(1)..."</span>) }
-    <span class="tok-k">fn</span> <span class="tok-f">release_write</span>(&amp;<span class="tok-k">mut self</span>) { <span class="tok-m">todo!</span>(<span class="tok-s">"clear reserved/pending/exclusive for this writer"</span>) }
-}
-
-<span class="tok-c">// RAII: dropping a guard releases the lock.</span>
-<span class="tok-k">pub struct</span> <span class="tok-f">SharedGuard</span>&lt;<span class="tok-k">'a</span>&gt; { mgr: &amp;<span class="tok-k">'a mut</span> <span class="tok-f">LockManager</span> }
-<span class="tok-k">impl</span> <span class="tok-f">Drop</span> <span class="tok-k">for</span> <span class="tok-f">SharedGuard</span>&lt;<span class="tok-k">'_</span>&gt; {
-    <span class="tok-k">fn</span> <span class="tok-f">drop</span>(&amp;<span class="tok-k">mut self</span>) { <span class="tok-k">self</span>.mgr.<span class="tok-f">release_shared</span>(); }
-}
-
-<span class="tok-k">pub struct</span> <span class="tok-f">WriteGuard</span>&lt;<span class="tok-k">'a</span>&gt; { mgr: &amp;<span class="tok-k">'a mut</span> <span class="tok-f">LockManager</span> }
-<span class="tok-k">impl</span>&lt;<span class="tok-k">'a</span>&gt; <span class="tok-f">WriteGuard</span>&lt;<span class="tok-k">'a</span>&gt; {
-    <span class="tok-c">// M3: RESERVED -&gt; PENDING -&gt; EXCLUSIVE, only when shared_count == 0</span>
-    <span class="tok-k">pub fn</span> <span class="tok-f">escalate_to_exclusive</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"set pending=true (blocks new shared); if shared_count&gt;0 return WouldBlock; else reserved=false,pending=false,exclusive=true"</span>)
+    <span class="tok-k">fn</span> <span class="tok-f">release_read</span>(&amp;<span class="tok-k">self</span>, owner: <span class="tok-f">OwnerId</span>) {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: non-panicking Drop path; preserve fail-closed poison policy"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">release_write</span>(&amp;<span class="tok-k">self</span>, owner: <span class="tok-f">OwnerId</span>) {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: release this writer and its SHARED ownership"</span>)
     }
 }
-<span class="tok-k">impl</span> <span class="tok-f">Drop</span> <span class="tok-k">for</span> <span class="tok-f">WriteGuard</span>&lt;<span class="tok-k">'_</span>&gt; {
-    <span class="tok-k">fn</span> <span class="tok-f">drop</span>(&amp;<span class="tok-k">mut self</span>) { <span class="tok-k">self</span>.mgr.<span class="tok-f">release_write</span>(); }
+
+<span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">ReadGuard</span> {
+    manager: <span class="tok-f">LockManager</span>,
+    owner: <span class="tok-f">OwnerId</span>,
+}
+<span class="tok-k">impl</span> <span class="tok-f">Drop</span> <span class="tok-k">for</span> <span class="tok-f">ReadGuard</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">drop</span>(&amp;<span class="tok-k">mut self</span>) { <span class="tok-k">self</span>.manager.<span class="tok-f">release_read</span>(<span class="tok-k">self</span>.owner); }
+}
+
+<span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">WriteGuard</span> {
+    manager: <span class="tok-f">LockManager</span>,
+    owner: <span class="tok-f">OwnerId</span>,
+}
+<span class="tok-k">impl</span> <span class="tok-f">WriteGuard</span> {
+    <span class="tok-k">pub fn</span> <span class="tok-f">try_exclusive</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: call table.try_exclusive for this owner; retain Pending on WouldBlock"</span>)
+    }
+}
+<span class="tok-k">impl</span> <span class="tok-f">Drop</span> <span class="tok-k">for</span> <span class="tok-f">WriteGuard</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">drop</span>(&amp;<span class="tok-k">mut self</span>) { <span class="tok-k">self</span>.manager.<span class="tok-f">release_write</span>(<span class="tok-k">self</span>.owner); }
 }</code></pre>
 
   <h2>Failing tests</h2>
@@ -158,101 +216,195 @@
 <pre><code><span class="tok-m">#[cfg(test)]</span>
 <span class="tok-k">mod</span> tests {
     <span class="tok-k">use super</span>::*;
+    <span class="tok-k">use</span> std::sync::<span class="tok-f">Barrier</span>;
+
+    <span class="tok-k">const</span> A: <span class="tok-f">OwnerId</span> = <span class="tok-f">OwnerId</span>(1);
+    <span class="tok-k">const</span> B: <span class="tok-f">OwnerId</span> = <span class="tok-f">OwnerId</span>(2);
+    <span class="tok-k">const</span> C: <span class="tok-f">OwnerId</span> = <span class="tok-f">OwnerId</span>(3);
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">many_shared_coexist</span>() {
-        <span class="tok-k">let mut</span> m = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
-        <span class="tok-k">let</span> a = m.<span class="tok-f">acquire_shared</span>().<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let</span> b = m.<span class="tok-f">acquire_shared</span>().<span class="tok-f">unwrap</span>();
-        <span class="tok-m">drop</span>((a, b)); <span class="tok-c">// both held at once, then released</span>
+    <span class="tok-k">fn</span> <span class="tok-f">many_shared_owners_coexist</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">LockTable</span>::<span class="tok-f">new</span>();
+        t.<span class="tok-f">acquire_shared</span>(A).<span class="tok-f">unwrap</span>();
+        t.<span class="tok-f">acquire_shared</span>(B).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">view</span>(), <span class="tok-f">LockView</span>::Shared { readers: 2 });
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">reserved_coexists_with_shared_but_is_unique</span>() {
-        <span class="tok-k">let mut</span> m = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
-        <span class="tok-k">let</span> _r = m.<span class="tok-f">acquire_reserved</span>().<span class="tok-f">unwrap</span>();   <span class="tok-c">// writer intent</span>
-        <span class="tok-m">assert_eq!</span>(m.<span class="tok-f">acquire_reserved</span>().<span class="tok-f">unwrap_err</span>(), <span class="tok-f">LockError</span>::<span class="tok-f">AlreadyWriter</span>);
+    <span class="tok-k">fn</span> <span class="tok-f">reserved_requires_shared_and_is_unique</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">LockTable</span>::<span class="tok-f">new</span>();
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">acquire_reserved</span>(A), <span class="tok-f">Err</span>(<span class="tok-f">LockError</span>::InvalidTransition));
+        t.<span class="tok-f">acquire_shared</span>(A).<span class="tok-f">unwrap</span>();
+        t.<span class="tok-f">acquire_reserved</span>(A).<span class="tok-f">unwrap</span>();
+        t.<span class="tok-f">acquire_shared</span>(B).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">acquire_reserved</span>(B), <span class="tok-f">Err</span>(<span class="tok-f">LockError</span>::AlreadyWriter));
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">pending_blocks_new_shared</span>() {
-        <span class="tok-k">let mut</span> m = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
-        <span class="tok-k">let mut</span> w = m.<span class="tok-f">acquire_reserved</span>().<span class="tok-f">unwrap</span>();
-        <span class="tok-c">// no readers, so escalation should reach exclusive</span>
-        w.<span class="tok-f">escalate_to_exclusive</span>().<span class="tok-f">unwrap</span>();
-        <span class="tok-m">assert_eq!</span>(m.<span class="tok-f">acquire_shared</span>().<span class="tok-f">unwrap_err</span>(), <span class="tok-f">LockError</span>::<span class="tok-f">WouldBlock</span>);
+    <span class="tok-k">fn</span> <span class="tok-f">failed_exclusive_stays_pending_and_blocks_new_readers</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">LockTable</span>::<span class="tok-f">new</span>();
+        t.<span class="tok-f">acquire_shared</span>(A).<span class="tok-f">unwrap</span>(); <span class="tok-c">// existing reader</span>
+        t.<span class="tok-f">acquire_shared</span>(B).<span class="tok-f">unwrap</span>(); <span class="tok-c">// future writer's SHARED</span>
+        t.<span class="tok-f">acquire_reserved</span>(B).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">try_exclusive</span>(B), <span class="tok-f">Err</span>(<span class="tok-f">LockError</span>::WouldBlock));
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">view</span>(), <span class="tok-f">LockView</span>::Pending { readers: 2 });
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">acquire_shared</span>(C), <span class="tok-f">Err</span>(<span class="tok-f">LockError</span>::WouldBlock));
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">exclusive_waits_for_readers</span>() {
-        <span class="tok-k">let mut</span> m = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
-        <span class="tok-k">let</span> reader = m.<span class="tok-f">acquire_shared</span>().<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let mut</span> w = m.<span class="tok-f">acquire_reserved</span>().<span class="tok-f">unwrap</span>(); <span class="tok-c">// allowed alongside the reader</span>
-        <span class="tok-m">assert_eq!</span>(w.<span class="tok-f">escalate_to_exclusive</span>().<span class="tok-f">unwrap_err</span>(), <span class="tok-f">LockError</span>::<span class="tok-f">WouldBlock</span>);
-        <span class="tok-m">drop</span>(reader);                       <span class="tok-c">// reader leaves</span>
-        w.<span class="tok-f">escalate_to_exclusive</span>().<span class="tok-f">unwrap</span>(); <span class="tok-c">// now exclusive is grantable</span>
+    <span class="tok-k">fn</span> <span class="tok-f">pending_writer_retries_after_existing_reader_drains</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">LockTable</span>::<span class="tok-f">new</span>();
+        t.<span class="tok-f">acquire_shared</span>(A).<span class="tok-f">unwrap</span>();
+        t.<span class="tok-f">acquire_shared</span>(B).<span class="tok-f">unwrap</span>();
+        t.<span class="tok-f">acquire_reserved</span>(B).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">try_exclusive</span>(B), <span class="tok-f">Err</span>(<span class="tok-f">LockError</span>::WouldBlock));
+        t.<span class="tok-f">release_shared</span>(A).<span class="tok-f">unwrap</span>();
+        t.<span class="tok-f">try_exclusive</span>(B).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">view</span>(), <span class="tok-f">LockView</span>::Exclusive);
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">exclusive_is_alone</span>() {
-        <span class="tok-k">let mut</span> m = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
-        <span class="tok-k">let mut</span> w = m.<span class="tok-f">acquire_reserved</span>().<span class="tok-f">unwrap</span>();
-        w.<span class="tok-f">escalate_to_exclusive</span>().<span class="tok-f">unwrap</span>();
-        <span class="tok-m">assert_eq!</span>(m.<span class="tok-f">acquire_shared</span>().<span class="tok-f">unwrap_err</span>(), <span class="tok-f">LockError</span>::<span class="tok-f">WouldBlock</span>);
-        <span class="tok-m">assert_eq!</span>(m.<span class="tok-f">acquire_reserved</span>().<span class="tok-f">unwrap_err</span>(), <span class="tok-f">LockError</span>::<span class="tok-f">AlreadyWriter</span>);
+    <span class="tok-k">fn</span> <span class="tok-f">release_is_owner_checked</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">LockTable</span>::<span class="tok-f">new</span>();
+        t.<span class="tok-f">acquire_shared</span>(A).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">release_shared</span>(B), <span class="tok-f">Err</span>(<span class="tok-f">LockError</span>::NotOwner));
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">view</span>(), <span class="tok-f">LockView</span>::Shared { readers: 1 });
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">release_restores_unlocked</span>() {
-        <span class="tok-k">let mut</span> m = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
-        { <span class="tok-k">let</span> _a = m.<span class="tok-f">acquire_shared</span>().<span class="tok-f">unwrap</span>(); }
-        { <span class="tok-k">let mut</span> w = m.<span class="tok-f">acquire_reserved</span>().<span class="tok-f">unwrap</span>(); w.<span class="tok-f">escalate_to_exclusive</span>().<span class="tok-f">unwrap</span>(); }
-        <span class="tok-c">// after all guards drop, a fresh writer can take the whole path again</span>
-        <span class="tok-k">let mut</span> w = m.<span class="tok-f">acquire_reserved</span>().<span class="tok-f">unwrap</span>();
-        w.<span class="tok-f">escalate_to_exclusive</span>().<span class="tok-f">unwrap</span>();
+    <span class="tok-k">fn</span> <span class="tok-f">guard_drop_restores_unlocked</span>() {
+        <span class="tok-k">let</span> m = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
+        { <span class="tok-k">let</span> _r = m.<span class="tok-f">acquire_read</span>().<span class="tok-f">unwrap</span>(); }
+        <span class="tok-m">assert_eq!</span>(m.<span class="tok-f">view</span>(), <span class="tok-f">Ok</span>(<span class="tok-f">LockView</span>::Unlocked));
+        { <span class="tok-k">let mut</span> w = m.<span class="tok-f">acquire_write</span>().<span class="tok-f">unwrap</span>(); w.<span class="tok-f">try_exclusive</span>().<span class="tok-f">unwrap</span>(); }
+        <span class="tok-m">assert_eq!</span>(m.<span class="tok-f">view</span>(), <span class="tok-f">Ok</span>(<span class="tok-f">LockView</span>::Unlocked));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">cloned_managers_share_one_table</span>() {
+        <span class="tok-k">let</span> a = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
+        <span class="tok-k">let</span> b = a.<span class="tok-f">clone</span>();
+        <span class="tok-k">let</span> _r = a.<span class="tok-f">acquire_read</span>().<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(b.<span class="tok-f">view</span>(), <span class="tok-f">Ok</span>(<span class="tok-f">LockView</span>::Shared { readers: 1 }));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">owner_ids_never_wrap</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">LockTable</span>::<span class="tok-f">with_next_owner</span>(u64::MAX);
+        <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">allocate_owner</span>(), <span class="tok-f">Err</span>(<span class="tok-f">LockError</span>::OwnerExhausted));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">mutex_poison_is_reported_not_ignored</span>() {
+        <span class="tok-k">let</span> manager = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
+        <span class="tok-k">let</span> poisoner = manager.<span class="tok-f">clone</span>();
+        <span class="tok-k">let</span> _ = std::thread::<span class="tok-f">spawn</span>(<span class="tok-k">move</span> || {
+            <span class="tok-k">let</span> _guard = poisoner.inner.<span class="tok-f">lock</span>().<span class="tok-f">unwrap</span>();
+            <span class="tok-m">panic!</span>(<span class="tok-s">"poison the lock-table mutex"</span>);
+        }).<span class="tok-f">join</span>();
+        <span class="tok-m">assert_eq!</span>(manager.<span class="tok-f">view</span>(), <span class="tok-f">Err</span>(<span class="tok-f">LockError</span>::Poisoned));
+        <span class="tok-m">assert_eq!</span>(manager.<span class="tok-f">acquire_read</span>().<span class="tok-f">unwrap_err</span>(), <span class="tok-f">LockError</span>::Poisoned);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">two_threads_racing_for_writer_grant_exactly_one</span>() {
+        <span class="tok-k">fn</span> <span class="tok-f">assert_send_sync</span>&lt;<span class="tok-f">T</span>: Send + Sync&gt;() {}
+        <span class="tok-f">assert_send_sync</span>::&lt;<span class="tok-f">LockManager</span>&gt;();
+
+        <span class="tok-k">let</span> manager = <span class="tok-f">LockManager</span>::<span class="tok-f">new</span>();
+        <span class="tok-k">let</span> start = <span class="tok-f">Arc</span>::<span class="tok-f">new</span>(<span class="tok-f">Barrier</span>::<span class="tok-f">new</span>(2));
+        <span class="tok-k">let</span> finish = <span class="tok-f">Arc</span>::<span class="tok-f">new</span>(<span class="tok-f">Barrier</span>::<span class="tok-f">new</span>(2));
+        <span class="tok-k">let mut</span> joins = <span class="tok-f">Vec</span>::<span class="tok-f">new</span>();
+
+        <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..2 {
+            <span class="tok-k">let</span> m = manager.<span class="tok-f">clone</span>();
+            <span class="tok-k">let</span> s = start.<span class="tok-f">clone</span>();
+            <span class="tok-k">let</span> f = finish.<span class="tok-f">clone</span>();
+            joins.<span class="tok-f">push</span>(std::thread::<span class="tok-f">spawn</span>(<span class="tok-k">move</span> || {
+                s.<span class="tok-f">wait</span>();
+                <span class="tok-k">let</span> held = m.<span class="tok-f">acquire_write</span>().<span class="tok-f">ok</span>();
+                <span class="tok-k">let</span> won = held.<span class="tok-f">is_some</span>();
+                f.<span class="tok-f">wait</span>(); <span class="tok-c">// winner retains its guard until both attempted</span>
+                won
+            }));
+        }
+
+        <span class="tok-k">let</span> wins = joins.<span class="tok-f">into_iter</span>()
+            .<span class="tok-f">map</span>(|j| j.<span class="tok-f">join</span>().<span class="tok-f">unwrap</span>())
+            .<span class="tok-f">filter</span>(|won| *won)
+            .<span class="tok-f">count</span>();
+        <span class="tok-m">assert_eq!</span>(wins, 1);
+        <span class="tok-m">assert_eq!</span>(manager.<span class="tok-f">view</span>(), <span class="tok-f">Ok</span>(<span class="tok-f">LockView</span>::Unlocked));
     }
 }</code></pre>
 
+  <h2>Integration contract for Phase 6</h2>
+  <p>Adapt these shapes to your actual collection API; they are signatures, not implementations:</p>
+<pre><code><span class="tok-k">impl</span> <span class="tok-f">Collection</span> {
+    <span class="tok-k">pub fn</span> <span class="tok-f">find_locked</span>(&amp;<span class="tok-k">self</span>, q: &amp;<span class="tok-f">Query</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">Document</span>&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: hold ReadGuard across planning, index/scan, record reads, and result copy"</span>)
+    }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">insert_locked</span>(&amp;<span class="tok-k">mut self</span>, doc: <span class="tok-f">Document</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Id</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: acquire writer, reach Exclusive, mutate, commit/rollback, then drop guard"</span>)
+    }
+}</code></pre>
+  <div class="box warn">
+    <div class="box-title">⚠️ A lock guard is not a rollback protocol</div>
+    <p>If a panic or error occurs after the engine has partially changed in-memory transaction state,
+    releasing the lock does not repair that state. The Phase 5 transaction must roll back safely, or the
+    handle must fail closed. Standard mutex poisoning cannot prove the database remains valid because the
+    lock-table mutex is held only while changing lock metadata, not for the whole database operation.</p>
+  </div>
+
   <h2>Stuck? — graduated hints</h2>
-  <details><summary>can_grant feels like a pile of if-statements</summary><div class="answer">
-    <strong>Nudge:</strong> There are only five request kinds; write one match arm per kind.
-    <br><strong>Bigger:</strong> SHARED depends only on <code>!pending &amp;&amp; !exclusive</code>; the write
-    path depends on "no other writer."
-    <br><strong>Technique:</strong> make <code>can_grant</code> the single source of truth and have every
-    <code>acquire_*</code> call it, so the table lives in exactly one place.</div></details>
-  <details><summary>Exclusive sometimes granted with readers still present</summary><div class="answer">
-    <strong>Nudge:</strong> PENDING and EXCLUSIVE are two different steps.
-    <br><strong>Technique:</strong> set <code>pending = true</code> first (this is what blocks <em>new</em>
-    readers), then only flip to EXCLUSIVE when <code>shared_count == 0</code>; otherwise return
-    <code>WouldBlock</code> while keeping PENDING set.</div></details>
-  <details><summary>Census drifts into an illegal state</summary><div class="answer">
-    <strong>Nudge:</strong> Check the invariant after every mutation, not just in tests.
-    <br><strong>Technique:</strong> call <code>assert_census_valid</code> at the end of each
-    acquire/release; legal combinations are limited (e.g. exclusive ⇒ shared_count==0 &amp;&amp; !reserved).</div></details>
-  <details><summary>How do guards release exactly once?</summary><div class="answer">
-    <strong>Nudge:</strong> Let <code>Drop</code> do it; don't add a manual <code>release()</code> the caller
-    must remember.
-    <br><strong>Technique:</strong> each guard holds <code>&amp;mut LockManager</code> and calls the matching
-    private release in its <code>Drop</code> — mirrors how a real lock releases when its guard leaves scope.</div></details>
+  <details><summary>The state combinations are getting tangled</summary><div class="answer">
+    <strong>Nudge:</strong> Write <code>assert_valid</code> before writing transitions.
+    <br><strong>Bigger nudge:</strong> The writer is either absent or exactly one
+    <code>(OwnerId, WriterPhase)</code>. RESERVED/PENDING requires that owner in <code>readers</code>;
+    EXCLUSIVE requires an empty reader set.
+    <br><strong>Technique:</strong> mutate one transition, assert invariants, and return. Do not derive
+    policy independently in the wrapper.</div></details>
+  <details><summary>A failed second writer leaks a reader</summary><div class="answer">
+    <strong>Nudge:</strong> <code>acquire_write</code> is a compound operation.
+    <br><strong>Bigger nudge:</strong> Record which sub-step this call added.
+    <br><strong>Technique:</strong> if RESERVED fails after this call added SHARED, remove that same
+    owner's SHARED before returning the original error.</div></details>
+  <details><summary>The pending writer can never retry</summary><div class="answer">
+    <strong>Nudge:</strong> <code>WouldBlock</code> is not a rollback to RESERVED.
+    <br><strong>Bigger nudge:</strong> PENDING must remain visible so new readers are refused while old
+    readers drain.
+    <br><strong>Technique:</strong> accept <code>try_exclusive</code> from either RESERVED or PENDING;
+    only the sole-reader condition changes it to EXCLUSIVE.</div></details>
+  <details><summary>Drop and mutex poison conflict</summary><div class="answer">
+    <strong>Nudge:</strong> a destructor cannot return <code>Result</code>.
+    <br><strong>Bigger nudge:</strong> do not panic from <code>Drop</code> during unwinding.
+    <br><strong>Technique:</strong> define and document a fail-closed release path: ordinary methods
+    surface <code>Poisoned</code>; the destructor makes a non-panicking best effort and the owning engine
+    is considered unusable if lock metadata cannot be safely reached.</div></details>
 
   <h2>Definition of Done</h2>
   <ul>
-    <li>☐ All six supplied tests pass unchanged.</li>
-    <li>☐ The compatibility table lives in one place (<code>can_grant</code>) and every acquire uses it.</li>
-    <li>☐ The write path escalates RESERVED → PENDING → EXCLUSIVE and refuses while readers remain.</li>
-    <li>☐ <code>assert_census_valid</code> holds after every operation.</li>
-    <li>☐ Phase 6 reads/writes are routed through the manager.</li>
-    <li>☐ A written note states the test limits (no real threads/OS locks) and what a production version
-    adds (condvar waiting, OS file locks, platform caveats).</li>
-    <li>☐ You cited <a href="https://www.sqlite.org/lockingv3.html">lockingv3</a> for the rules you encoded.</li>
+    <li>☐ All ten supplied tests pass unchanged under Rust edition 2024.</li>
+    <li>☐ Every table mutation ends with <code>assert_valid</code>.</li>
+    <li>☐ Compound acquisition rolls back only its own partial state.</li>
+    <li>☐ PENDING persists after <code>WouldBlock</code> and clears when its writer guard drops.</li>
+    <li>☐ No owner ID wraps or is reused.</li>
+    <li>☐ The Phase 6 integration check covers every public operation and the whole transaction scope.</li>
+    <li>☐ A note states the cross-process, snapshot, fairness, and panic-recovery limits.</li>
   </ul>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Docs:</strong> <a href="https://www.sqlite.org/lockingv3.html">lockingv3</a> (rules), <a href="https://www.sqlite.org/wal.html">WAL</a> (the alternative you didn't build).</li>
-      <li><strong>Std:</strong> <a href="https://doc.rust-lang.org/std/sync/struct.Condvar.html">std::sync::Condvar</a> — what real waiting would use instead of <code>WouldBlock</code>.</li>
-      <li><strong>Stretch:</strong> swap <code>WouldBlock</code> for real blocking with a <code>Mutex</code>+<code>Condvar</code>, then write a multi-threaded test — and notice how much harder it is to make deterministic.</li>
+      <li><strong>Policy source:</strong> <a href="https://www.sqlite.org/lockingv3.html">SQLite
+      lockingv3</a>.</li>
+      <li><strong>Rust:</strong> <a href="https://doc.rust-lang.org/std/sync/struct.Mutex.html">Mutex</a>,
+      <a href="https://doc.rust-lang.org/std/sync/struct.Arc.html">Arc</a>, and
+      <a href="https://doc.rust-lang.org/std/sync/struct.Condvar.html">Condvar</a>. A future blocking
+      implementation would need a predicate loop around a condition variable and a fairness policy.</li>
+      <li><strong>Not implemented:</strong> SQLite 3.53.0's VFS byte-range locking in
+      <a href="https://sqlite.org/src/file?ci=4525003a53a7fc63&amp;name=src/os_unix.c"><code>os_unix.c</code></a>.</li>
     </ul>
   </div>
 

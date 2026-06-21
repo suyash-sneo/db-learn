@@ -19,7 +19,9 @@
     <div class="box-title">📂 Where to read</div>
     <p>Dart's concurrency model is documented under "Isolates" and "Concurrency"; the FFI boundary under
     "C interop with dart:ffi."
-    <span class="src">[src: <a href="https://dart.dev/language/isolates">dart.dev — Isolates</a>; <a href="https://dart.dev/interop/c-interop">dart.dev — C interop</a>]</span></p>
+    This lesson is pinned to the Dart 3.12.2 documentation shown by the API site on June 21, 2026.
+    <span class="src">[src: <a href="https://dart.dev/language/concurrency">dart.dev — Concurrency
+    (Dart 3.12.2)</a>; <a href="https://dart.dev/interop/c-interop">dart.dev — C interop</a>]</span></p>
   </div>
 
   <h2>Why this matters to your DB</h2>
@@ -30,19 +32,19 @@
   responsive app and either a frozen UI or a corrupted database.</p>
 
   <h2>An isolate is not a thread</h2>
-  <p>Dart concurrency is built on isolates, each with its own memory and its own event loop. The defining
-  property: "Isolates can't 'see' inside each others' memory, which is where the name 'isolate' comes
-  from." They do not share mutable objects.
-  <span class="src">[src: <a href="https://dart.dev/language/isolates">dart.dev — Isolates</a>]</span>
-  Communication is by message passing over ports (<code>SendPort</code>/<code>ReceivePort</code>), and the
-  data is transferred, not aliased — for the result of <code>Isolate.run</code>, "The worker isolate
-  <em>transfers</em> the memory holding the result to the main isolate. It <em>does not copy</em> the
-  data."
-  <span class="src">[src: <a href="https://dart.dev/language/isolates">dart.dev — Isolates</a>]</span></p>
-  <p><code>Isolate.run(fn)</code> is the high-level helper: it spawns an isolate, runs <code>fn</code> on
-  it, returns the result (as a <code>Future</code>), terminates the isolate, and re-throws any exception
-  to the caller.
-  <span class="src">[src: <a href="https://dart.dev/language/isolates">dart.dev — Isolates, <code>Isolate.run()</code></a>]</span></p>
+  <p>Dart concurrency is built on isolates. Each isolate has its own state and event loop, and ordinary
+  Dart objects are not jointly mutable across isolates. Ports carry asynchronous messages; immutable
+  values may be shared internally, other sendable objects are copied, and
+  <code>TransferableTypedData</code> supports transfer-oriented byte messaging.
+  <span class="src">[src: <a href="https://dart.dev/language/concurrency">Dart concurrency — isolates and
+  message types</a>; <a href="https://api.dart.dev/dart-isolate/SendPort/send.html">SendPort.send
+  (Dart 3.12.2)</a>]</span></p>
+  <p><code>Isolate.run(fn)</code> is useful for one computation: it creates an isolate, runs and awaits the
+  computation there, sends the result back using <code>Isolate.exit</code>, then the worker terminates.
+  That lifecycle is a poor fit for a persistent database handle. Use a long-lived
+  <code>Isolate.spawn</code> worker with request/reply ports when one isolate must own an open engine.
+  <span class="src">[src: <a href="https://api.dart.dev/dart-isolate/Isolate/run.html">Isolate.run</a>;
+  <a href="https://dart.dev/language/concurrency">Dart concurrency — background workers</a>]</span></p>
 
   <figure>
   <svg viewBox="0 0 560 170" role="img" aria-label="Main isolate and worker isolate with separate memory communicating by message">
@@ -56,90 +58,119 @@
     <line class="dg-edge-hot" x1="220" y1="75" x2="338" y2="75"/><polygon class="dg-arrow" points="340,75 332,71 332,79"/>
     <text class="dg-txt-s" x="280" y="68" text-anchor="middle">message</text>
     <line class="dg-edge-hot" x1="338" y1="100" x2="222" y2="100"/><polygon class="dg-arrow" points="220,100 228,96 228,104"/>
-    <text class="dg-txt-s" x="280" y="120" text-anchor="middle">result (transferred)</text>
+    <text class="dg-txt-s" x="280" y="120" text-anchor="middle">sendable result</text>
   </svg>
-  <figcaption>No shared mutable memory between isolates — only messages cross the boundary.</figcaption>
+  <figcaption>The recommended design sends owned request/result data. The worker alone owns the
+  <code>DynamicLibrary</code>, bindings, and database handle.</figcaption>
   </figure>
 
   <h2>The FFI boundary, precisely</h2>
-  <p><code>dart:ffi</code> lets Dart on the native platform "call native C APIs, and to read, write,
-  allocate, and deallocate native memory." A library is loaded with <code>DynamicLibrary.open(path)</code>
-  and a function is bound via <code>lookup&lt;NativeFunction&lt;…&gt;&gt;(name).asFunction()</code>.
+  <p><code>dart:ffi</code> lets Dart Native programs call C-compatible APIs and access native memory.
+  Library loading is platform/package-layout specific, as Phase 1 explains; after loading, symbols are
+  looked up and converted to Dart-callable functions.
   <span class="src">[src: <a href="https://dart.dev/interop/c-interop">dart.dev — C interop</a>]</span>
   Two consequences matter for concurrency:</p>
   <ul>
-    <li><strong>A synchronous FFI call runs on the calling isolate's thread and does not yield to the
-    event loop until it returns.</strong> A long blocking C call therefore freezes that isolate — which is
-    why a slow database call belongs on a worker isolate, not the main (UI) one.
-    <span class="verify-tag">⚠️VERIFY</span> the exact threading/blocking wording against the current
-    <a href="https://dart.dev/interop/c-interop">dart:ffi</a> and <a href="https://api.dart.dev/dart-ffi/dart-ffi-library.html">API reference</a>.</li>
+    <li><strong>An ordinary FFI function call is synchronous from Dart's point of view.</strong> Until it
+    returns, the isolate is still executing that event and cannot process the next queued UI event. Dart's
+    concurrency guide warns that lengthy synchronous operations make a client unresponsive and explicitly
+    says a worker isolate may block without affecting other isolates.
+    <span class="src">[src: <a href="https://dart.dev/language/concurrency">Dart concurrency — event
+    handling and background workers</a>]</span></li>
     <li><strong>Native memory is outside Dart's garbage collector.</strong> Pointers you get back from C
     are raw addresses; you must free native allocations yourself (e.g. via the allocator from
     <code>package:ffi</code>), and the allocate/free pair must match the engine's ownership contract from
-    Phase 1 / Phase 8.</li>
+    Phase 1 / Phase 8.
+    <span class="src">[src: <a href="https://dart.dev/interop/c-interop">Dart C interop</a>]</span></li>
   </ul>
 
   <div class="box warn">
-    <div class="box-title">⚠️ Two isolates, two views of one native handle</div>
-    <p>Dart's "no shared memory" rule is about <em>Dart</em> objects. A native pointer is just an integer
-    address; nothing stops two isolates from each holding a binding that points at the <em>same</em> Rust
-    engine. If they call into it concurrently, you are back to 7.1 — the engine itself must be safe under
-    concurrent entry. So the safe patterns are: (1) confine the engine to one isolate and send requests to
-    it by message (the engine sees a single caller), or (2) make the Rust side internally synchronized
-    (7.4) so concurrent FFI entry is well-defined. Choose one explicitly; do not let two isolates aliase an
-    unsynchronized handle by accident.</p>
+    <div class="box-title">⚠️ Do not send the FFI handle to another isolate</div>
+    <p>In Dart 3.12.2, <code>DynamicLibrary</code> and <code>Pointer</code> are among the object types that
+    cannot be sent through isolate messages. Passing <code>pointer.address</code> as an integer and
+    rebuilding it with <code>Pointer.fromAddress</code> bypasses that guard, but it does not establish
+    lifetime, ownership, synchronization, or use-after-free safety. This curriculum does not use that
+    escape hatch. Create and destroy the native handle in the same long-lived worker isolate.
+    <span class="src">[src: <a href="https://dart.dev/language/concurrency">Dart concurrency — message
+    type exceptions (Dart 3.12.2)</a>; <a href="https://api.dart.dev/dart-ffi/Pointer-class.html">Pointer
+    API</a>]</span></p>
   </div>
 
-  <h2>Two workable architectures</h2>
+  <h2>Two architectures — with different engine requirements</h2>
   <div class="tablewrap">
   <table>
     <thead><tr><th>Pattern</th><th>How</th><th>Trade-off</th></tr></thead>
     <tbody>
-      <tr><td><strong>DB-owning isolate</strong></td><td>One isolate opens the engine; others send query/CRUD messages and await replies.</td><td>Simple and matches Dart's model; the owning isolate serializes all access (a clean single-writer funnel). Adds message-passing latency.</td></tr>
-      <tr><td><strong>Shared synchronized handle</strong></td><td>Multiple isolates bind the same library; the Rust side uses internal locking (<code>Arc&lt;RwLock&gt;</code>, 7.4).</td><td>More parallel reads, but you must implement and prove the engine-side synchronization, and native memory lifetimes get trickier.</td></tr>
+      <tr><td><strong>One DB-owning worker</strong></td><td>A long-lived isolate loads the library, opens one handle, and services request/reply messages.</td><td>One clear owner and serialized ABI entry. Message data must be sendable and copied/transferred. Recommended here.</td></tr>
+      <tr><td><strong>Independent handles</strong></td><td>Each isolate loads/binds the library itself and opens the same database path separately.</td><td>The engine must coordinate distinct handles to one file, including cross-process cases. A per-handle <code>Arc&lt;RwLock&gt;</code> is insufficient because the handles do not necessarily share that Arc.</td></tr>
     </tbody>
   </table>
   </div>
-  <p>For a first embedded database, the DB-owning-isolate pattern is the lower-risk default: it makes the
-  "single writer" rule fall out of the architecture instead of requiring engine-side locking to enforce
-  it.</p>
+  <p>The owning-isolate design serializes calls entering that one handle, but it does not protect against
+  a second process or another independently opened handle. If the product permits those, the engine still
+  needs file-level coordination or an explicit refusal policy.</p>
 
   <h2>Crossing back: callbacks and async</h2>
-  <p>Calling C from Dart is the easy direction. Having C call <em>back</em> into Dart, or surfacing native
-  events asynchronously, is more constrained and version-sensitive (it has evolved across Dart releases).
-  This curriculum's API (Phase 8) is deliberately synchronous, request/response, byte-buffer-based — which
-  sidesteps callback complexity. If you later need async native notifications, treat it as a separate
-  design with its own verification. <span class="verify-tag">⚠️VERIFY</span> current callback/async-FFI
-  capabilities against the dart:ffi docs for the Dart version you target.</p>
+  <p>Dart 3.12.2 offers several callback shapes. <code>NativeCallable.isolateLocal</code> must be invoked
+  on the creating isolate's mutator thread and aborts the process if native code calls it from another
+  thread. <code>NativeCallable.listener</code> may be invoked from any thread; it sends arguments to the
+  creating isolate asynchronously, supports only <code>void</code> return, and requires pointed-to
+  resources to stay valid until the later callback. Both must be closed; invoking after close is
+  undefined behavior.
+  <span class="src">[src: <a href="https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.isolateLocal.html">NativeCallable.isolateLocal</a>;
+  <a href="https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.listener.html">NativeCallable.listener</a>
+  (Dart 3.12.2)]</span></p>
+  <p>This curriculum's Phase 8 API remains synchronous request/response and uses a worker isolate, so it
+  does not need native-to-Dart callbacks. Also avoid using mutually blocking FFI calls as a synchronous
+  channel between isolates: Dart's current guide warns that this can deadlock when runnable isolates
+  exceed the VM's parallel-isolate limit.
+  <span class="src">[src: <a href="https://dart.dev/language/concurrency">Dart concurrency —
+  synchronous blocking communication between isolates</a>]</span></p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
       <p class="q">1. How do two Dart isolates share state, and how do they not?</p>
-      <details><summary>Show answer</summary><div class="answer">They do not share mutable Dart memory; they
-      communicate only by passing messages over ports (data is transferred/copied, not aliased).</div></details>
+      <details><summary>Show answer</summary><div class="answer">They communicate with asynchronous port
+      messages. Depending on the sendable value, the VM may share immutable data, copy mutable data, or
+      transfer supported typed data; the isolates do not jointly mutate an ordinary Dart object.</div></details>
       <p class="q">2. Why does a slow database call belong on a worker isolate?</p>
-      <details><summary>Show answer</summary><div class="answer">A synchronous FFI call runs on the calling
-      isolate's thread without yielding to its event loop, so a long call on the main isolate freezes the UI.
-      A worker isolate keeps the UI responsive.</div></details>
-      <p class="q">3. Does Dart's "no shared memory" rule prevent two isolates from racing on the engine?</p>
-      <details><summary>Show answer</summary><div class="answer">No. A native pointer is just an address; two
-      isolates can hold bindings to the same Rust handle. The rule is about Dart objects, so the engine must
-      be confined to one isolate or be internally synchronized.</div></details>
+      <details><summary>Show answer</summary><div class="answer">The call occupies the current synchronous
+      event until native code returns, delaying queued UI work. A worker isolate may block without stopping
+      the main isolate's event loop.</div></details>
+      <p class="q">3. Can you send a <code>Pointer</code> or <code>DynamicLibrary</code> to the worker?</p>
+      <details><summary>Show answer</summary><div class="answer">No in Dart 3.12.2. The worker should load
+      the library and open the handle itself. Sending an integer address and reconstructing a pointer
+      bypasses the restriction without solving ownership or synchronization.</div></details>
       <p class="q">4. Why is the DB-owning-isolate pattern a safe default?</p>
-      <details><summary>Show answer</summary><div class="answer">All access funnels through one isolate that
-      serializes calls, so the single-writer rule emerges from the architecture rather than needing
-      engine-side locking to enforce it.</div></details>
+      <details><summary>Show answer</summary><div class="answer">It gives the library, bindings, and handle
+      one owner and serializes entry to that handle. The engine still needs a policy for a second handle or
+      process opening the same file.</div></details>
+      <p class="q">5. How do <code>isolateLocal</code> and <code>listener</code> callbacks differ?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>isolateLocal</code> is synchronous and
+      thread-affine. <code>listener</code> can be called from any native thread but delivers later through
+      a port, returns <code>void</code>, and requires argument resources to remain valid.</div></details>
     </div>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Docs:</strong> <a href="https://dart.dev/language/concurrency">dart.dev — Concurrency</a>, <a href="https://dart.dev/language/isolates">Isolates</a>, <a href="https://dart.dev/interop/c-interop">C interop</a>, <a href="https://api.dart.dev/dart-ffi/dart-ffi-library.html">dart:ffi API</a>.</li>
+      <li><strong>Docs:</strong> <a href="https://dart.dev/language/concurrency">dart.dev — Concurrency
+      (Dart 3.12.2)</a>, <a href="https://api.dart.dev/dart-isolate/SendPort/send.html">SendPort.send</a>,
+      <a href="https://dart.dev/interop/c-interop">C interop</a>, and
+      <a href="https://api.dart.dev/dart-ffi/NativeCallable-class.html">NativeCallable</a>.</li>
       <li><strong>Back-link:</strong> <a href="../01-ffi-spike/index.html">Phase 1</a> built the FFI boundary; this lesson adds the multi-isolate dimension.</li>
       <li><strong>Forward link:</strong> Phase 8 designs the actual C ABI and Dart binding the isolates will call.</li>
     </ul>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <p>An opaque Rust handle confined to one worker isolate may remain single-caller. If the C ABI later
+    permits concurrent calls or independent handles to one file, encode that contract in the Rust types
+    and synchronization design; Dart isolation does not supply Rust <code>Send</code>/<code>Sync</code>
+    or OS file locking.</p>
   </div>
 
   <div class="pager" id="pager"></div>

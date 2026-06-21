@@ -95,9 +95,11 @@ The full brief that generated this site is in [`docs/original-prompt.md`](docs/o
   Durability/WAL** — authored; Phases 2–5 rechecked in the June 20, 2026 Codex accuracy pass.
 - ✅ **Phase 6 — Document layer** — independently rechecked against pinned Isar v3, MongoDB,
   MessagePack, BSON, JSON, and SQLite sources in the June 21, 2026 Codex accuracy pass.
-- ✅ **Phase 7 — Concurrency**, **Phase 8 — Real C ABI + aggregation** — authored (index + lessons +
-  build each). All `PHASES` entries are `"done"`; independent accuracy review is still pending.
-- 📋 Outstanding ⚠️VERIFY items (source-dive internals + version-sensitive Dart/Flutter packaging) are
+- ✅ **Phase 7 — Concurrency** — independently rechecked against SQLite 3.53.0, PostgreSQL, Rust,
+  and Dart 3.12.2 primary sources in the June 21, 2026 Codex accuracy pass.
+- ✅ **Phase 8 — Real C ABI + aggregation** — authored (index + lessons + build); independent accuracy
+  review is still pending. All `PHASES` entries are `"done"`.
+- 📋 Outstanding Phase 8 ⚠️VERIFY items (version-sensitive binding and Dart/Flutter packaging) are
   indexed exactly in `verification.html`.
 
 ## Workflow for adding a phase (2–8)
@@ -109,7 +111,8 @@ The full brief that generated this site is in [`docs/original-prompt.md`](docs/o
 3. Add any new terms to `glossary.html`.
 4. Append every new `⚠️VERIFY` claim to the index table in `verification.html` (location + claim
    + where to check).
-5. Source-dive lessons must point at exact files/functions and tag precise code claims `⚠️VERIFY`.
+5. Source-dive lessons must pin a version/commit and point at exact files/functions. Use inline source
+   tags for confirmed claims; use `⚠️VERIFY` only when an exact claim remains unresolved.
 
 ## Verifying changes locally
 
