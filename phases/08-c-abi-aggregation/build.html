@@ -11,166 +11,322 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › Build</div>
   <span class="pill">Build · AI off</span>
-  <h1>Build: a real C ABI + a Dart binding</h1>
-  <div class="goal"><b>Goal:</b> Wrap your Phase 6 document store in a stable, panic-safe C ABI
-  (opaque handle, byte buffers, error codes, cursor, a small aggregation pipeline), generate a C header
-  with cbindgen, prove it with a C smoke test, and call it from a minimal Dart binding.</div>
+  <h1>Build: the real C ABI + Dart binding</h1>
+  <div class="goal"><b>Goal:</b> Wrap the Phase 6 document store in a versioned C ABI with complete CRUD,
+  engine-owned output buffers, diagnostics, a materialized-result cursor, a generated C header, and a
+  Dart binding. Aggregation is an optional extension after the core boundary is proven.</div>
 
   <div class="box warn">
     <div class="box-title">⚠️ AI off</div>
-    <p>This page gives the ABI contract, milestones, failing tests, and <code>todo!()</code> stubs only —
-    no worked boundary logic. The FFI boundary is where memory-safety bugs become process crashes;
-    implement the pointer handling, ownership, panic wrapping, and cursor logic yourself, following the
-    rules in 8.1–8.5.</p>
+    <p>This page contains contracts, milestones, acceptance criteria, compile-ready declarations,
+    <code>todo!()</code> stubs, failing tests, and graduated hints. It deliberately contains no working
+    handle, buffer, panic-guard, cursor, CRUD, or binding implementation.</p>
   </div>
 
   <div class="box warn">
-    <div class="box-title">⚠️ What the in-process tests do and do not prove</div>
-    <p>The Rust tests below call the <code>extern "C"</code> functions in the same process through raw
-    pointers. They validate the <em>boundary logic</em> — null/empty handling, ownership round-trips, error
-    codes, cursor iteration. They do <strong>not</strong> prove cross-language ABI correctness, header
-    accuracy, symbol export, or on-device loading. Those require the <strong>mandatory manual checks</strong>
-    in the acceptance criteria: generate the header with <code>--lang c</code>, inspect it, compile and run a
-    C smoke test against the built <code>cdylib</code>, and round-trip one call from Dart.</p>
+    <div class="box-title">⚠️ Three different things must be tested</div>
+    <ul>
+      <li><strong>Rust boundary tests</strong> exercise detectable null/empty cases, status codes,
+      ownership round-trips, CRUD, poisoning, and cursor state in-process.</li>
+      <li><strong>A compiled C smoke test</strong> proves that the generated header, exported symbols,
+      calling convention, linker inputs, and runtime library agree.</li>
+      <li><strong>A Dart/package test</strong> proves generated Dart types, native allocation cleanup,
+      code-asset resolution, and the packaged mobile artifact. Rust tests cannot substitute for either
+      external consumer.</li>
+    </ul>
   </div>
 
-  <h2>Deliverable</h2>
-  <p>A Rust 2024 crate <code>minidb_capi</code> with <code>crate-type = ["cdylib", "rlib"]</code>, wrapping
-  the Phase 6 <code>docstore</code> (and optionally the Phase 7 <code>lockmgr</code>). It exposes opaque
-  <code>Db</code> and <code>Cursor</code> handles and a small set of prefixed, unmangled functions. Every
-  exported function is wrapped in <code>catch_unwind</code> and returns an <code>i32</code> status. A
-  <code>cbindgen.toml</code> with <code>language = "C"</code> generates <code>minidb.h</code>; a C smoke
-  test and a Dart binding consume it.</p>
+  <h2>Deliverable and fixed policy</h2>
+  <p>Create a Rust 2024 crate named <code>minidb_capi</code> with
+  <code>crate-type = ["cdylib", "rlib"]</code>. It wraps the Phase 6 store without exposing core Rust
+  types. These choices are fixed for the exercise:</p>
+  <ul>
+    <li>One <code>Db</code> handle is single-caller and non-reentrant.</li>
+    <li>Paths are borrowed UTF-8 byte pairs, not NUL-terminated strings.</li>
+    <li>Documents, filters, and result arrays use the Phase 6 JSON codec.</li>
+    <li><code>(NULL, 0)</code> is accepted as empty input; <code>(NULL, nonzero)</code> is
+    <code>MINIDB_ERR_NULL_ARG</code>. An empty filter means “match all”; an empty document is parsed and
+    therefore returns <code>MINIDB_ERR_BAD_DOC</code>.</li>
+    <li>All engine outputs are <code>Box&lt;[u8]&gt;</code>-backed exact pointer/length pairs; empty output
+    is <code>(NULL, 0)</code>.</li>
+    <li>The v1 cursor owns a materialized result set and shared ownership of the engine/session, so closing
+    the original <code>Db</code> handle does not dangle the cursor. It does not claim lazy query execution.</li>
+    <li>A caught unwinding panic poisons the handle. Normal calls then return
+    <code>MINIDB_ERR_POISONED</code>; diagnostics and close remain available.</li>
+  </ul>
 
-  <h2>The ABI surface</h2>
+  <h2>ABI surface</h2>
   <div class="tablewrap"><table>
     <thead><tr><th>Function</th><th>Contract</th></tr></thead>
     <tbody>
-      <tr><td><code>minidb_abi_version() -&gt; u32</code></td><td>Non-zero ABI version; bump on incompatible change.</td></tr>
-      <tr><td><code>minidb_open(path, *mut *mut Db) -&gt; i32</code></td><td>Allocates a handle; caller must <code>minidb_close</code> it.</td></tr>
-      <tr><td><code>minidb_close(*mut Db)</code></td><td>Frees the handle; null is a no-op.</td></tr>
-      <tr><td><code>minidb_insert(db, *const u8, usize, *mut i64) -&gt; i32</code></td><td>Borrowed doc bytes; writes new <code>_id</code>.</td></tr>
-      <tr><td><code>minidb_find(db, *const u8, usize, *mut *mut u8, *mut usize) -&gt; i32</code></td><td>Engine-allocated result bytes; free with <code>minidb_free_buf</code>.</td></tr>
-      <tr><td><code>minidb_aggregate(db, *const u8, usize, *mut *mut u8, *mut usize) -&gt; i32</code></td><td>Serialized pipeline in, serialized docs out.</td></tr>
-      <tr><td><code>minidb_find_cursor / _cursor_next / _cursor_close</code></td><td>Streaming results (8.3); cursor valid only while its <code>Db</code> is open.</td></tr>
-      <tr><td><code>minidb_free_buf(*mut u8, usize)</code></td><td>Frees an engine buffer using the exact (ptr,len) issued.</td></tr>
-      <tr><td><code>minidb_last_error() -&gt; *const c_char</code></td><td>Thread-local detail for the most recent failure.</td></tr>
+      <tr><td><code>minidb_abi_version() -&gt; u32</code></td><td>Non-zero ABI major; checked before optional symbols.</td></tr>
+      <tr><td><code>minidb_open(path, path_len, out_db) -&gt; i32</code></td><td>Borrowed UTF-8 path; publishes one opaque handle only on success.</td></tr>
+      <tr><td><code>minidb_close(db) -&gt; i32</code></td><td>Releases one handle; null is OK; non-null must be live and closed once.</td></tr>
+      <tr><td><code>minidb_insert(db, doc, len, out_id) -&gt; i32</code></td><td>Borrowed document; positive ID on success.</td></tr>
+      <tr><td><code>minidb_find(db, filter, len, out, out_len) -&gt; i32</code></td><td>Borrowed filter; engine-owned serialized result array.</td></tr>
+      <tr><td><code>minidb_update(db, id, doc, len) -&gt; i32</code></td><td>Replacement update; missing ID is NOT_FOUND.</td></tr>
+      <tr><td><code>minidb_delete(db, id) -&gt; i32</code></td><td>Delete by ID; missing ID is NOT_FOUND.</td></tr>
+      <tr><td><code>minidb_last_error(db, out, out_len) -&gt; i32</code></td><td>Copies this handle's diagnostic into a normal engine output buffer.</td></tr>
+      <tr><td><code>minidb_cursor_last_error(cursor, out, out_len) -&gt; i32</code></td><td>Copies cursor detail even if the original Db handle has closed.</td></tr>
+      <tr><td><code>minidb_free_buf(ptr, len) -&gt; i32</code></td><td>Reclaims one exact engine-issued pair; null/zero is OK.</td></tr>
+      <tr><td><code>minidb_find_cursor(...)</code></td><td>Creates an opaque materialized-result cursor.</td></tr>
+      <tr><td><code>minidb_cursor_next(...)</code></td><td>OK + one output document, END + null/zero, or a negative error.</td></tr>
+      <tr><td><code>minidb_cursor_close(cur) -&gt; i32</code></td><td>Releases one cursor; null is OK.</td></tr>
+      <tr><td><code>minidb_aggregate(...)</code></td><td><strong>Optional:</strong> documented subset only after all core criteria pass.</td></tr>
     </tbody>
   </table></div>
 
   <h2>Ordered milestones</h2>
   <ol>
-    <li><strong>M1 — handle lifecycle.</strong> <code>minidb_open</code>/<code>minidb_close</code> with
-    correct <code>Box</code> ownership; <code>minidb_abi_version</code>.</li>
-    <li><strong>M2 — byte-buffer CRUD.</strong> <code>minidb_insert</code> (borrowed input, the
-    <code>(NULL,0)</code>/<code>(NULL,nonzero)</code> rules) and <code>minidb_find</code> + matching
-    <code>minidb_free_buf</code> (the <code>Box&lt;[u8]&gt;</code> round-trip; empty = <code>(NULL,0)</code>).</li>
-    <li><strong>M3 — error + panic safety.</strong> Stable error codes; wrap every export in
-    <code>catch_unwind</code>; populate a thread-local <code>minidb_last_error</code>; ensure a caught panic
-    leaves committed state intact (transactional mutation, Phase 5).</li>
-    <li><strong>M4 — cursor.</strong> <code>find_cursor</code>/<code>cursor_next</code> (three-valued
-    return)/<code>cursor_close</code>, with the documented lifetime &amp; invalidation policy.</li>
-    <li><strong>M5 — aggregation subset.</strong> <code>minidb_aggregate</code> running a small stage chain
-    (<code>$match</code> via your evaluator, plus <code>$sort</code>/<code>$limit</code>), documented as a
-    subset.</li>
-    <li><strong>M6 — header + bindings.</strong> cbindgen (<code>--lang c</code>) → inspect → C smoke test →
-    minimal Dart binding that round-trips one open/insert/find.</li>
+    <li><strong>M1 — crate + lifecycle.</strong> Crate types, opaque non-zero-sized Rust stubs,
+    ABI version, UTF-8 path validation, open/close ownership, and safe-default out-parameters.</li>
+    <li><strong>M2 — complete CRUD.</strong> Borrowed input helper; insert/find/update/delete; stable
+    status mapping; find no-matches returns a successful serialized empty array.</li>
+    <li><strong>M3 — output ownership.</strong> Exact boxed-slice export/free, null/zero normalization,
+    Dart copy-before-free, repeated lifecycle stress, and an external leak-aware run.</li>
+    <li><strong>M4 — panic + diagnostics.</strong> Outermost unwind guard, per-handle detail,
+    forced-panic feature hook, poisoning, and reopen-from-committed-state manual verification.</li>
+    <li><strong>M5 — cursor.</strong> Materialized result ownership, stable END behavior, cursor survives
+    closing the original database handle, and exact per-document frees.</li>
+    <li><strong>M6 — generated consumers.</strong> cbindgen 0.29.4 C header, C11 smoke test,
+    ffigen 20.1.1 Dart binding, and desktop/dev round-trip.</li>
+    <li><strong>M7 — mobile package.</strong> Flutter 3.44 <code>package_ffi</code> hook invokes the Rust
+    build, registers the code asset, and passes the artifact/device checks from 8.7.</li>
+    <li><strong>Optional M8 — aggregation.</strong> Only after M1–M7: <code>$match</code>,
+    <code>$sort</code>, and <code>$limit</code> with exact documented semantics and limits.</li>
   </ol>
 
   <h2>Acceptance criteria</h2>
   <ul>
-    <li>All supplied Rust tests pass unchanged.</li>
-    <li>Inputs honor the borrowed-buffer contract; <code>(NULL,0)</code> is empty, <code>(NULL,nonzero)</code>
-    is rejected.</li>
-    <li>Output buffers round-trip exactly and are freed only via <code>minidb_free_buf</code>.</li>
-    <li>No code path can let a panic unwind past <code>extern "C"</code>; a forced internal panic returns
-    <code>MINIDB_ERR_PANIC</code> and leaves committed data intact.</li>
-    <li>A cursor iterates all matches then signals end; using it after its <code>Db</code> is closed is
-    documented as forbidden.</li>
-    <li><strong>Mandatory manual:</strong> <code>cbindgen --lang c</code> produces <code>minidb.h</code>;
-    you inspected it (opaque handles forward-declared, buffer params correct); a C smoke test compiles,
-    links the <code>cdylib</code>, and round-trips a call.</li>
-    <li><strong>Mandatory manual:</strong> a Dart program <code>DynamicLibrary.open</code>s the library,
-    looks up the symbols, and round-trips open/insert/find; freeing uses <code>minidb_free_buf</code>.</li>
-    <li><strong>Note the platform caveats</strong> (8.7): library naming, signing, ABI coverage — state what
-    you did and did not test on real devices.</li>
+    <li>All supplied tests compile unchanged with
+    <code>cargo test --features ffi-test-hooks --no-run</code>, then pass after implementation.</li>
+    <li>Every testable acceptance criterion below has a supplied test; inherently unsafe misuse such as a
+    fabricated pointer, wrong non-null allocation length, double free, or use-after-close is documented as
+    caller UB and is never invoked by tests.</li>
+    <li>All output parameters are safe defaults on every error. Empty and null/nonzero inputs are
+    distinguished exactly as specified.</li>
+    <li>CRUD includes update and delete. Missing update/delete IDs return NOT_FOUND; find with no matches is
+    successful.</li>
+    <li>A forced unwinding panic returns PANIC, poisons the handle, and does not escape the C ABI. Manual:
+    reopen the file and verify only previously committed state is visible.</li>
+    <li>A cursor emits every materialized match exactly once, returns stable END, remains valid after the
+    original database handle closes, and releases every output/cursor allocation.</li>
+    <li><strong>Mandatory external:</strong> generated C header is inspected; a C11 program compiles,
+    links, runs, and checks the ABI version plus one lifecycle round-trip.</li>
+    <li><strong>Mandatory external:</strong> generated Dart wrapper checks the ABI version, performs
+    open/insert/find/free/close, and releases Dart and engine allocations in <code>finally</code>.</li>
+    <li><strong>Mandatory packaging:</strong> inspect packaged symbols/architectures, run Android 16 KB
+    validation when Android 15+ Play support is claimed, and run an iOS release-mode device build when iOS
+    support is claimed.</li>
+    <li><strong>Mandatory leak check:</strong> run the repeated lifecycle test under an available
+    leak-aware native tool. The loop alone is not proof of no leaks.</li>
   </ul>
 
+  <h2>Crate/config stubs</h2>
+  <span class="code-label">Cargo.toml</span>
+<pre><code>[package]
+name = <span class="tok-s">"minidb_capi"</span>
+version = <span class="tok-s">"0.1.0"</span>
+edition = <span class="tok-s">"2024"</span>
+
+[lib]
+crate-type = [<span class="tok-s">"cdylib"</span>, <span class="tok-s">"rlib"</span>]
+
+[features]
+ffi-test-hooks = []
+
+<span class="tok-c"># Add your Phase 6 core crate as a path dependency.</span></code></pre>
+
+  <span class="code-label">cbindgen.toml</span>
+<pre><code>language = <span class="tok-s">"C"</span>
+usize_is_size_t = <span class="tok-k">true</span>
+include_guard = <span class="tok-s">"MINIDB_H"</span>
+autogen_warning = <span class="tok-s">"/* Generated by cbindgen 0.29.4. Do not edit. */"</span></code></pre>
+
   <h2>Stub: <code>src/lib.rs</code></h2>
-  <span class="code-label">src/lib.rs — implement every todo!()</span>
-<pre><code><span class="tok-k">use</span> std::ffi::{c_char, c_void};
-<span class="tok-k">use</span> std::panic::catch_unwind;
+  <span class="code-label">src/lib.rs — declarations compile; every boundary operation is TODO</span>
+<pre><code><span class="tok-m">#![allow(dead_code, unused_variables)]</span> <span class="tok-c">// remove as TODOs become real code</span>
 
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_OK</span>: <span class="tok-f">i32</span> = 0;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_END</span>: <span class="tok-f">i32</span> = 1;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_NOT_FOUND</span>: <span class="tok-f">i32</span> = -1;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_BAD_DOC</span>: <span class="tok-f">i32</span> = -2;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_IO</span>: <span class="tok-f">i32</span> = -3;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_NULL_ARG</span>: <span class="tok-f">i32</span> = -4;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_POISONED</span>: <span class="tok-f">i32</span> = -5;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_INVALID_UTF8</span>: <span class="tok-f">i32</span> = -6;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_PANIC</span>: <span class="tok-f">i32</span> = -99;
 
-<span class="tok-c">// Opaque to C: only ever handed back as a pointer.</span>
-<span class="tok-k">pub struct</span> <span class="tok-f">Db</span> { <span class="tok-c">/* private: your Phase 6 DocStore (+ Phase 7 lockmgr) */</span> }
-<span class="tok-k">pub struct</span> <span class="tok-f">Cursor</span> { <span class="tok-c">/* private: result iterator borrowing Db */</span> }
+<span class="tok-c">// Non-zero-sized placeholders keep the declarations usable while their default</span>
+<span class="tok-c">// Rust layout remains opaque to cbindgen. Replace private fields with real state.</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">Db</span> { _private: <span class="tok-f">u8</span> }
+<span class="tok-k">pub struct</span> <span class="tok-f">Cursor</span> { _private: <span class="tok-f">u8</span> }
 
-<span class="tok-c">// Map a borrowed C buffer to &[u8] per the 8.2 rules.</span>
-<span class="tok-k">unsafe fn</span> <span class="tok-f">as_slice</span><span class="tok-k">&lt;'a&gt;</span>(ptr: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Option</span><span class="tok-k">&lt;</span>&amp;<span class="tok-k">'a</span> [<span class="tok-f">u8</span>]<span class="tok-k">&gt;</span> {
-    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: (NULL,0)->&[]; (NULL,nonzero)->None; else from_raw_parts"</span>)
+<span class="tok-k">unsafe fn</span> <span class="tok-f">borrowed_bytes</span><span class="tok-k">&lt;'a&gt;</span>(
+    ptr: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">Result</span>&lt;&amp;<span class="tok-k">'a</span> [<span class="tok-f">u8</span>], <span class="tok-f">i32</span>&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: null/length validation; create only a call-scoped slice"</span>)
 }
 
-<span class="tok-c">// Hand owned bytes to the caller as (ptr,len); empty -> (NULL,0).</span>
-<span class="tok-k">unsafe fn</span> <span class="tok-f">export_bytes</span>(bytes: <span class="tok-f">Vec</span><span class="tok-k">&lt;</span><span class="tok-f">u8</span><span class="tok-k">&gt;</span>, out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) {
-    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: into_boxed_slice + Box::into_raw; write ptr/len; empty -> NULL,0"</span>)
+<span class="tok-k">unsafe fn</span> <span class="tok-f">publish_bytes</span>(
+    bytes: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;,
+    out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>,
+    out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M3: validate/reset outs; boxed-slice transfer; empty -> NULL,0"</span>)
 }
 
-<span class="tok-c">// Run a closure under catch_unwind and flatten to an i32 status.</span>
-<span class="tok-k">fn</span> <span class="tok-f">guard</span><span class="tok-k">&lt;F: FnOnce() -&gt; i32 + std::panic::UnwindSafe&gt;</span>(f: <span class="tok-f">F</span>) -&gt; <span class="tok-f">i32</span> {
-    <span class="tok-k">match</span> <span class="tok-f">catch_unwind</span>(f) {
-        <span class="tok-f">Ok</span>(code) =&gt; code,
-        <span class="tok-f">Err</span>(_) =&gt; { <span class="tok-c">/* set last_error */</span> <span class="tok-f">MINIDB_ERR_PANIC</span> }
-    }
-}
-
-<span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_abi_version</span>() -&gt; <span class="tok-f">u32</span> { <span class="tok-m">todo!</span>(<span class="tok-s">"M1: a non-zero version constant"</span>) }
-
-<span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_open</span>(path: *<span class="tok-k">const</span> <span class="tok-f">c_char</span>, out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) -&gt; <span class="tok-f">i32</span> {
-    <span class="tok-f">guard</span>(|| <span class="tok-m">todo!</span>(<span class="tok-s">"M1: read path; open DocStore; Box::into_raw into *out; return MINIDB_OK"</span>))
+<span class="tok-k">fn</span> <span class="tok-f">guard</span>&lt;<span class="tok-f">F</span>: <span class="tok-f">FnOnce</span>() -&gt; <span class="tok-f">i32</span>&gt;(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, f: <span class="tok-f">F</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M4: outer catch_unwind; record detail; poison db on caught panic"</span>)
 }
 
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_close</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) {
-    <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span>; }
-    <span class="tok-k">unsafe</span> { <span class="tok-k">let</span> _ = <span class="tok-f">Box</span>::<span class="tok-f">from_raw</span>(db); } <span class="tok-c">// reclaim and drop</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_abi_version</span>() -&gt; <span class="tok-f">u32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: return the non-zero ABI major"</span>)
 }
 
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_insert</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, doc: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>, out_id: *<span class="tok-k">mut</span> <span class="tok-f">i64</span>) -&gt; <span class="tok-f">i32</span> {
-    <span class="tok-f">guard</span>(|| <span class="tok-m">todo!</span>(<span class="tok-s">"M2: null-check db/out_id; as_slice(doc,len); docstore.insert; write id"</span>))
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_open</span>(
+    path: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, path_len: <span class="tok-f">usize</span>,
+    out_db: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">Db</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: guard; reset out; validate UTF-8 path; open core; transfer Box"</span>)
 }
 
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_find</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, filter: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>,
-                              out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> {
-    <span class="tok-f">guard</span>(|| <span class="tok-m">todo!</span>(<span class="tok-s">"M2: parse filter bytes; run Phase 6 find; serialize results; export_bytes"</span>))
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_close</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M1: null is OK; guard destruction; reclaim exactly one live Box"</span>)
 }
 
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_free_buf</span>(ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>) {
-    <span class="tok-k">if</span> ptr.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span>; }
-    <span class="tok-k">unsafe</span> { <span class="tok-k">let</span> _ = <span class="tok-f">Box</span>::<span class="tok-f">from_raw</span>(std::ptr::<span class="tok-f">slice_from_raw_parts_mut</span>(ptr, len)); }
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_insert</span>(
+    db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>,
+    doc: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, doc_len: <span class="tok-f">usize</span>,
+    out_id: *<span class="tok-k">mut</span> <span class="tok-f">i64</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: guard; reset id; validate handle/out/input; parse; transactional insert"</span>)
 }
 
-<span class="tok-c">// M4 cursor + M5 aggregate: same shape — opaque handle / serialized in &amp; out.</span>
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_next</span>(cur: *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>, out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> {
-    <span class="tok-f">guard</span>(|| <span class="tok-m">todo!</span>(<span class="tok-s">"M4: 0=produced doc, 1=end, &lt;0=error"</span>))
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_find</span>(
+    db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>,
+    filter: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, filter_len: <span class="tok-f">usize</span>,
+    out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>,
+    out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M2/M3: reset outs; empty filter = all; serialize result array; publish"</span>)
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_update</span>(
+    db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, id: <span class="tok-f">i64</span>,
+    doc: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, doc_len: <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: validate; replacement update; map missing ID to NOT_FOUND"</span>)
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_delete</span>(
+    db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, id: <span class="tok-f">i64</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: transactional delete; map missing ID to NOT_FOUND"</span>)
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_last_error</span>(
+    db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>,
+    out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>,
+    out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M4: diagnostics remain available on poisoned handle; copy via publish_bytes"</span>)
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_free_buf</span>(
+    ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M3: NULL,0 is OK; NULL,nonzero rejected; reclaim exact boxed slice"</span>)
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_find_cursor</span>(
+    db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>,
+    filter: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, filter_len: <span class="tok-f">usize</span>,
+    out_cursor: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M5: materialize matches; cursor owns results + shared engine/session"</span>)
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_next</span>(
+    cursor: *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>,
+    out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>,
+    out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M5: reset outs; publish one doc or return stable MINIDB_END"</span>)
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_close</span>(
+    cursor: *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M5: null is OK; reclaim exactly one live cursor"</span>)
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_last_error</span>(
+    cursor: *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>,
+    out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>,
+    out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M5: copy cursor-specific detail through the normal output-buffer path"</span>)
+}
+
+<span class="tok-c">/// cbindgen:no-export</span>
+<span class="tok-m">#[cfg(feature = <span class="tok-s">"ffi-test-hooks"</span>)]</span>
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_panic_for_test</span>(
+    db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>
+) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M4: panic inside the same outer guard used by production exports"</span>)
 }</code></pre>
 
+  <div class="box warn">
+    <div class="box-title">Why the test hook uses a feature</div>
+    <p>An integration test in <code>tests/</code> links the library as a normal dependency, so a symbol
+    hidden only behind <code>#[cfg(test)]</code> is not available there. The explicit
+    <code>ffi-test-hooks</code> feature makes the hook available for this test build and keeps it absent
+    from normal release builds.</p>
+  </div>
+
   <h2>Failing tests</h2>
-  <span class="code-label">tests/capi.rs — call the extern fns in-process (boundary logic only)</span>
+  <span class="code-label">tests/capi.rs — compile first; run only after M1's outer guard exists</span>
 <pre><code><span class="tok-k">use</span> minidb_capi::*;
 <span class="tok-k">use</span> std::ptr;
+
+<span class="tok-k">unsafe fn</span> <span class="tok-f">open_memory</span>() -&gt; *<span class="tok-k">mut</span> <span class="tok-f">Db</span> {
+    <span class="tok-k">let</span> path = <span class="tok-s">b":memory:"</span>;
+    <span class="tok-k">let mut</span> db = ptr::<span class="tok-f">null_mut</span>();
+    <span class="tok-k">let</span> rc = <span class="tok-k">unsafe</span> {
+        <span class="tok-f">minidb_open</span>(path.<span class="tok-f">as_ptr</span>(), path.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> db)
+    };
+    <span class="tok-m">assert_eq!</span>(rc, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert!</span>(!db.<span class="tok-f">is_null</span>());
+    db
+}
+
+<span class="tok-k">unsafe fn</span> <span class="tok-f">take_output</span>(ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; {
+    <span class="tok-k">if</span> len == 0 {
+        <span class="tok-m">assert!</span>(ptr.<span class="tok-f">is_null</span>());
+        <span class="tok-k">return</span> <span class="tok-f">Vec</span>::<span class="tok-f">new</span>();
+    }
+    <span class="tok-m">assert!</span>(!ptr.<span class="tok-f">is_null</span>());
+    <span class="tok-k">let</span> copied = <span class="tok-k">unsafe</span> {
+        std::slice::<span class="tok-f">from_raw_parts</span>(ptr, len).<span class="tok-f">to_vec</span>()
+    };
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_free_buf</span>(ptr, len) }, <span class="tok-f">MINIDB_OK</span>);
+    copied
+}
 
 <span class="tok-m">#[test]</span>
 <span class="tok-k">fn</span> <span class="tok-f">abi_version_is_nonzero</span>() {
@@ -178,94 +334,253 @@
 }
 
 <span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">open_rejects_null_out_and_invalid_utf8</span>() {
+    <span class="tok-k">let</span> path = <span class="tok-s">b":memory:"</span>;
+    <span class="tok-k">let</span> rc = <span class="tok-k">unsafe</span> {
+        <span class="tok-f">minidb_open</span>(path.<span class="tok-f">as_ptr</span>(), path.<span class="tok-f">len</span>(), ptr::<span class="tok-f">null_mut</span>())
+    };
+    <span class="tok-m">assert_eq!</span>(rc, <span class="tok-f">MINIDB_ERR_NULL_ARG</span>);
+    <span class="tok-k">let</span> bad_utf8 = [0xff];
+    <span class="tok-k">let mut</span> out = ptr::<span class="tok-f">dangling_mut</span>();
+    <span class="tok-m">assert_eq!</span>(
+        <span class="tok-k">unsafe</span> { <span class="tok-f">minidb_open</span>(bad_utf8.<span class="tok-f">as_ptr</span>(), bad_utf8.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> out) },
+        <span class="tok-f">MINIDB_ERR_INVALID_UTF8</span>
+    );
+    <span class="tok-m">assert!</span>(out.<span class="tok-f">is_null</span>());
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">null_zero_is_empty_but_null_nonzero_is_invalid</span>() {
+    <span class="tok-k">let</span> db = <span class="tok-k">unsafe</span> { <span class="tok-f">open_memory</span>() };
+    <span class="tok-k">let mut</span> id = 77;
+    <span class="tok-m">assert_eq!</span>(
+        <span class="tok-k">unsafe</span> { <span class="tok-f">minidb_insert</span>(db, ptr::<span class="tok-f">null</span>(), 0, &amp;<span class="tok-k">mut</span> id) },
+        <span class="tok-f">MINIDB_ERR_BAD_DOC</span>
+    );
+    <span class="tok-m">assert_eq!</span>(id, 0);
+    <span class="tok-m">assert_eq!</span>(
+        <span class="tok-k">unsafe</span> { <span class="tok-f">minidb_insert</span>(db, ptr::<span class="tok-f">null</span>(), 3, &amp;<span class="tok-k">mut</span> id) },
+        <span class="tok-f">MINIDB_ERR_NULL_ARG</span>
+    );
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(db) }, <span class="tok-f">MINIDB_OK</span>);
+}
+
+<span class="tok-m">#[test]</span>
 <span class="tok-k">fn</span> <span class="tok-f">open_insert_find_roundtrip</span>() {
-    <span class="tok-k">let mut</span> db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span> = ptr::<span class="tok-f">null_mut</span>();
-    <span class="tok-k">let</span> path = std::ffi::<span class="tok-f">CString</span>::<span class="tok-f">new</span>(<span class="tok-s">":memory:"</span>).<span class="tok-f">unwrap</span>();
-    <span class="tok-m">assert_eq!</span>(<span class="tok-f">minidb_open</span>(path.<span class="tok-f">as_ptr</span>(), &amp;<span class="tok-k">mut</span> db), <span class="tok-f">MINIDB_OK</span>);
-
-    <span class="tok-k">let</span> doc = <span class="tok-s">br#"{"city":"London"}"#</span>;
-    <span class="tok-k">let mut</span> id: <span class="tok-f">i64</span> = 0;
-    <span class="tok-m">assert_eq!</span>(<span class="tok-f">minidb_insert</span>(db, doc.<span class="tok-f">as_ptr</span>(), doc.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> id), <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-k">let</span> db = <span class="tok-k">unsafe</span> { <span class="tok-f">open_memory</span>() };
+    <span class="tok-k">let</span> doc = <span class="tok-s">br#"{"city":"London","n":1}"#</span>;
+    <span class="tok-k">let mut</span> id = 0;
+    <span class="tok-m">assert_eq!</span>(
+        <span class="tok-k">unsafe</span> { <span class="tok-f">minidb_insert</span>(db, doc.<span class="tok-f">as_ptr</span>(), doc.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> id) },
+        <span class="tok-f">MINIDB_OK</span>
+    );
     <span class="tok-m">assert!</span>(id &gt; 0);
-
     <span class="tok-k">let</span> filter = <span class="tok-s">br#"{"city":"London"}"#</span>;
-    <span class="tok-k">let mut</span> out: *<span class="tok-k">mut</span> <span class="tok-f">u8</span> = ptr::<span class="tok-f">null_mut</span>();
-    <span class="tok-k">let mut</span> out_len: <span class="tok-f">usize</span> = 0;
-    <span class="tok-m">assert_eq!</span>(<span class="tok-f">minidb_find</span>(db, filter.<span class="tok-f">as_ptr</span>(), filter.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len), <span class="tok-f">MINIDB_OK</span>);
-    <span class="tok-m">assert!</span>(out_len &gt; 0 &amp;&amp; !out.<span class="tok-f">is_null</span>());
-    <span class="tok-f">minidb_free_buf</span>(out, out_len);
-    <span class="tok-f">minidb_close</span>(db);
+    <span class="tok-k">let mut</span> out = ptr::<span class="tok-f">null_mut</span>();
+    <span class="tok-k">let mut</span> out_len = 0;
+    <span class="tok-m">assert_eq!</span>(
+        <span class="tok-k">unsafe</span> { <span class="tok-f">minidb_find</span>(db, filter.<span class="tok-f">as_ptr</span>(), filter.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len) },
+        <span class="tok-f">MINIDB_OK</span>
+    );
+    <span class="tok-k">let</span> bytes = <span class="tok-k">unsafe</span> { <span class="tok-f">take_output</span>(out, out_len) };
+    <span class="tok-m">assert!</span>(String::<span class="tok-f">from_utf8_lossy</span>(&amp;bytes).<span class="tok-f">contains</span>(<span class="tok-s">"London"</span>));
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(db) }, <span class="tok-f">MINIDB_OK</span>);
 }
 
 <span class="tok-m">#[test]</span>
-<span class="tok-k">fn</span> <span class="tok-f">null_nonzero_input_is_rejected</span>() {
-    <span class="tok-k">let mut</span> db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span> = ptr::<span class="tok-f">null_mut</span>();
-    <span class="tok-k">let</span> path = std::ffi::<span class="tok-f">CString</span>::<span class="tok-f">new</span>(<span class="tok-s">":memory:"</span>).<span class="tok-f">unwrap</span>();
-    <span class="tok-f">minidb_open</span>(path.<span class="tok-f">as_ptr</span>(), &amp;<span class="tok-k">mut</span> db);
-    <span class="tok-k">let mut</span> id: <span class="tok-f">i64</span> = 0;
-    <span class="tok-c">// (NULL, nonzero) must not be treated as a valid empty buffer</span>
-    <span class="tok-m">assert_ne!</span>(<span class="tok-f">minidb_insert</span>(db, ptr::<span class="tok-f">null</span>(), 5, &amp;<span class="tok-k">mut</span> id), <span class="tok-f">MINIDB_OK</span>);
-    <span class="tok-f">minidb_close</span>(db);
+<span class="tok-k">fn</span> <span class="tok-f">update_and_delete_have_not_found_semantics</span>() {
+    <span class="tok-k">let</span> db = <span class="tok-k">unsafe</span> { <span class="tok-f">open_memory</span>() };
+    <span class="tok-k">let</span> first = <span class="tok-s">br#"{"city":"Oslo","n":1}"#</span>;
+    <span class="tok-k">let mut</span> id = 0;
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_insert</span>(db, first.<span class="tok-f">as_ptr</span>(), first.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> id) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-k">let</span> replacement = <span class="tok-s">br#"{"city":"Oslo","n":2}"#</span>;
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_update</span>(db, id, replacement.<span class="tok-f">as_ptr</span>(), replacement.<span class="tok-f">len</span>()) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_update</span>(db, i64::<span class="tok-f">MAX</span>, replacement.<span class="tok-f">as_ptr</span>(), replacement.<span class="tok-f">len</span>()) }, <span class="tok-f">MINIDB_ERR_NOT_FOUND</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_delete</span>(db, id) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_delete</span>(db, id) }, <span class="tok-f">MINIDB_ERR_NOT_FOUND</span>);
+    <span class="tok-k">let</span> filter = <span class="tok-m">format!</span>(<span class="tok-s">r#"{{"_id":{id}}}"#</span>);
+    <span class="tok-k">let mut</span> out = ptr::<span class="tok-f">null_mut</span>();
+    <span class="tok-k">let mut</span> out_len = 0;
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_find</span>(db, filter.<span class="tok-f">as_ptr</span>(), filter.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">take_output</span>(out, out_len) }, <span class="tok-s">b"[]"</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(db) }, <span class="tok-f">MINIDB_OK</span>);
 }
 
 <span class="tok-m">#[test]</span>
-<span class="tok-k">fn</span> <span class="tok-f">free_buf_handles_null_and_empty</span>() {
-    <span class="tok-f">minidb_free_buf</span>(ptr::<span class="tok-f">null_mut</span>(), 0); <span class="tok-c">// no-op, must not crash</span>
+<span class="tok-k">fn</span> <span class="tok-f">errors_reset_output_parameters</span>() {
+    <span class="tok-k">let</span> db = <span class="tok-k">unsafe</span> { <span class="tok-f">open_memory</span>() };
+    <span class="tok-k">let mut</span> out = ptr::<span class="tok-f">dangling_mut</span>();
+    <span class="tok-k">let mut</span> out_len = 999;
+    <span class="tok-k">let</span> rc = <span class="tok-k">unsafe</span> {
+        <span class="tok-f">minidb_find</span>(db, ptr::<span class="tok-f">null</span>(), 4, &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len)
+    };
+    <span class="tok-m">assert_eq!</span>(rc, <span class="tok-f">MINIDB_ERR_NULL_ARG</span>);
+    <span class="tok-m">assert!</span>(out.<span class="tok-f">is_null</span>());
+    <span class="tok-m">assert_eq!</span>(out_len, 0);
+    out = ptr::<span class="tok-f">dangling_mut</span>();
+    out_len = 123;
+    <span class="tok-m">assert_eq!</span>(
+        <span class="tok-k">unsafe</span> { <span class="tok-f">minidb_find</span>(ptr::<span class="tok-f">null_mut</span>(), ptr::<span class="tok-f">null</span>(), 0, &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len) },
+        <span class="tok-f">MINIDB_ERR_NULL_ARG</span>
+    );
+    <span class="tok-m">assert!</span>(out.<span class="tok-f">is_null</span>());
+    <span class="tok-m">assert_eq!</span>(out_len, 0);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(db) }, <span class="tok-f">MINIDB_OK</span>);
 }
 
 <span class="tok-m">#[test]</span>
-<span class="tok-k">fn</span> <span class="tok-f">forced_panic_becomes_error_not_abort</span>() {
-    <span class="tok-c">// Provide a #[cfg(test)] hook that panics inside a guarded fn; assert it returns</span>
-    <span class="tok-c">// MINIDB_ERR_PANIC rather than aborting the process.</span>
-    <span class="tok-m">assert_eq!</span>(<span class="tok-f">minidb_panic_for_test</span>(), <span class="tok-f">MINIDB_ERR_PANIC</span>);
+<span class="tok-k">fn</span> <span class="tok-f">free_and_close_define_null_pairs</span>() {
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_free_buf</span>(ptr::<span class="tok-f">null_mut</span>(), 0) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_free_buf</span>(ptr::<span class="tok-f">null_mut</span>(), 7) }, <span class="tok-f">MINIDB_ERR_NULL_ARG</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(ptr::<span class="tok-f">null_mut</span>()) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_cursor_close</span>(ptr::<span class="tok-f">null_mut</span>()) }, <span class="tok-f">MINIDB_OK</span>);
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">last_error_is_copied_and_freed_normally</span>() {
+    <span class="tok-k">let</span> db = <span class="tok-k">unsafe</span> { <span class="tok-f">open_memory</span>() };
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_delete</span>(db, i64::<span class="tok-f">MAX</span>) }, <span class="tok-f">MINIDB_ERR_NOT_FOUND</span>);
+    <span class="tok-k">let mut</span> out = ptr::<span class="tok-f">null_mut</span>();
+    <span class="tok-k">let mut</span> out_len = 0;
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_last_error</span>(db, &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-k">let</span> detail = <span class="tok-k">unsafe</span> { <span class="tok-f">take_output</span>(out, out_len) };
+    <span class="tok-m">assert!</span>(!detail.<span class="tok-f">is_empty</span>());
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(db) }, <span class="tok-f">MINIDB_OK</span>);
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">cursor_survives_db_handle_close_and_end_is_stable</span>() {
+    <span class="tok-k">let</span> db = <span class="tok-k">unsafe</span> { <span class="tok-f">open_memory</span>() };
+    <span class="tok-k">for</span> n <span class="tok-k">in</span> 1..=2 {
+        <span class="tok-k">let</span> doc = <span class="tok-m">format!</span>(<span class="tok-s">r#"{{"n":{n}}}"#</span>);
+        <span class="tok-k">let mut</span> id = 0;
+        <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_insert</span>(db, doc.<span class="tok-f">as_ptr</span>(), doc.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> id) }, <span class="tok-f">MINIDB_OK</span>);
+    }
+    <span class="tok-k">let mut</span> cursor = ptr::<span class="tok-f">null_mut</span>();
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_find_cursor</span>(db, ptr::<span class="tok-f">null</span>(), 0, &amp;<span class="tok-k">mut</span> cursor) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(db) }, <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-k">let mut</span> seen = 0;
+    <span class="tok-k">loop</span> {
+        <span class="tok-k">let mut</span> out = ptr::<span class="tok-f">null_mut</span>();
+        <span class="tok-k">let mut</span> out_len = 0;
+        <span class="tok-k">let</span> rc = <span class="tok-k">unsafe</span> { <span class="tok-f">minidb_cursor_next</span>(cursor, &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len) };
+        <span class="tok-k">if</span> rc == <span class="tok-f">MINIDB_END</span> {
+            <span class="tok-m">assert!</span>(out.<span class="tok-f">is_null</span>());
+            <span class="tok-m">assert_eq!</span>(out_len, 0);
+            <span class="tok-k">break</span>;
+        }
+        <span class="tok-m">assert_eq!</span>(rc, <span class="tok-f">MINIDB_OK</span>);
+        <span class="tok-k">let</span> _ = <span class="tok-k">unsafe</span> { <span class="tok-f">take_output</span>(out, out_len) };
+        seen += 1;
+    }
+    <span class="tok-m">assert_eq!</span>(seen, 2);
+    <span class="tok-k">let mut</span> out = ptr::<span class="tok-f">dangling_mut</span>();
+    <span class="tok-k">let mut</span> out_len = 9;
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_cursor_next</span>(cursor, &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len) }, <span class="tok-f">MINIDB_END</span>);
+    <span class="tok-m">assert!</span>(out.<span class="tok-f">is_null</span>());
+    <span class="tok-m">assert_eq!</span>(out_len, 0);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_cursor_close</span>(cursor) }, <span class="tok-f">MINIDB_OK</span>);
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">forced_unwind_poisoning_is_observable</span>() {
+    <span class="tok-k">let</span> db = <span class="tok-k">unsafe</span> { <span class="tok-f">open_memory</span>() };
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_panic_for_test</span>(db) }, <span class="tok-f">MINIDB_ERR_PANIC</span>);
+    <span class="tok-k">let mut</span> id = 0;
+    <span class="tok-k">let</span> doc = <span class="tok-s">br#"{"after":"panic"}"#</span>;
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_insert</span>(db, doc.<span class="tok-f">as_ptr</span>(), doc.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> id) }, <span class="tok-f">MINIDB_ERR_POISONED</span>);
+    <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(db) }, <span class="tok-f">MINIDB_OK</span>);
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">repeated_lifecycle_stress_is_not_a_leak_proof</span>() {
+    <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..100 {
+        <span class="tok-k">let</span> db = <span class="tok-k">unsafe</span> { <span class="tok-f">open_memory</span>() };
+        <span class="tok-m">assert_eq!</span>(<span class="tok-k">unsafe</span> { <span class="tok-f">minidb_close</span>(db) }, <span class="tok-f">MINIDB_OK</span>);
+    }
 }</code></pre>
 
+  <h2>Mandatory external checks</h2>
+  <ol>
+    <li><strong>Header:</strong> generate with cbindgen 0.29.4. Confirm C output, include guard,
+    <code>size_t</code> lengths, fixed-width status/ID types, and incomplete
+    <code>Db</code>/<code>Cursor</code> declarations.</li>
+    <li><strong>Symbols:</strong> inspect the final shared library and packaged artifact for every
+    <code>minidb_*</code> symbol. Record the platform tool/command used.</li>
+    <li><strong>C11 smoke test:</strong> include <code>minidb.h</code>, check the ABI version, open an
+    in-memory database, insert/find, free with <code>minidb_free_buf</code>, and close.</li>
+    <li><strong>Dart:</strong> generate with ffigen 20.1.1, verify <code>size_t → ffi.Size</code>, copy
+    engine bytes before freeing, and put both allocator families' cleanup in <code>finally</code>.</li>
+    <li><strong>Package:</strong> use Flutter 3.44's <code>package_ffi</code> hook flow. Inspect and run the
+    release artifact as required by 8.7.</li>
+  </ol>
+
   <h2>Stuck? — graduated hints</h2>
-  <details><summary>Box ownership for the handle confuses me</summary><div class="answer">
-    <strong>Nudge:</strong> <code>open</code> leaks, <code>close</code> reclaims.
-    <br><strong>Bigger:</strong> <code>Box::into_raw(Box::new(db))</code> gives the caller a pointer;
-    <code>Box::from_raw</code> in <code>close</code> turns it back into an owned <code>Box</code> that drops.
-    <br><strong>Technique:</strong> never hand out a pointer to a stack value or a <code>&amp;mut</code>; the
-    handle must outlive the call, so it must be heap-owned via <code>Box</code>.</div></details>
-  <details><summary>The output buffer crashes on free</summary><div class="answer">
-    <strong>Nudge:</strong> The free must see the same length you issued.
-    <br><strong>Technique:</strong> build the buffer with <code>Vec::into_boxed_slice</code> +
-    <code>Box::into_raw</code>, and reclaim with <code>slice_from_raw_parts_mut(ptr, len)</code> +
-    <code>Box::from_raw</code> using the identical <code>len</code>. A mismatched length is UB.</div></details>
-  <details><summary>How do I test panic safety without aborting?</summary><div class="answer">
-    <strong>Nudge:</strong> Only an <em>unwinding</em> panic that reaches <code>extern "C"</code> aborts.
-    <br><strong>Technique:</strong> wrap the body in <code>catch_unwind</code> so the panic is caught and
-    mapped to a code; add a <code>#[cfg(test)]</code> function that deliberately panics inside the guard and
-    assert it returns <code>MINIDB_ERR_PANIC</code>. (Don't build with <code>panic = "abort"</code>, which
-    <code>catch_unwind</code> can't catch.)</div></details>
-  <details><summary>cbindgen emitted C++ / weird types</summary><div class="answer">
-    <strong>Nudge:</strong> Default language is C++.
-    <br><strong>Technique:</strong> set <code>language = "C"</code> in <code>cbindgen.toml</code> (or
-    <code>--lang c</code>), regenerate, and read the header: opaque handles should be forward-declared
-    structs, buffers should be <code>uint8_t*</code> + <code>size_t</code>. Then compile a C file that
-    includes it and links the cdylib.</div></details>
+  <details><summary>How do I structure the pointer checks?</summary><div class="answer">
+    <strong>Nudge:</strong> Write harmless values to valid output locations before parsing input.
+    <br><strong>Bigger nudge:</strong> Separate three jobs: validate out-pointers, map a borrowed input pair
+    to a call-scoped slice, then publish owned output only after success.
+    <br><strong>Technique:</strong> Keep each raw-pointer operation in a small documented
+    <code>unsafe</code> block. Use <code>slice::from_raw_parts</code> only after handling null/zero and all
+    documented size/lifetime preconditions.</div></details>
+
+  <details><summary>How do I round-trip an output buffer?</summary><div class="answer">
+    <strong>Nudge:</strong> The allocation shape returned and reclaimed must match exactly.
+    <br><strong>Bigger nudge:</strong> Remove spare <code>Vec</code> capacity before exposing the pair.
+    <br><strong>Technique:</strong> Name the relevant APIs:
+    <code>Vec::into_boxed_slice</code>, <code>Box::into_raw</code>,
+    <code>ptr::slice_from_raw_parts_mut</code>, and <code>Box::from_raw</code>. Do not add a second
+    allocator convention.</div></details>
+
+  <details><summary><code>catch_unwind</code> rejects my closure or the handle might be damaged</summary><div class="answer">
+    <strong>Nudge:</strong> Unwind containment and logical recovery are separate concerns.
+    <br><strong>Bigger nudge:</strong> The outer wrapper maps ordinary errors, catches an unwinding panic,
+    records detail, and marks the shell handle poisoned.
+    <br><strong>Technique:</strong> Read <code>catch_unwind</code> and <code>AssertUnwindSafe</code>.
+    Using the latter is an assertion you must justify; poisoning is still required. Explicitly test with
+    unwinding enabled—<code>panic="abort"</code> cannot be caught.</div></details>
+
+  <details><summary>How can a cursor survive <code>Db</code> close?</summary><div class="answer">
+    <strong>Nudge:</strong> Do not store a naked borrow to an allocation the caller can destroy.
+    <br><strong>Bigger nudge:</strong> Separate the foreign <code>Db</code> handle box from the underlying
+    engine/session lifetime.
+    <br><strong>Technique:</strong> Give both the database handle and cursor shared ownership of an internal
+    owner. The v1 cursor additionally owns its materialized results and index.</div></details>
+
+  <details><summary>Why is my integration-test panic hook missing?</summary><div class="answer">
+    <strong>Nudge:</strong> Integration tests compile the library as a normal dependency.
+    <br><strong>Bigger nudge:</strong> <code>#[cfg(test)]</code> is not enabled for that dependency build.
+    <br><strong>Technique:</strong> Gate the exported hook behind the declared
+    <code>ffi-test-hooks</code> feature and run the exact command shown above; ensure release packaging does
+    not enable it.</div></details>
+
+  <details><summary>cbindgen emitted a definition or the wrong length type</summary><div class="answer">
+    <strong>Nudge:</strong> Opaque Rust types should not have a public guaranteed layout.
+    <br><strong>Bigger nudge:</strong> Do not make the placeholder zero-sized; cbindgen documents that
+    zero-sized types can be erased from signatures.
+    <br><strong>Technique:</strong> Keep private non-zero state with no <code>repr(C)</code>, set
+    <code>language = "C"</code> and <code>usize_is_size_t = true</code>, regenerate, then inspect and compile
+    the header.</div></details>
 
   <h2>Definition of Done</h2>
   <ul>
-    <li>☐ All supplied Rust tests pass unchanged.</li>
-    <li>☐ Every export is panic-guarded; a forced panic returns a code and leaves committed data intact.</li>
-    <li>☐ Input/output buffer contracts (8.2) are upheld exactly; only <code>minidb_free_buf</code> frees
-    engine memory.</li>
-    <li>☐ Cursor + a documented invalidation policy; aggregation runs a documented stage subset.</li>
-    <li>☐ <code>cbindgen --lang c</code> header generated, inspected, and exercised by a compiled C smoke
-    test linking the cdylib.</li>
-    <li>☐ A Dart binding opens the library and round-trips open/insert/find, freeing via
-    <code>minidb_free_buf</code>.</li>
-    <li>☐ Platform caveats (8.7) written down, with what was and wasn't tested on device.</li>
+    <li>☐ M1–M7 complete; optional M8 clearly marked if omitted.</li>
+    <li>☐ Supplied Rust tests pass unchanged with the feature-gated panic hook.</li>
+    <li>☐ Unsafe contracts are documented on every exported raw-pointer function.</li>
+    <li>☐ C11 and Dart consumers pass; generated artifacts are pinned and reproducible.</li>
+    <li>☐ Leak-aware lifecycle run and committed-state reopen test recorded.</li>
+    <li>☐ Final Android/iOS artifact checks match the platforms actually claimed as supported.</li>
   </ul>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Reference:</strong> <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon — FFI</a>, <a href="https://doc.rust-lang.org/cargo/reference/cargo-targets.html#library">Cargo crate types</a>.</li>
-      <li><strong>Tools:</strong> <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">cbindgen</a>, <a href="https://pub.dev/packages/ffigen">ffigen</a>, <a href="https://pub.dev/packages/ffi">package:ffi</a>.</li>
-      <li><strong>Capstone:</strong> this is the last build — you now have a durable, indexed, queryable,
-      embeddable document database callable from Dart.</li>
+      <li><strong>Rust:</strong> <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon FFI</a>,
+      <a href="https://doc.rust-lang.org/std/slice/fn.from_raw_parts.html">raw-slice safety</a>, and
+      <a href="https://doc.rust-lang.org/std/panic/fn.catch_unwind.html">panic containment</a>.</li>
+      <li><strong>Generators:</strong> <a href="https://github.com/mozilla/cbindgen/blob/v0.29.4/docs.md">cbindgen 0.29.4</a> and
+      <a href="https://pub.dev/packages/ffigen/versions/20.1.1">ffigen 20.1.1</a>.</li>
+      <li><strong>Packaging:</strong> <a href="https://docs.flutter.dev/platform-integration/bind-native-code">Flutter 3.44 <code>package_ffi</code></a>.</li>
     </ul>
   </div>
 

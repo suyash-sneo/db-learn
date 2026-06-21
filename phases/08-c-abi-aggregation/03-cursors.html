@@ -3,88 +3,104 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>8.3 Cursors / iteration across FFI</title>
+<title>8.3 Cursors: delivery, execution &amp; lifetime</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p8:8.3", root: "../../" };</script>
 </head>
 <body>
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.3</div>
-  <h1>8.3 — Cursors / iteration across FFI</h1>
-  <div class="goal"><b>Goal:</b> Return a query's many results across the boundary without materializing
-  everything at once, using an opaque cursor handle with a <code>next</code> call — and get its ownership,
-  lifetime, and invalidation rules right.</div>
+  <h1>8.3 — Cursors: delivery, execution &amp; lifetime</h1>
+  <div class="goal"><b>Goal:</b> Return many query results through an opaque cursor with
+  <code>next</code>, while distinguishing FFI delivery from query execution and specifying ownership,
+  end-of-stream, database lifetime, mutation, and cleanup without leaving use-after-free traps.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>A query can match thousands of documents. Two ways to return them across the FFI: serialize the whole
-  result set into one giant buffer, or hand back a <strong>cursor</strong> the caller pulls one document at
-  a time. The single buffer is simple but forces the entire result into memory at once — bad on a phone.
-  A cursor streams results, bounding memory, but introduces a stateful object whose lifetime must be
-  managed across the boundary. This is the same iterator concept you know from Rust, made ABI-safe.</p>
+  <p>A query can match thousands of documents. One API can serialize the whole result into one buffer;
+  another can return a <strong>cursor</strong> that yields one document or batch per call. The cursor keeps
+  each <em>FFI output allocation</em> small and lets the caller stop early. It does not automatically make
+  the query engine lazy: Phase 6's teaching signature returns a <code>Vec</code>, so a cursor wrapped around
+  that vector still materializes all matches inside Rust. Bounded end-to-end memory requires an incremental
+  scan/index executor as well as a cursor-shaped ABI.</p>
 
   <h2>The cursor as an opaque handle</h2>
   <p>A cursor is another opaque handle (8.1): the caller opens it from a query, calls <code>next</code> in a
   loop, and closes it. Each <code>next</code> yields one document as an engine-allocated (ptr,len) buffer
   (8.2) or signals "no more."</p>
   <pre><code><span class="tok-c">// Opaque cursor handle; internals (the iterator state) stay in Rust.</span>
-<span class="tok-k">pub struct</span> <span class="tok-f">Cursor</span> { <span class="tok-c">/* private: result iterator over the docstore */</span> }
+<span class="tok-k">pub struct</span> <span class="tok-f">Cursor</span> { <span class="tok-c">/* private: owned execution state + shared engine owner */</span> }
 
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_find_cursor</span>(
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_find_cursor</span>(
     db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, filter: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>,
     out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>) -&gt; <span class="tok-f">i32</span> { <span class="tok-c">/* ... */</span> }
 
 <span class="tok-c">// Returns: 0 = produced a document (out_*), 1 = end of results, &lt;0 = error.</span>
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_next</span>(
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_next</span>(
     cur: *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>,
     out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> { <span class="tok-c">/* ... */</span> }
 
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_close</span>(cur: *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>) { <span class="tok-c">/* drop it */</span> }</code></pre>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_close</span>(cur: *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>) -&gt; <span class="tok-f">i32</span> { <span class="tok-c">/* release once */</span> }</code></pre>
   <p>Note the three-valued return: a separate "end of results" code (1) is cleaner than overloading null or
   an error. The per-document buffer from <code>next</code> follows the 8.2 output rule — the caller frees
-  each one with <code>minidb_free_buf</code> (or the cursor owns a reusable buffer; pick one and document
-  it).</p>
+  each one with <code>minidb_free_buf</code>. On both end and error, <code>next</code> leaves
+  <code>(out, out_len)</code> as <code>(NULL, 0)</code>. This curriculum does not use a cursor-owned
+  reusable output buffer because that would give the bytes a different lifetime from every other engine
+  output. A separate <code>minidb_cursor_last_error</code> copies diagnostic detail from the cursor handle.</p>
 
-  <h2>Lifetime: the cursor borrows the database</h2>
-  <p>A cursor iterates over engine state, so it is only valid while the <code>Db</code> it came from is
-  open. In Rust this would be a borrow the compiler enforces; across the FFI the borrow checker is gone, so
-  the lifetime relationship becomes a <em>documented contract</em>:</p>
+  <h2>Do not encode the parent lifetime as a raw borrow</h2>
+  <p>A cursor that merely stores a borrowed pointer to <code>Db</code> becomes dangling when the caller
+  closes the database first. Writing "close cursors first" in documentation does not make that API robust.
+  Choose one of these ownership designs:</p>
   <ul>
-    <li>A cursor must be closed before its <code>Db</code> is closed. Closing the <code>Db</code> first
-    leaves a dangling cursor — undefined behavior if used.</li>
+    <li><strong>Shared ownership:</strong> the database handle and each cursor own a reference-counted
+    engine/session object. Closing the database handle releases only that handle; the underlying engine
+    remains alive until the last cursor closes.</li>
+    <li><strong>Busy close:</strong> the database tracks child cursors and
+    <code>minidb_close</code> returns BUSY while any remain. SQLite's ordinary close similarly returns
+    BUSY if unfinalized statements or unfinished backups still exist.
+    <span class="src">[src: <a href="https://www.sqlite.org/c3ref/close.html">SQLite close contract</a>]</span></li>
+  </ul>
+  <p>The Phase 8 build chooses <strong>shared ownership</strong>. A copied, double-closed, or completely
+  fabricated cursor pointer is still invalid foreign input, but closing the original <code>Db</code>
+  before a valid cursor no longer creates a use-after-free.</p>
+  <ul>
     <li>Each cursor handle is single-threaded and non-reentrant: do not call <code>next</code> on the same
     cursor from two threads (8.1's concurrency rule applies per handle).</li>
+    <li>After <code>MINIDB_END</code>, later <code>next</code> calls keep returning END with null/zero
+    output until the cursor is closed.</li>
+    <li><code>cursor_close(NULL)</code> is a no-op; every non-null cursor must be closed exactly once.</li>
   </ul>
 
   <div class="box warn">
-    <div class="box-title">⚠️ Mutation can invalidate a cursor</div>
-    <p>If the caller inserts, updates, or deletes through the same <code>Db</code> while a cursor is open,
-    the cursor's view may become inconsistent — the classic "iterator invalidation" problem, now across a
-    boundary the compiler can't police. Decide and document a policy: (a) the cursor reads a stable snapshot
-    taken at open (the snapshot-isolation idea from 7.3), so later writes don't affect it; or (b) writing
-    while a cursor is open is forbidden / returns an error. Option (a) is friendlier; option (b) is simpler.
-    Whichever you choose, state it in the ABI — silence here is a latent crash.</p>
+    <div class="box-title">⚠️ Define what mutation means to an open cursor</div>
+    <p>A materialized v1 cursor freezes its result documents when the cursor is created; later writes do not
+    change that owned result list. A future lazy cursor needs a real policy: hold a Phase 7 read
+    transaction/snapshot, or detect a generation change and return a documented invalidation error.
+    "Whatever the underlying iterator happens to do" is not a policy.</p>
   </div>
 
-  <h2>Why not just return one big buffer?</h2>
+  <h2>Delivery shape versus execution shape</h2>
   <div class="tablewrap"><table>
-    <thead><tr><th>Approach</th><th>Pros</th><th>Cons</th></tr></thead>
+    <thead><tr><th>Design</th><th>What it bounds</th><th>Trade-off</th></tr></thead>
     <tbody>
-      <tr><td>One serialized result buffer</td><td>trivial ABI; one alloc, one free; no lifetime juggling</td><td>whole result set in memory at once; large allocations on a constrained device</td></tr>
-      <tr><td>Cursor + <code>next</code></td><td>bounded memory; can stop early; streams</td><td>stateful handle; lifetime &amp; invalidation contracts; more calls across the boundary</td></tr>
+      <tr><td>One serialized result buffer</td><td>Nothing until the whole result is ready</td><td>Simplest lifecycle; one potentially large allocation.</td></tr>
+      <tr><td>Cursor over a materialized <code>Vec</code></td><td>Each FFI output and Dart copy</td><td>Can stop Dart delivery early, but Rust already holds all matches.</td></tr>
+      <tr><td>Cursor over a lazy executor</td><td>FFI output and query execution, except blocking operators</td><td>Needs page/index scan state plus snapshot/invalidation rules.</td></tr>
     </tbody>
   </table></div>
-  <p>A pragmatic middle ground is <strong>batching</strong>: <code>next</code> returns N documents per call
-  to amortize boundary-crossing cost while still bounding memory. For a first implementation, a simple
-  one-document cursor is clear and correct; batching is an optimization to add later with its own tests.</p>
+  <p><strong>Batching</strong> is a separate knob: one <code>next</code> call can return several documents
+  to reduce FFI calls while keeping a maximum batch size. It does not change whether the underlying query
+  was materialized. Start with one document per call; add batching only with explicit byte/count limits and
+  ownership tests.</p>
 
   <h2>Mapping to Phase 6</h2>
-  <p>The cursor wraps your Phase 6 query path: the planner (6.7) picks an access path, the evaluator (6.6)
-  filters candidates, and the cursor yields surviving documents one at a time. The cursor is purely a
-  <em>delivery</em> mechanism over machinery you already built — it adds no query semantics, only
-  iteration and ABI plumbing.</p>
+  <p>For v1, the planner (6.7) and evaluator (6.6) produce the same result set as <code>find</code>, and
+  the cursor owns that materialized set plus its current position. A later lazy version can replace the
+  private execution state without changing the C signatures. That is the value of the opaque handle:
+  execution strategy remains an implementation detail.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
@@ -93,25 +109,44 @@
       <details><summary>Show answer</summary><div class="answer">0 = a document was produced, 1 = end of
       results, &lt;0 = error. Distinct codes separate "no more data" from "something failed," which a null
       pointer alone can't express unambiguously.</div></details>
-      <p class="q">2. Why is the cursor's lifetime relative to the <code>Db</code> a documented contract rather than a compiler-enforced borrow?</p>
-      <details><summary>Show answer</summary><div class="answer">Across the FFI there is no borrow checker, so
-      the rule "close the cursor before the Db" must be stated and upheld by the caller; violating it dangles
-      the cursor.</div></details>
+      <p class="q">2. Why should a cursor own shared engine state instead of a raw borrow of <code>Db</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">So closing the original database handle does
+      not leave a valid cursor pointing at freed memory. Shared ownership keeps the engine alive until the
+      last cursor closes.</div></details>
       <p class="q">3. What is cursor invalidation and how can you handle it?</p>
       <details><summary>Show answer</summary><div class="answer">Writing through the Db while a cursor is open
-      can make its view inconsistent. Handle it by reading from a stable snapshot taken at open, or by
-      forbidding writes while a cursor is open — and documenting the choice.</div></details>
-      <p class="q">4. When is one big result buffer preferable to a cursor?</p>
+      can change what a lazy iterator would observe. A materialized cursor freezes its owned results; a lazy
+      cursor needs a snapshot or explicit invalidation error.</div></details>
+      <p class="q">4. Does a cursor automatically bound query-engine memory?</p>
+      <details><summary>Show answer</summary><div class="answer">No. A cursor over a materialized
+      <code>Vec</code> bounds each FFI result allocation but still holds every match in Rust. End-to-end
+      bounded memory requires a lazy executor.</div></details>
+      <p class="q">5. When is one big result buffer preferable to a cursor?</p>
       <details><summary>Show answer</summary><div class="answer">When result sets are small: it gives a trivial
       ABI with one allocation and no lifetime/invalidation contracts. Cursors win when results are large or
       you want to stop early.</div></details>
     </div>
   </div>
 
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>A materialized cursor can own a <code>Vec&lt;Vec&lt;u8&gt;&gt;</code> plus an index or an owning
+      iterator such as <code>IntoIter</code>; it does not need a self-referential borrow into <code>Db</code>.</li>
+      <li><code>Arc&lt;T&gt;</code> provides shared ownership, not automatic thread safety. The handle may
+      still be single-caller unless <code>T</code> and all access paths are deliberately synchronized.
+      <span class="src">[src: <a href="https://doc.rust-lang.org/std/sync/struct.Arc.html">std::sync::Arc</a>]</span></li>
+      <li><code>Drop</code> runs when the Rust cursor owner is reclaimed, but the C caller must still invoke
+      the matching close exactly once. See
+      <a href="https://doc.rust-lang.org/book/ch13-02-iterators.html">Rust Book ch. 13</a>.</li>
+    </ul>
+  </div>
+
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Comparison:</strong> <a href="https://www.mongodb.com/docs/manual/tutorial/iterate-a-cursor/">MongoDB cursors</a> for a production cursor API's shape and batching.</li>
+      <li><strong>Comparison:</strong> <a href="https://www.mongodb.com/docs/manual/tutorial/iterate-a-cursor/">MongoDB cursors</a> for a production cursor API's iteration and batching surface.</li>
+      <li><strong>Lifecycle comparison:</strong> <a href="https://www.sqlite.org/c3ref/close.html">SQLite close/close_v2</a> for handling outstanding child objects.</li>
       <li><strong>Rust:</strong> <a href="https://doc.rust-lang.org/book/ch13-02-iterators.html">Rust Book ch. 13 — Iterators</a> (the in-language version of what you're exposing).</li>
       <li><strong>Back/forward link:</strong> wraps Phase 6's query path; 8.4 adds error reporting these calls use.</li>
     </ul>

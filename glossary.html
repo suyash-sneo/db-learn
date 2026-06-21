@@ -26,9 +26,11 @@
   <dl class="gloss" id="gloss">
     <dt data-term="abi application binary interface">ABI (Application Binary Interface)</dt>
     <dd>The binary-level contract for how compiled code calls compiled code: how arguments are
-    laid out in registers/stack, how names are mangled, how structs are packed. An <em>API</em>
-    is the source-level contract; the ABI is what survives after compilation. Stable C ABIs are
-    why a Rust library can be called from Dart, Python, or Swift.</dd>
+    passed, which calling convention applies, which symbols exist, and how deliberately exposed types are
+    laid out. An <em>API</em> is the source-level contract; an ABI is the part compiled callers must agree
+    on. Rust <code>extern "C"</code> selects the target's C calling convention; ownership and pointer
+    validity remain separate contracts.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/reference/items/external-blocks.html#abi">Rust Reference — ABI</a>]</span></dd>
 
     <dt data-term="access path residual filter scan index">Access path / residual filter</dt>
     <dd>A query plan's two parts: the <em>access path</em> generates candidate documents (a full scan
@@ -42,8 +44,10 @@
     and <em>durability</em> (committed data survives a crash).</dd>
 
     <dt data-term="aggregation pipeline">Aggregation pipeline</dt>
-    <dd>A sequence of stages (match → group → sort → …) that transform a stream of documents
-    into a computed result. MongoDB's model; a v2 feature for your engine.</dd>
+    <dd>An ordered sequence of stages (match → group → sort → …) in which each stage consumes the previous
+    stage's output. Stage order affects meaning; a stage may preserve, shrink, collapse, or expand the
+    document stream. An optional v2 feature for this engine.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">MongoDB 8.3 aggregation pipeline</a>]</span></dd>
 
     <dt data-term="advisory lock file os cooperating process">Advisory lock</dt>
     <dd>An operating-system lock that coordinates programs which voluntarily follow the same locking
@@ -78,14 +82,25 @@
     <dt data-term="catch_unwind panic ffi">catch_unwind</dt>
     <dd>Rust's <code>std::panic::catch_unwind</code> catches an <em>unwinding</em> Rust panic.
     At a normal <code>extern "C"</code> boundary, an escaping panic aborts the process; catching it
-    first lets an embedded library return an error code instead. It cannot catch
-    <code>panic="abort"</code> or arbitrary crashes.
+    first can let an embedded library return an error code instead. It cannot catch
+    <code>panic="abort"</code>, invalid-pointer undefined behavior, or arbitrary crashes; a caught panic
+    also does not prove the database handle is still valid.
     <span class="src">[src: <a href="https://doc.rust-lang.org/std/panic/fn.catch_unwind.html">std docs</a>]</span></dd>
 
     <dt data-term="cbindgen header generation">cbindgen</dt>
-    <dd>A tool that reads public Rust declarations and generates a C or C++ header. Its CLI defaults
-    to C++, so this project explicitly selects C with <code>--lang c</code> or
-    <code>language = "C"</code>.</dd>
+    <dd>A tool that reads public Rust declarations and generates a C or C++ header. Phase 8 pins 0.29.4.
+    Its CLI defaults to C++, so this project selects C and maps <code>usize</code> to
+    <code>size_t</code> explicitly. Generated declarations still require inspection and a compiled C
+    consumer test.
+    <span class="src">[src: <a href="https://github.com/mozilla/cbindgen/blob/v0.29.4/docs.md">cbindgen 0.29.4 docs</a>]</span></dd>
+
+    <dt data-term="code asset build hook native flutter dart">Code asset / build hook</dt>
+    <dd>A code asset is a native library registered for Dart FFI resolution. A Dart build hook is a script
+    under <code>hook/</code> that can compile or download such an asset and report it to the build. Flutter
+    3.44's recommended <code>package_ffi</code> template uses this flow instead of requiring OS-specific
+    library-opening code in Dart.
+    <span class="src">[src: <a href="https://docs.flutter.dev/platform-integration/bind-native-code">Flutter 3.44 native-code guide</a>;
+    <a href="https://dart.dev/tools/hooks">Dart build hooks</a>]</span></dd>
 
     <dt data-term="cell record slot">Cell</dt>
     <dd>SQLite's term for a single record stored on a B-tree page (key + payload, possibly with
@@ -109,9 +124,10 @@
     and reclamation rules.</dd>
 
     <dt data-term="cursor iterator results streaming">Cursor</dt>
-    <dd>A stateful handle that yields query results one (or a batch) at a time instead of materializing
-    the whole result set, bounding memory. Across the FFI it's an opaque handle valid only while its
-    database is open, with a documented invalidation policy if the data changes mid-iteration.</dd>
+    <dd>A stateful handle that yields query results one document or batch per call. It bounds each FFI
+    output allocation and allows early stopping, but bounds query-engine memory only when the executor is
+    also lazy. Phase 8's v1 cursor owns materialized results and shared engine/session ownership, so closing
+    the original database handle does not dangle it.</dd>
 
     <dt data-term="dirty page">Dirty page</dt>
     <dd>A cached page whose in-memory copy differs from disk because it was modified. Must be
@@ -123,9 +139,10 @@
     metadata and positional fields. Lower storage layers treat the encoding as opaque bytes.</dd>
 
     <dt data-term="extern c no_mangle repr">extern "C" / #[unsafe(no_mangle)] / #[repr(C)]</dt>
-    <dd>The three Rust attributes that produce C-compatible output:
-    <code>extern "C"</code> selects the C calling convention, <code>#[unsafe(no_mangle)]</code> keeps the
-    symbol name unmangled, <code>#[repr(C)]</code> lays out a struct the way C expects.</dd>
+    <dd>Three related but independent Rust mechanisms: <code>extern "C"</code> selects the target C calling
+    convention; <code>#[unsafe(no_mangle)]</code> disables Rust name mangling for a symbol;
+    <code>#[repr(C)]</code> gives a deliberately exposed type C-style representation rules. None proves
+    pointer validity, ownership, export retention, or panic safety.</dd>
 
     <dt data-term="ffi foreign function interface">FFI (Foreign Function Interface)</dt>
     <dd>The mechanism by which code in one language calls code in another, typically through a C
@@ -133,8 +150,9 @@
 
     <dt data-term="ffigen dart bindings generation">ffigen</dt>
     <dd>The Dart-side generator that reads a C header and emits Dart <code>dart:ffi</code> bindings —
-    the symmetric counterpart to cbindgen (which generates the header from Rust). Like cbindgen it
-    transcribes declarations and does not verify your ownership or safety contracts.</dd>
+    the symmetric counterpart to cbindgen. Phase 8 pins 20.1.1. It transcribes declarations and does not
+    encode the ownership, lifetime, threading, or panic contracts written in prose.
+    <span class="src">[src: <a href="https://pub.dev/packages/ffigen/versions/20.1.1">ffigen 20.1.1</a>]</span></dd>
 
     <dt data-term="freelist free page trunk">Freelist</dt>
     <dd>The list of pages inside the file that are currently unused and available for reuse, so
@@ -189,8 +207,14 @@
 
     <dt data-term="opaque handle pointer">Opaque handle</dt>
     <dd>A pointer the other language holds but cannot inspect — it only passes it back to your
-    functions. In Rust: <code>Box::into_raw</code> hands out the pointer, <code>Box::from_raw</code>
-    reclaims it. Keeps the C surface tiny and the internals private.</dd>
+    functions. The private Rust allocation/layout can change without changing the C declaration. A
+    non-null handle must be live, belong to this library, and be released exactly once; opacity does not
+    make fabricated, stale, or double-closed pointers safe.</dd>
+
+    <dt data-term="out parameter output pointer ffi">Out-parameter</dt>
+    <dd>A caller-provided writable pointer through which a C function publishes a result while returning a
+    separate status code. A robust FFI writes harmless defaults first and publishes the real handle, ID, or
+    buffer only after success, so an error never leaves stale output that looks valid.</dd>
 
     <dt data-term="overflow page">Overflow page</dt>
     <dd>An extra page used to store the tail of a record too large to fit in its home page. The

@@ -11,84 +11,128 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.1</div>
   <h1>8.1 — Designing a stable public C API</h1>
-  <div class="goal"><b>Goal:</b> Learn the design rules that make a C ABI usable from many languages and
-  stable over time — opaque handles, a narrow surface of ABI-safe types, return-code errors, and explicit
-  ownership — so the boundary you freeze in this phase is one you can live with.</div>
+  <div class="goal"><b>Goal:</b> Design a small C ABI whose handles, types, errors, ownership, and
+  concurrency rules are explicit enough for C and Dart callers to use correctly — and whose internals can
+  evolve without changing the binary contract.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>The C ABI is the only application binary interface that virtually every language can call, which is
-  why it's the lingua franca for shipping a library. But "C ABI" is a calling convention, not a safety
-  net: <code>extern "C"</code> "selects the target's C calling convention; it does not make arbitrary Rust
-  types ABI-safe." Everything about correctness — what's a valid pointer, who frees memory, what happens
-  on panic — is a contract <em>you</em> design and document. A good design makes the boundary small,
-  boring, and hard to misuse; a bad one leaks Rust types and undefined behavior into every caller.</p>
+  <p>A C ABI is a practical interoperability target because many runtimes can call C-compatible functions.
+  It is not one universal ABI: <code>extern "C"</code> selects the ABI used by the dominant C compiler for
+  the current Rust target. It says how a call crosses the machine boundary; it does not prove that a Rust
+  type, pointer, lifetime, or failure mode is safe for foreign code.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/reference/items/external-blocks.html#abi">Rust Reference — ABI</a>]</span>
+  The public contract must therefore define every handle, buffer, result code, allocator, lifetime, and
+  threading rule.</p>
+
+  <div class="box source">
+    <div class="box-title">📂 SQLite's useful shape, not its whole API</div>
+    <p>SQLite's core C interface is built around opaque lifecycle objects: <code>sqlite3_open()</code>
+    creates a database connection, <code>sqlite3_prepare()</code> creates a statement,
+    <code>sqlite3_step()</code> advances it, and matching close/finalize calls destroy them.
+    <span class="src">[src: <a href="https://www.sqlite.org/cintro.html#core_objects_and_interfaces">SQLite C interface §3–4</a>]</span>
+    Your API can copy that <em>shape</em> while remaining much smaller: database and cursor handles,
+    operations that return status codes, and explicit destroy functions.</p>
+    <p>In the generated SQLite 3.53.0 <code>sqlite3.h</code>, line 275 forward-declares
+    <code>typedef struct sqlite3 sqlite3;</code>; the same header declares runtime version, close, free,
+    open, and error-message functions at lines 191, 356, 3322, 3990, and 4246 respectively.
+    <span class="src">[src: SQLite 3.53.0
+    <a href="https://www.sqlite.org/2026/sqlite-amalgamation-3530000.zip"><code>sqlite3.h</code> in the official amalgamation archive</a>]</span>
+    These are source-navigation anchors, not an instruction to copy SQLite's full surface.</p>
+  </div>
 
   <h2>Rule 1: opaque handles, never exposed layout</h2>
   <p>The database is a complex Rust struct. Do not expose its fields or layout across the boundary —
   callers get an <strong>opaque pointer</strong> (a forward-declared, incomplete type) they pass back to
   every call. This keeps the struct's internals free to change without breaking the ABI, and keeps Rust
-  ownership on the Rust side.</p>
-  <pre><code><span class="tok-c">// Rust side: a handle is just a pointer the caller can't look inside.</span>
-<span class="tok-k">pub struct</span> <span class="tok-f">Db</span> { <span class="tok-c">/* private: pager, btree, docstore, lockmgr ... */</span> }
+  ownership on the Rust side. The Rustonomicon describes the same C pattern as
+  <code>struct Foo;</code> plus functions that accept <code>struct Foo *</code>.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/nomicon/ffi.html#representing-opaque-structs">Rustonomicon — representing opaque structs</a>]</span></p>
+  <pre><code><span class="tok-c">// Rust side: fields are private and are not part of the C API.</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">Db</span> { inner: <span class="tok-f">DbInner</span> } <span class="tok-c">// no repr(C): layout stays private</span>
 
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_open</span>(path: *<span class="tok-k">const</span> <span class="tok-f">c_char</span>, out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) -&gt; <span class="tok-f">i32</span> { <span class="tok-c">/* ... */</span> }
-<span class="tok-c">// C side sees: typedef struct Db Db;  (incomplete type — opaque)</span></code></pre>
-  <p>Exported symbols use <code>#[unsafe(no_mangle)]</code> and a globally unique prefix
-  (<code>minidb_</code>) so they don't collide with other libraries in the same process.
-  <span class="src">[src: AGENTS.md — "Exported unmangled symbols use <code>#[unsafe(no_mangle)]</code>, with globally unique prefixed names"]</span></p>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_open</span>(
+    path: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, path_len: <span class="tok-f">usize</span>,
+    out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">Db</span>
+) -&gt; <span class="tok-f">i32</span> { <span class="tok-c">/* boundary logic */</span> }
+<span class="tok-c">// A checked cbindgen header should contain an incomplete Db declaration.</span></code></pre>
+  <p>Functions whose safety depends on raw-pointer validity should be
+  <code>pub unsafe extern "C" fn</code>. C and Dart do not display Rust's <code>unsafe</code>, but it keeps
+  the Rust-facing API honest: safe Rust must not be able to trigger undefined behavior merely by calling a
+  supposedly safe function with an arbitrary raw pointer. <code>#[unsafe(no_mangle)]</code> gives the item
+  an exported symbol name without Rust name mangling in Rust 2024; a globally distinctive
+  <code>minidb_</code> prefix reduces collisions.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-attributes.html">Rust 2024 Edition Guide — unsafe attributes</a>]</span></p>
+  <div class="box warn">
+    <div class="box-title">⚠️ A name attribute is not an export test</div>
+    <p>Linking and stripping still vary by target. After producing the final library, inspect its exported
+    symbol table and compile a C consumer. The Flutter native-linking guide likewise warns that link-time
+    optimization can discard symbols unless the native build retains them.
+    <span class="src">[src: <a href="https://docs.flutter.dev/platform-integration/legacy-ffi-plugin#dynamic-versus-static-linking">Flutter 3.44 — native linking</a>]</span></p>
+  </div>
 
   <h2>Rule 2: only ABI-safe types cross the line</h2>
-  <p>Keep Rust types that have no stable C representation out of public signatures. AGENTS is explicit:
-  keep "<code>String</code>, <code>Vec</code>, references with unprovable borrow requirements, generics,
-  and native-layout structs out of public C signatures."
-  <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span> The vocabulary that <em>is</em> safe:</p>
+  <p>Keep Rust-owned containers and default-layout Rust structs out of public signatures. The useful
+  vocabulary is deliberately small:</p>
   <ul>
-    <li>Fixed-width integers (<code>i32</code>, <code>u64</code>, …), <code>bool</code> via an integer.</li>
+    <li>Fixed-width integers whose C header uses matching <code>int32_t</code>/<code>uint64_t</code>
+    types. Use an integer with documented accepted values instead of exposing Rust <code>bool</code>.</li>
+    <li><code>usize</code> only where the generated header is intentionally checked as C
+    <code>size_t</code>; Dart binds that as <code>ffi.Size</code>, whose width is ABI-specific.
+    <span class="src">[src: <a href="https://api.dart.dev/dart-ffi/Size-class.html">Dart 3.12.2 <code>Size</code></a>]</span></li>
     <li>Raw pointers (<code>*const T</code>, <code>*mut T</code>) with documented contracts.</li>
-    <li><code>#[repr(C)]</code> structs whose fields are themselves ABI-safe (use sparingly).</li>
+    <li><code>#[repr(C)]</code> structs only when you intentionally freeze their field layout and every
+    field is itself suitable for C. Rust's default representation gives no layout guarantee.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/reference/type-layout.html#the-c-representation">Rust Reference — C representation</a>]</span></li>
     <li>Opaque handles (rule 1) and pointer+length pairs for variable data (8.2).</li>
   </ul>
+  <p><code>String</code>, <code>Vec</code>, slices/references with foreign lifetimes, traits, generics,
+  and ordinary Rust structs stay behind the boundary.</p>
 
   <h2>Rule 3: errors are return codes, not panics or exceptions</h2>
-  <p>C has no exceptions, and letting a Rust panic cross a non-unwinding <code>extern "C"</code> boundary
-  aborts the process. The convention: every fallible function returns an <code>i32</code> status code
-  (0 = OK, negative = a specific error), and produces results through out-parameters. Errors are data, not
-  control flow. Panic handling is detailed in 8.4; the design rule here is simply: <em>no failure mode
-  should be a panic that escapes</em>.</p>
+  <p>Make every fallible operation return an <code>i32</code> status code and write successful results
+  through out-parameters. For this project, <code>0</code> means success, <code>1</code> is the cursor's
+  normal end-of-results status, and negative values are stable error categories. Initialize every
+  out-parameter to a harmless value before work begins, then publish the real result only after the
+  operation succeeds. This prevents callers from mistaking stale pointers or IDs for valid output.</p>
+  <p>An unwinding Rust panic that reaches a non-unwinding <code>extern "C"</code> boundary causes a safe
+  process abort; <code>catch_unwind</code> can catch only unwinding panics. Lesson 8.4 defines the exact
+  boundary policy and its limits.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/nomicon/ffi.html#panic-can-be-stopped-at-an-abi-boundary">Rustonomicon — unwinding at ABI boundaries</a>]</span></p>
 
   <h2>Rule 4: explicit ownership at the boundary</h2>
-  <p>The single most common FFI bug is unclear ownership of memory. State, at the point each pointer is
-  introduced: who allocates, who frees, the valid length, the lifetime, and the threading rules. AGENTS:
-  "The API that allocates memory must provide the matching deallocation API." A handle from
+  <p>State, at the point each pointer is introduced: who allocates it, who may read or write it, its valid
+  length, how long it remains valid, which operation releases it, and whether another thread may use it.
+  A handle from
   <code>minidb_open</code> must be returned to <code>minidb_close</code>; a buffer the engine allocates
-  must be freed by a <code>minidb_free</code>, not by the caller's <code>free()</code>.
-  <span class="src">[src: AGENTS.md — "The API that allocates memory must provide the matching deallocation API"]</span></p>
+  must be freed by <code>minidb_free_buf</code>, not by the caller's <code>free()</code>.
+  SQLite makes the same allocator-family rule explicit for memory returned by its allocation APIs.
+  <span class="src">[src: <a href="https://www.sqlite.org/c3ref/free.html">SQLite memory-allocation routines</a>]</span></p>
   <div class="box warn">
-    <div class="box-title">⚠️ "Same allocator" is not a stable contract</div>
-    <p>Do not assume Rust and C/Dart share a heap allocator and that either side can free the other's
-    memory. The correct claim is that "sharing an underlying allocator is not a stable deallocation
-    contract." Always pair every allocating call with the matching free <em>from the same library</em>.
-    <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span></p>
+    <div class="box-title">⚠️ Null checks do not make lifecycle misuse safe</div>
+    <p><code>close(NULL)</code> may be defined as a harmless no-op, but double-close, use-after-close,
+    freeing a foreign pointer, or returning a buffer with the wrong length still violate the contract and
+    can cause undefined behavior. Prefer API designs that make misuse harder, then test every detectable
+    case; do not claim that an FFI can validate arbitrary foreign pointers.</p>
   </div>
 
   <h2>Rule 5: design for a stable, narrow surface</h2>
   <ul>
     <li><strong>Narrow:</strong> a handful of functions (open, close, CRUD, query, cursor, free, error)
     rather than mirroring every internal method. Each exported symbol is a promise.</li>
-    <li><strong>Stable:</strong> additive change is safe (new functions); changing a signature, a struct
-    layout, or an error-code meaning breaks callers. Version the ABI deliberately (8.4).</li>
+    <li><strong>Stable:</strong> preserve shipped names, signatures, layouts, ownership rules, and numeric
+    meanings. Adding a symbol does not break an already-built old caller, but a new caller must still check
+    the loaded ABI version before assuming that symbol exists (8.4).</li>
     <li><strong>Self-describing data, not C structs:</strong> pass documents and queries as serialized
     bytes (8.2), so adding a field doesn't change the ABI.</li>
   </ul>
 
   <h2>The handle and concurrency caveat from Phase 1</h2>
-  <p>Phase 1 warned that boundary code creating <code>&amp;mut Db</code> makes the handle non-reentrant.
-  Now that Phase 7 exists, the ABI must say which calls may run concurrently. The simplest honest answer
-  for v1: the handle is <strong>not</strong> safe for concurrent calls; callers must serialize access (or
-  confine it to one isolate). If you later allow concurrent reads, that is a deliberate synchronization
-  design inside the engine, documented in the ABI — not an accident of two threads sharing a pointer.
-  <span class="src">[src: AGENTS.md — "A live opaque handle … is not concurrently or reentrantly usable when boundary code creates <code>&amp;mut Db</code>"]</span></p>
+  <p>If boundary code turns a raw handle into <code>&amp;mut Db</code>, two simultaneous calls on that
+  handle can create aliased mutable references before the lock manager gets a chance to help. The honest
+  v1 contract is therefore: one handle is single-caller and non-reentrant; the Dart wrapper confines it to
+  one database isolate. Supporting concurrent calls later requires interior synchronization and a new,
+  explicitly documented handle contract.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
@@ -102,9 +146,9 @@
       ABI safety of each type is a separate property; <code>String</code>/<code>Vec</code>/generics/native
       structs must stay out of public signatures.</div></details>
       <p class="q">3. Why must every allocating call have a matching free in the same library?</p>
-      <details><summary>Show answer</summary><div class="answer">Rust and C/Dart do not have a stable shared
-      allocator contract; freeing across allocators is undefined. The library that allocated must provide and
-      be used for the free.</div></details>
+      <details><summary>Show answer</summary><div class="answer">There is no stable cross-library
+      deallocation contract. The library that allocated must provide and be used for the matching release
+      operation.</div></details>
       <p class="q">4. What should v1's ABI say about concurrent calls on one handle?</p>
       <details><summary>Show answer</summary><div class="answer">That it is not safe for concurrent/reentrant
       use; callers must serialize access or confine the handle to one isolate. Any concurrency must be a
@@ -112,11 +156,24 @@
     </div>
   </div>
 
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>unsafe fn</code> means callers must uphold a documented safety contract; it does not make
+      every operation in the function body automatically correct.</li>
+      <li>Use <code>#[repr(C)]</code> only for layouts intentionally exposed to C. Leave opaque handle
+      internals in Rust's private/default representation.</li>
+      <li><code>Box::into_raw</code>/<code>Box::from_raw</code> transfer and reclaim ownership; they do not
+      protect against double-close or fabricated pointers. Review
+      <a href="https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html">Rust Book ch. 20</a>.</li>
+    </ul>
+  </div>
+
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Reference:</strong> <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon — FFI</a>; <a href="https://doc.rust-lang.org/reference/items/external-blocks.html">Rust Reference — external blocks &amp; ABI</a>.</li>
-      <li><strong>Repo standard:</strong> AGENTS.md "Rust and FFI baseline for this curriculum."</li>
+      <li><strong>Production comparison:</strong> <a href="https://www.sqlite.org/cintro.html">SQLite C-interface introduction</a> and <a href="https://www.sqlite.org/c3ref/intro.html">authoritative API reference</a>.</li>
       <li><strong>Forward link:</strong> 8.2 makes the byte-buffer contract concrete; 8.4 covers errors, versioning, and panics.</li>
     </ul>
   </div>

@@ -11,55 +11,73 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.4</div>
   <h1>8.4 — Error reporting, versioning, ABI stability</h1>
-  <div class="goal"><b>Goal:</b> Make failures, panics, and change all <em>safe</em> at the boundary:
-  report errors as codes plus optional detail, stop Rust panics from crossing into C as undefined behavior,
-  and version the ABI so you can evolve the library without breaking existing callers.</div>
+  <div class="goal"><b>Goal:</b> Give every ordinary failure a stable code and retrievable detail, contain
+  unwinding panics as far as Rust permits, poison state that may be inconsistent, and version the binary
+  contract so callers can reject incompatible libraries.</div>
 
   <h2>Why this matters to your DB</h2>
-  <p>The previous lessons defined the happy path. This one defines what happens when things go wrong or
-  change — which is where FFIs actually break. A panic that escapes can abort the host app; an error with no
-  detail is undebuggable; a careless signature change silently corrupts every caller compiled against the
-  old header. Each needs an explicit, conservative policy.</p>
+  <p>The previous lessons defined the happy path. This one defines ordinary errors, internal panics, and
+  incompatible change. They are different: an invalid document is expected data, a panic is an internal
+  failure that may invalidate the handle, and an ABI mismatch means the caller and library disagree before
+  useful work begins.</p>
 
-  <h2>Error reporting: codes + retrievable detail</h2>
+  <h2>Error reporting: stable codes + copied detail</h2>
   <p>Every fallible function returns an <code>i32</code>: <code>0</code> for success, negative values for
-  specific error categories (a small stable enum: not-found, bad-document, io, busy, …). Codes are stable
-  and language-neutral. For human-readable detail, the common pattern is a <strong>last-error</strong>
-  accessor the caller can query after a failure:</p>
+  specific error categories (not-found, bad-document, I/O, busy, poisoned, …); cursor end is the positive
+  non-error value <code>1</code>. Once shipped, a numeric value keeps its meaning. Callers must still treat
+  unknown negative values as failure so a later library can add categories without old wrappers
+  accidentally treating them as success.</p>
   <pre><code><span class="tok-c">// Stable numeric categories — never renumber these once shipped.</span>
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_OK</span>: <span class="tok-f">i32</span> = 0;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_END</span>: <span class="tok-f">i32</span> = 1;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_NOT_FOUND</span>: <span class="tok-f">i32</span> = -1;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_BAD_DOC</span>: <span class="tok-f">i32</span> = -2;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_IO</span>: <span class="tok-f">i32</span> = -3;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_POISONED</span>: <span class="tok-f">i32</span> = -5;
 <span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_PANIC</span>: <span class="tok-f">i32</span> = -99;
 
-<span class="tok-c">// Detail for the most recent failure on this thread; borrowed, valid until the next call.</span>
+<span class="tok-c">// Copy this handle's latest detail into a normal engine-owned output buffer.</span>
 <span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_last_error</span>() -&gt; *<span class="tok-k">const</span> <span class="tok-f">c_char</span> { <span class="tok-c">/* thread-local CString ptr */</span> }</code></pre>
-  <p>Keep the detail string thread-local so two threads don't clobber each other's last error, and document
-  its lifetime (valid until the next call on that thread). The numeric codes — not the strings — are the
-  stable contract; never reuse or renumber a shipped code.</p>
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_last_error</span>(
+    db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>,
+    out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>,
+    out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>
+) -&gt; <span class="tok-f">i32</span> { <span class="tok-c">/* boundary logic */</span> }</code></pre>
+  <p>The detail belongs to the database handle, not a process-global or OS-thread-local slot, and the
+  accessor returns a copied engine allocation using the normal <code>minidb_free_buf</code> contract. That
+  avoids a borrowed string whose lifetime changes on the next call and avoids requiring two Dart FFI calls
+  to run on the same native thread. The string is diagnostic, may change between versions, and must not be
+  parsed for program logic. A matching <code>minidb_cursor_last_error(cursor, ...)</code> keeps cursor
+  diagnostics available even after the original database handle closes. An <code>open</code> failure has
+  no usable handle, so v1 guarantees only its stable numeric code; a later additive API can return richer
+  open diagnostics.</p>
+  <p>SQLite is a useful comparison: its error code and message accessors are associated with a database
+  connection, and the docs warn that simultaneous use can make results unpredictable.
+  <span class="src">[src: <a href="https://www.sqlite.org/c3ref/errcode.html">SQLite error-code/message contract</a>]</span></p>
 
   <h2>Panics must not cross the boundary</h2>
-  <p>This is the highest-stakes rule. The precise behaviors (all from the curriculum's FFI baseline):</p>
+  <p>The exact Rust behavior is narrower than “catch every crash”:</p>
   <ul>
-    <li>"If an unwinding Rust panic reaches non-unwinding <code>extern "C"</code>, Rust aborts the
-    process." So an unguarded panic in your ABI function kills the host app.</li>
-    <li>"<code>extern "C-unwind"</code> permits unwinding" — a different ABI you opt into deliberately, not
-    the default.</li>
-    <li>"A foreign exception entering a non-unwind Rust ABI is undefined behavior."</li>
-    <li>"<code>catch_unwind</code> catches only unwinding Rust panics, not <code>panic = "abort"</code> or
-    arbitrary crashes."</li>
+    <li>If an unwind reaches a non-unwinding <code>extern "C"</code> boundary, Rust safely aborts the
+    process. <span class="src">[src: <a href="https://doc.rust-lang.org/nomicon/ffi.html#panic-can-be-stopped-at-an-abi-boundary">Rustonomicon — panic stopped at ABI boundary</a>]</span></li>
+    <li><code>extern "C-unwind"</code> is the explicit variant for cross-language unwinding; this database
+    API does not expose it.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/reference/items/external-blocks.html#abi">Rust Reference — unwind ABI variants</a>]</span></li>
+    <li><code>catch_unwind</code> catches only unwinding Rust panics. It does not catch an aborting panic,
+    invalid-pointer undefined behavior, segmentation faults, or arbitrary foreign exceptions. A configured
+    panic hook runs before the panic is caught.
+    <span class="src">[src: <a href="https://doc.rust-lang.org/std/panic/fn.catch_unwind.html">std::panic::catch_unwind</a>]</span></li>
   </ul>
-  <p class="src">[src: AGENTS.md — Rust/FFI panic baseline]</p>
-  <p>The practical pattern: wrap each <code>extern "C"</code> body in <code>catch_unwind</code>, convert a
-  caught panic into <code>MINIDB_ERR_PANIC</code>, and return normally — so an internal bug becomes an
-  error code instead of a process abort.</p>
+  <p>The boundary pattern is therefore conditional: make the <code>catch_unwind</code> wrapper the outermost
+  Rust operation in every nontrivial export, compile the tested profiles with unwinding enabled, and map a
+  caught panic to <code>MINIDB_ERR_PANIC</code>. This contains that class of panic; it is not a general
+  process-crash sandbox.</p>
   <pre><code><span class="tok-m">#[unsafe(no_mangle)]</span>
-<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_insert</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, doc: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>, out_id: *<span class="tok-k">mut</span> <span class="tok-f">i64</span>) -&gt; <span class="tok-f">i32</span> {
-    <span class="tok-k">let</span> r = std::panic::<span class="tok-f">catch_unwind</span>(|| {
-        <span class="tok-c">// ... real work; may return Err(code) ...</span>
-    });
+<span class="tok-k">pub unsafe extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_insert</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, doc: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>, out_id: *<span class="tok-k">mut</span> <span class="tok-f">i64</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">let</span> r = std::panic::<span class="tok-f">catch_unwind</span>(std::panic::<span class="tok-f">AssertUnwindSafe</span>(|| -&gt; <span class="tok-f">Result</span>&lt;(), <span class="tok-f">i32</span>&gt; {
+        <span class="tok-c">// ... validate pointers, do transactional work ...</span>
+        <span class="tok-f">Ok</span>(())
+    }));
     <span class="tok-k">match</span> r {
         <span class="tok-f">Ok</span>(<span class="tok-f">Ok</span>(())) =&gt; <span class="tok-f">MINIDB_OK</span>,
         <span class="tok-f">Ok</span>(<span class="tok-f">Err</span>(code)) =&gt; code,
@@ -69,12 +87,12 @@
 
   <div class="box warn">
     <div class="box-title">⚠️ Catching a panic ≠ a still-valid handle</div>
-    <p>"Catching a panic does not prove a database handle remains logically valid." A panic mid-mutation may
-    leave the engine half-updated. After a caught panic, don't pretend nothing happened: "Publish state only
-    after successful work, use transactional mutation, or poison the handle after a caught panic."
-    <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span> The cleanest fit with your Phase 5/7 work
-    is transactional mutation: a caught panic means the transaction did not commit, so committed state is
-    untouched. If you can't guarantee that, mark the handle poisoned and reject further calls.</p>
+    <p><code>AssertUnwindSafe</code> only overrides the compiler's unwind-safety check; it does not prove the
+    database survived logically intact. A panic mid-mutation may leave in-memory state inconsistent even if
+    Phase 5 prevents an uncommitted root from becoming durable. The build therefore poisons the handle after
+    any caught panic: later operations return <code>MINIDB_ERR_POISONED</code>, while
+    <code>last_error</code> and <code>close</code> remain available. Reopen the file to recover from its
+    last committed state.</p>
   </div>
 
   <h2>ABI versioning: change without breaking</h2>
@@ -83,8 +101,8 @@
   <div class="tablewrap"><table>
     <thead><tr><th>Change</th><th>Compatible?</th></tr></thead>
     <tbody>
-      <tr><td>Add a new function</td><td>Yes — additive; old callers keep working.</td></tr>
-      <tr><td>Add a new error code</td><td>Mostly — only if callers treat "any negative" as failure, which you should document.</td></tr>
+      <tr><td>Add a new function</td><td>Does not break an old binary; new callers must verify the loaded ABI before looking it up.</td></tr>
+      <tr><td>Add a new negative error code</td><td>Compatible only because callers are required to treat every unknown negative value as failure.</td></tr>
       <tr><td>Change a function's signature/parameters</td><td>No — breaks every caller compiled against the old header.</td></tr>
       <tr><td>Change a <code>#[repr(C)]</code> struct's layout</td><td>No — silent memory misinterpretation.</td></tr>
       <tr><td>Reuse/renumber an existing error code</td><td>No — changes the meaning of a shipped value.</td></tr>
@@ -92,31 +110,34 @@
   </table></div>
   <p>Practical discipline:</p>
   <ul>
-    <li>Expose a version: <code>minidb_abi_version() -&gt; u32</code> and/or
-    <code>minidb_version_string()</code>, so a caller can check what it loaded at runtime.</li>
-    <li>Follow semantic versioning for the library: bump major on any incompatible ABI change.</li>
+    <li>Expose <code>minidb_abi_version() -&gt; u32</code>. Check it immediately after loading and before
+    looking up optional/newer symbols.</li>
+    <li>Keep the ABI version separate from the package/library release version. A release may fix internals
+    without changing the ABI; an incompatible ABI change must change the ABI major and the library's public
+    versioning policy.</li>
     <li>Prefer additive evolution; pass extensible data as serialized bytes (8.2) so new fields don't touch
     the ABI.</li>
     <li>Keep the exported symbol set minimal and prefixed (8.1) — fewer promises to keep.</li>
   </ul>
 
   <h2>Symbol &amp; layout stability</h2>
-  <p>The ABI is the exact set of symbol names, their signatures, and the memory layout of any
-  <code>#[repr(C)]</code> type that crosses it. <code>#[unsafe(no_mangle)]</code> fixes the names; the
-  prefix keeps them unique; opaque handles (8.1) keep layouts private so most of the engine can change
-  freely. The only layouts you must keep stable are the few <code>repr(C)</code> types you deliberately
-  expose — keep that set as small as possible.</p>
+  <p>The ABI includes exported symbol names, calling conventions, parameter/return types, integer widths,
+  and the memory layout of any exposed <code>#[repr(C)]</code> type. It also has behavioral contracts that
+  compilers cannot check: pointer ownership, valid lengths, error meanings, threading, and lifetimes.
+  Opaque handles keep internal layouts outside that promise; generated headers and symbol inspection check
+  part of it, while C/Dart smoke tests check that consumers agree.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
       <p class="q">1. What happens if an unwinding Rust panic reaches a default <code>extern "C"</code> boundary?</p>
-      <details><summary>Show answer</summary><div class="answer">Rust aborts the process. You must catch panics
-      at the boundary (<code>catch_unwind</code>) and convert them to an error code instead.</div></details>
+      <details><summary>Show answer</summary><div class="answer">Rust safely aborts the process.
+      <code>catch_unwind</code> can contain an <em>unwinding</em> panic before it reaches the boundary, but
+      cannot catch aborting panics or arbitrary crashes.</div></details>
       <p class="q">2. After catching a panic, why can't you just return and keep using the handle?</p>
       <details><summary>Show answer</summary><div class="answer">The handle may be logically inconsistent
-      (half-updated). Use transactional mutation so an uncommitted change is discarded, publish state only on
-      success, or poison the handle and reject further calls.</div></details>
+      even if uncommitted disk state was not published. Poison it, reject normal operations, permit
+      diagnostics/close, and reopen the file from committed state.</div></details>
       <p class="q">3. Which of these is an ABI-compatible change: adding a function, or changing a struct's layout?</p>
       <details><summary>Show answer</summary><div class="answer">Adding a function is additive and compatible.
       Changing a <code>repr(C)</code> struct's layout breaks callers via silent memory misinterpretation.</div></details>
@@ -127,11 +148,25 @@
     </div>
   </div>
 
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>catch_unwind</code> returns <code>Result&lt;T, Box&lt;dyn Any + Send&gt;&gt;</code> for an
+      unwinding panic; the payload is not a stable error-message format.
+      <span class="src">[src: <a href="https://doc.rust-lang.org/std/panic/fn.catch_unwind.html">std::panic::catch_unwind</a>]</span></li>
+      <li><code>AssertUnwindSafe</code> tells the compiler you accept the captured-state risk. It is not
+      recovery logic, which is why the handle is still poisoned.</li>
+      <li>Keep the guard as the outermost operation and keep unsafe pointer conversion inside it. Review
+      <a href="https://doc.rust-lang.org/book/ch09-00-error-handling.html">Rust Book ch. 9</a> and the
+      linked <code>catch_unwind</code> reference.</li>
+    </ul>
+  </div>
+
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Reference:</strong> <a href="https://doc.rust-lang.org/std/panic/fn.catch_unwind.html">std::panic::catch_unwind</a>; <a href="https://doc.rust-lang.org/nomicon/ffi.html#ffi-and-unwinding">Rustonomicon — FFI and unwinding</a>; <a href="https://doc.rust-lang.org/reference/items/external-blocks.html">Rust Reference — <code>C-unwind</code></a>.</li>
-      <li><strong>Concept:</strong> <a href="https://semver.org/">Semantic Versioning</a> for the library version policy.</li>
+      <li><strong>Production comparison:</strong> <a href="https://www.sqlite.org/c3ref/errcode.html">SQLite error codes/messages</a> and <a href="https://www.sqlite.org/c3ref/libversion.html">runtime version APIs</a>.</li>
       <li><strong>Forward link:</strong> 8.5 generates the header from these signatures and binds it in Dart.</li>
     </ul>
   </div>

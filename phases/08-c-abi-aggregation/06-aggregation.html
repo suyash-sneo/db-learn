@@ -17,8 +17,9 @@
 
   <div class="box source">
     <div class="box-title">📂 Where to read</div>
-    <p>MongoDB's aggregation pipeline is the reference. Quotes below are from its manual.
-    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Manual — Aggregation Pipeline</a>]</span></p>
+    <p>MongoDB 8.3's aggregation manual is the reference model. This lesson defines a much smaller engine
+    subset and does not claim wire-format or operator parity.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">MongoDB 8.3 — aggregation pipeline</a>]</span></p>
   </div>
 
   <h2>Why this matters to your DB</h2>
@@ -29,11 +30,10 @@
   the first stage is usually just the filter you already have.</p>
 
   <h2>A pipeline is a sequence of stages</h2>
-  <p>An aggregation pipeline is "one or more stages that process documents." "Each stage performs an
-  operation on the input documents" and "the documents that a stage outputs are then passed to the next
-  stage." A key property: "A stage does not need to output one document for every input document. Some
-  stages produce new documents or filter documents out."
-  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Manual — Aggregation Pipeline</a>]</span></p>
+  <p>A pipeline is an ordered list. Stage 1 consumes the collection or access-path output; each later stage
+  consumes the previous stage's documents. A stage may preserve cardinality, discard documents, emit one
+  output for many inputs, or expand one input into several outputs.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/#additional-aggregation-pipeline-stage-details">MongoDB 8.3 — stage behavior</a>]</span></p>
 
   <figure>
   <svg viewBox="0 0 560 130" role="img" aria-label="Documents flow through match, group, sort stages">
@@ -66,20 +66,38 @@
       <tr><td><code>$unwind</code></td><td>Deconstruct an array field into one document per element.</td></tr>
     </tbody>
   </table></div>
-  <p class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Manual — common stages</a>]</p>
-  <p>Two precise rules worth copying: a stage "can appear multiple times in a pipeline" (with a few
-  documented exceptions like <code>$out</code>/<code>$merge</code>), and an
-  <code>aggregate()</code> pipeline "do[es] not modify documents in a collection" unless it contains a
-  <code>$merge</code> or <code>$out</code> stage — i.e. aggregation is read-only by default.
-  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Manual — Aggregation Pipeline</a>]</span></p>
+  <p class="src">[src: <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation-pipeline/">MongoDB 8.3 — stage reference</a>]</p>
+  <p>MongoDB permits most stages to appear repeatedly, with documented exceptions including
+  <code>$out</code>, <code>$merge</code>, and <code>$geoNear</code>. Its normal aggregation pipeline is
+  read-only unless it contains <code>$merge</code> or <code>$out</code>.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/#additional-aggregation-pipeline-stage-details">MongoDB 8.3 — additional stage details</a>]</span>
+  This curriculum's subset has no write stage, so every aggregation is read-only.</p>
+
+  <h2>Work one pipeline by hand</h2>
+  <p>Suppose the input is:</p>
+  <pre><code>{<span class="tok-s">"city"</span>:<span class="tok-s">"Oslo"</span>,   <span class="tok-s">"amount"</span>:4}
+{<span class="tok-s">"city"</span>:<span class="tok-s">"London"</span>, <span class="tok-s">"amount"</span>:7}
+{<span class="tok-s">"city"</span>:<span class="tok-s">"Oslo"</span>,   <span class="tok-s">"amount"</span>:9}
+{<span class="tok-s">"city"</span>:<span class="tok-s">"London"</span>, <span class="tok-s">"amount"</span>:2}</code></pre>
+  <p>The pipeline “match amount ≥ 4 → group by city and sum amount → sort total descending” produces:</p>
+  <pre><code>{<span class="tok-s">"_id"</span>:<span class="tok-s">"Oslo"</span>,   <span class="tok-s">"total"</span>:13}
+{<span class="tok-s">"_id"</span>:<span class="tok-s">"London"</span>, <span class="tok-s">"total"</span>:7}</code></pre>
+  <p>The filter removes London's amount-2 document; grouping creates one accumulator state per distinct
+  city; sorting orders the two new group documents. The original documents are not modified.</p>
 
   <h2>How it layers on Phase 6</h2>
   <p>Model a pipeline as a chain of iterators over documents — exactly the cursor idea from 8.3 with a
   transformation per stage:</p>
   <ul>
     <li><code>$match</code> is your existing evaluator (6.6) used as a streaming filter.</li>
-    <li><code>$sort</code>, <code>$group</code>, <code>$count</code> are <em>blocking</em> stages: they must
-    consume their entire input before producing output (you can't sort a stream without seeing all of it).</li>
+    <li><code>$sort</code> and the simple hash-based <code>$group</code> taught here are
+    <em>blocking</em>: they consume all input before final output. MongoDB also documents
+    <code>$group</code> as blocking and potentially memory-intensive.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/group/#performance">MongoDB 8.3 — <code>$group</code> performance</a>]</span></li>
+    <li><code>$count</code> consumes the complete input and emits one count document at end; for empty
+    input MongoDB emits no document, not a document containing zero.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/count/#behavior">MongoDB 8.3 — <code>$count</code> behavior</a>]</span>
+    Your subset must state whether it copies that empty-input rule or deliberately returns zero.</li>
     <li><code>$limit</code>, <code>$skip</code>, <code>$project</code>, <code>$unwind</code> are
     <em>streaming</em>: they transform documents one at a time.</li>
   </ul>
@@ -87,17 +105,31 @@
   the query engine, which is why it belongs in this phase rather than Phase 6.</p>
 
   <div class="box warn">
-    <div class="box-title">⚠️ Put <code>$match</code> first, and reuse the index path</div>
-    <p>A pipeline's cost is dominated by how many documents flow through the expensive (blocking) stages.
-    Filtering early — <code>$match</code> as the first stage — means <code>$group</code>/<code>$sort</code>
-    see far fewer documents, and a leading <code>$match</code> can use a secondary index via your Phase 6
-    planner (6.7) instead of a full scan. A <code>$match</code> buried after a <code>$group</code> has lost
-    that opportunity. This is the aggregation version of "selective access path first." Treat ordering as a
-    correctness-preserving optimization: reordering must not change results (the same rule as 6.7).</p>
+    <div class="box-title">⚠️ Filter early only when it means the same thing</div>
+    <p>A leading <code>$match</code> can use a source-collection index and reduce work for later stages.
+    MongoDB recommends putting a source-document match at the beginning when possible.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline-optimization/#document-filters">MongoDB 8.3 — document filters and indexes</a>]</span>
+    But stage order is semantics, not decoration: a match after <code>$group</code> filters aggregate output
+    (similar to SQL HAVING), and a match on a field computed by <code>$project</code> cannot simply move
+    before that computation. Reorder only when you can prove equivalence.</p>
   </div>
 
+  <h2>Define the subset before implementing it</h2>
+  <p>A stage name is not a complete semantic contract. For this engine, write down:</p>
+  <ul>
+    <li>which field paths exist and what a missing field does;</li>
+    <li>which value types may be compared, sorted, grouped, or summed;</li>
+    <li>whether numeric accumulation can overflow and which error it returns;</li>
+    <li>the total ordering used by <code>$sort</code>, plus a deterministic tie-breaker;</li>
+    <li>the exact output document for <code>$group</code> and the empty-input behavior of
+    <code>$count</code>;</li>
+    <li>memory/size limits for blocking stages and the error returned when a limit is exceeded.</li>
+  </ul>
+  <p>Without these rules, two implementations can both “support <code>$group</code>” and still return
+  different results.</p>
+
   <h2>Honest scope for your engine</h2>
-  <p>You are not building MongoDB's full operator set or its query optimizer. A credible v2 implements a
+  <p>You are not building MongoDB's full operator set or its query optimizer. A credible optional v2 implements a
   handful of stages — <code>$match</code>, <code>$project</code>, <code>$sort</code>, <code>$limit</code>,
   and a simple <code>$group</code> with count/sum — composed as a stage chain, with <code>$match</code>
   delegating to your evaluator. Say so explicitly, and list which stages and accumulators you support, so a
@@ -115,14 +147,32 @@
       expands one into many. The stream's length is not fixed.</div></details>
       <p class="q">3. Which stages are blocking vs. streaming, and why does it matter?</p>
       <details><summary>Show answer</summary><div class="answer">Blocking stages (<code>$sort</code>,
-      <code>$group</code>, <code>$count</code>) must see all input before emitting; streaming stages
+      the simple <code>$group</code> and <code>$count</code>) must see all input before final output; streaming stages
       (<code>$match</code>, <code>$project</code>, <code>$limit</code>, <code>$unwind</code>) act per
       document. Blocking stages bound memory/latency, so feed them fewer documents.</div></details>
-      <p class="q">4. Why put <code>$match</code> first?</p>
-      <details><summary>Show answer</summary><div class="answer">It shrinks the stream before expensive stages
-      and lets the planner use a secondary index for the filter; a late <code>$match</code> loses both
-      benefits. Reordering must not change the result.</div></details>
+      <p class="q">4. When may you move <code>$match</code> to the front?</p>
+      <details><summary>Show answer</summary><div class="answer">Only when it filters source-document fields
+      and moving it is semantically equivalent. A match on grouped or computed output must stay after the
+      stage that creates those values.</div></details>
+      <p class="q">5. What must a custom <code>$group</code> specification define beyond its name?</p>
+      <details><summary>Show answer</summary><div class="answer">At least group-key/missing-field behavior,
+      supported accumulator types, overflow handling, output shape, memory limits, and deterministic
+      ordering where ordering is promised.</div></details>
     </div>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>Represent the parsed pipeline as an enum such as <code>Stage::Match</code>,
+      <code>Stage::Sort</code>, and <code>Stage::Limit</code>; parsing bytes and executing stages are
+      separate responsibilities.</li>
+      <li>Streaming stages can wrap an iterator; blocking stages collect owned state. That ownership
+      difference should be visible in the design and memory-limit tests.</li>
+      <li>Return a typed error for unsupported stages, invalid operands, overflow, and memory limits rather
+      than using <code>panic!</code>. Review
+      <a href="https://doc.rust-lang.org/book/ch13-02-iterators.html">Rust Book iterators</a>.</li>
+    </ul>
   </div>
 
   <div class="box deeper">

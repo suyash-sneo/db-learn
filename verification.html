@@ -43,8 +43,9 @@
   on June 21, 2026; its Isar claims were resolved against tag 3.1.0+1, commit
   <code>6643d064abf22606b6c6a741ea873e4781115ef4</code>. Phase 7 was rechecked on June 21, 2026
   against SQLite 3.53.0 (source ID <code>4525003a53a7fc63…</code>), PostgreSQL, Rust, and Dart
-  3.12.2 sources. Phase 8 remains authored but awaits the same independent pass; its current
-  ⚠️VERIFY tags are indexed exactly below.</p>
+  3.12.2 sources. Phase 8 was rechecked on June 21, 2026 against Rust, SQLite's C API,
+  cbindgen 0.29.4, ffigen 20.1.1, Dart 3.12.2, Flutter 3.44.0, current Android 16 KB guidance,
+  and MongoDB 8.3 documentation.</p>
 
   <div class="tablewrap">
   <table>
@@ -56,10 +57,9 @@
       <tr><td colspan="3"><strong>Phase 7:</strong> none. SQLite source claims are pinned to 3.53.0;
       isolate and callback claims are pinned to Dart 3.12.2.</td></tr>
 
-      <tr><td>8.5 (cbindgen + Dart binding)</td><td>Current ffigen configuration/options.</td><td><a href="https://pub.dev/packages/ffigen">pub.dev/packages/ffigen</a> for the version used.</td></tr>
-      <tr><td>8.7 (Packaging)</td><td>The exact Flutter FFI plugin template name, directory layout, and build-hook/native-assets mechanism.</td><td><a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">docs.flutter.dev — developing packages</a> for the Flutter version targeted.</td></tr>
-      <tr><td>8.7 (Packaging)</td><td>The iOS library-loading choice (<code>DynamicLibrary.open</code> vs <code>.process()</code>/<code>.executable()</code>) for the chosen linkage.</td><td><a href="https://api.dart.dev/dart-ffi/DynamicLibrary-class.html">DynamicLibrary API</a> + Flutter iOS packaging docs.</td></tr>
-      <tr><td>8.7 (Packaging)</td><td>Current Android ABI coverage and 16 KB page-size requirements for the target API level.</td><td>Android NDK / Play requirements docs for the target API level.</td></tr>
+      <tr><td colspan="3"><strong>Phase 8:</strong> none. Generator versions are pinned; Flutter packaging
+      is pinned to the 3.44.0 documentation; Android page-size requirements and MongoDB aggregation claims
+      were resolved against primary sources.</td></tr>
     </tbody>
   </table>
   </div>

@@ -3,128 +3,155 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>8.7 Packaging for iOS/Android</title>
+<title>8.7 Flutter build-hook packaging</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p8:8.7", root: "../../" };</script>
 </head>
 <body>
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.7</div>
-  <h1>8.7 — Packaging for iOS/Android</h1>
-  <div class="goal"><b>Goal:</b> Understand how the compiled Rust library actually ships inside a Flutter
-  app on both mobile platforms — the FFI plugin structure, the per-platform native build, and the
-  library-loading and signing details that differ by target — so the binding from 8.5 has something to
-  load at runtime.</div>
+  <h1>8.7 — Flutter build-hook packaging</h1>
+  <div class="goal"><b>Goal:</b> Package the Rust library with Flutter 3.44's recommended
+  <code>package_ffi</code> build-hook flow, understand when the legacy plugin flow is still needed, and
+  verify architecture, loading, signing, exported symbols, and Android 16 KB compatibility on real
+  artifacts.</div>
 
   <div class="box source">
     <div class="box-title">📂 Where to read</div>
-    <p>Flutter documents native packaging under "developing packages &amp; plugins" (FFI plugins) and the
-    platform interop guides. Packaging mechanics evolve across Flutter versions, so confirm specifics
-    against the docs for your version.
-    <span class="src">[src: <a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">docs.flutter.dev — developing packages</a>]</span></p>
+    <p>This lesson is pinned to the Flutter documentation for <strong>Flutter 3.44.0</strong>, last updated
+    June 8, 2026. Since Flutter 3.38, the recommended new-project flow is
+    <code>flutter create --template=package_ffi</code> with Dart build hooks.
+    <span class="src">[src: <a href="https://docs.flutter.dev/platform-integration/bind-native-code">Flutter 3.44 — bind to native code</a>]</span></p>
   </div>
 
   <h2>Why this matters to your DB</h2>
-  <p>An FFI binding is useless if the operating system can't find and load the native library. Each platform
-  has its own build system, library format, loading rule, and signing requirement. Flutter's FFI plugin
-  packaging exists to automate this — but you still need to understand what it produces, because
-  cross-compiling a Rust library for ARM phones and bundling it correctly is where "works on my laptop"
-  meets reality.</p>
+  <p>A correct Dart typedef is useless if the app bundle lacks a library for the device architecture, the
+  code asset points at the wrong artifact, the linker removed the symbols, or Apple cannot validate the
+  embedded code. Packaging is part of the ABI delivery system, not a final copy step.</p>
 
-  <h2>FFI plugins: the packaging vehicle</h2>
-  <p>An FFI package is "a specialized Dart package that enables calling native code using
-  <code>dart:ffi</code>," created with a Flutter FFI plugin/package template. The defining difference from a
-  regular plugin: FFI plugins "do not use method channels" — they call native code directly through
-  <code>dart:ffi</code>.
-  <span class="src">[src: <a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">docs.flutter.dev</a>]</span>
-  The package bundles native code compiled per platform; a typical layout has the Dart API in
-  <code>lib/</code>, the native source in <code>src/</code>, and a build hook that compiles it.
-  <span class="verify-tag">⚠️VERIFY</span> the exact template name, directory layout, and build-hook
-  mechanism against the Flutter version you target — these have changed across releases (e.g. the native
-  build-hook/native-assets approach is newer).</p>
+  <h2>The current vehicle: <code>package_ffi</code> + a build hook</h2>
+  <pre><code><span class="tok-c"># Flutter 3.44.0</span>
+flutter create --template=package_ffi minidb_flutter</code></pre>
+  <p>The generated package contains a Dart API under <code>lib/</code>, native source/header files under
+  <code>src/</code>, <code>hook/build.dart</code>, ffigen configuration, and
+  <code>pubspec.yaml</code>. The Flutter/Dart tool invokes the build hook, bundles the resulting code asset,
+  and the generated <code>@Native</code> functions resolve against that asset at runtime; application code
+  does not hard-code Android/iOS library names.
+  <span class="src">[src: <a href="https://docs.flutter.dev/platform-integration/bind-native-code#create-an-ffi-package">Flutter 3.44 — package contents</a>;
+  <a href="https://docs.flutter.dev/platform-integration/bind-native-code#calling-the-native-function">code-asset resolution</a>]</span></p>
 
-  <h2>Per-platform native build</h2>
+  <h2>Adapt the hook for Rust</h2>
+  <p>The stock template demonstrates C compilation with <code>package:native_toolchain_c</code>. A Rust
+  package replaces or extends that hook so it:</p>
+  <ol>
+    <li>reads the hook's target OS, architecture, and build mode;</li>
+    <li>selects the matching installed Rust target and platform linker/SDK;</li>
+    <li>invokes Cargo for the <code>cdylib</code> (or downloads a trusted prebuilt artifact);</li>
+    <li>places the produced library in the hook's shared output directory; and</li>
+    <li>registers a <code>CodeAsset</code> with the correct asset name and link mode.</li>
+  </ol>
+  <p>Dart build hooks are scripts in <code>hook/</code>; they can compile or download native assets,
+  including Rust libraries, and are invoked automatically by the Dart SDK.
+  <span class="src">[src: <a href="https://dart.dev/tools/hooks#build-hooks">Dart 3.12.2 — build hooks</a>]</span>
+  The hook does not install Rust targets, the Android NDK, or Apple SDKs for you. Fail with a clear message
+  when a required toolchain is absent, and make the selected target visible in build logs.</p>
+
+  <h2>Know the legacy path, but do not teach it as the default</h2>
+  <p>The older <code>plugin_ffi</code> template uses OS-specific Gradle/CMake and CocoaPods files. Flutter
+  3.44 labels it legacy, but still documents it for cases that need the Flutter Plugin API, static linking
+  on Apple platforms, or a Google Play services runtime on Android.
+  <span class="src">[src: <a href="https://docs.flutter.dev/platform-integration/legacy-ffi-plugin">Flutter 3.44 — legacy FFI plugin</a>]</span></p>
   <div class="tablewrap"><table>
-    <thead><tr><th>Platform</th><th>Build system</th><th>Library form (typical)</th></tr></thead>
+    <thead><tr><th>Flow</th><th>Resolution</th><th>Use it when</th></tr></thead>
     <tbody>
-      <tr><td>Android</td><td>"compiled using CMake and integrated with Gradle"</td><td>shared <code>.so</code> per ABI (arm64-v8a, armeabi-v7a, x86_64)</td></tr>
-      <tr><td>iOS</td><td>"compiled using the CocoaPods dependency system"</td><td>static lib or <code>.framework</code> linked into the app</td></tr>
+      <tr><td><code>package_ffi</code> + build hook</td><td>Generated <code>@Native</code> binding resolves a code asset</td><td>New direct-FFI packages; recommended default.</td></tr>
+      <tr><td>Legacy dynamic library</td><td><code>DynamicLibrary.open(path)</code></td><td>You intentionally ship/load a separate library file.</td></tr>
+      <tr><td>Legacy static/process symbols</td><td><code>DynamicLibrary.executable()</code> or <code>.process()</code></td><td>Symbols were linked into the executable or global process image.</td></tr>
     </tbody>
   </table></div>
-  <p class="src">[src: <a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">docs.flutter.dev — FFI plugin native compilation</a>]</p>
-  <p>For a Rust engine, the native build cross-compiles the crate for each target triple (e.g.
-  <code>aarch64-linux-android</code>, <code>aarch64-apple-ios</code>) and produces the platform's library
-  form. The plugin's build hook wires that into Gradle/CocoaPods so a normal <code>flutter build</code>
-  picks it up.</p>
+  <p><code>DynamicLibrary.executable()</code> exposes symbols from the running executable;
+  <code>process()</code> exposes global process symbols; <code>open(path)</code> loads a library file.
+  <span class="src">[src: <a href="https://api.dart.dev/dart-ffi/DynamicLibrary-class.html">Dart 3.12.2 <code>DynamicLibrary</code></a>]</span></p>
 
-  <h2>Loading differs by platform</h2>
-  <p>From 8.5, the Dart side opens the library — but how depends on the target:</p>
+  <h2>Platform artifacts still differ</h2>
   <ul>
-    <li><strong>Android:</strong> a separate <code>.so</code> is shipped in the APK/AAB;
-    <code>DynamicLibrary.open('libminidb.so')</code> loads it by name.</li>
-    <li><strong>iOS:</strong> symbols are commonly statically linked into the app binary; you then use
-    <code>DynamicLibrary.process()</code> (or <code>.executable()</code>) to look up symbols already in the
-    process rather than opening a separate file. <span class="verify-tag">⚠️VERIFY</span> the exact
-    open/process choice for your linkage and Flutter version.</li>
-    <li><strong>Library naming differs everywhere:</strong> <code>lib*.so</code> (Linux/Android),
-    <code>*.dylib</code>/framework (Apple), <code>*.dll</code> (Windows). Don't hard-code one name for all
-    targets — branch on the platform.</li>
+    <li><strong>Android:</strong> dynamic native code is packaged as ELF <code>.so</code> files for the
+    supported device architectures. The app bundle/install process selects a compatible artifact; a
+    missing device ABI prevents successful installation or loading.</li>
+    <li><strong>iOS:</strong> the chosen code asset may be linked/bundled according to the hook and Xcode
+    build. Dynamically embedded frameworks must be signed; statically linked symbols use process/executable
+    resolution only in the legacy path.</li>
+    <li><strong>Do not infer packaging from the filename alone:</strong> the code asset's link mode,
+    architecture, deployment target, and bundle placement must agree with the final app.</li>
   </ul>
-  <p>This is exactly AGENTS's warning that platform assumptions must be stated: "C ABIs, symbol display,
-  dynamic-library names, linking, <code>fsync</code> behavior, and Flutter packaging differ by target."
-  <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span></p>
 
   <div class="box warn">
-    <div class="box-title">⚠️ Signing, stripping, and ABI coverage will bite you</div>
+    <div class="box-title">⚠️ Verify the final packaged binary</div>
     <ul>
-      <li><strong>Code signing (iOS):</strong> all native code in an app must be signed; an unsigned or
-      improperly embedded library fails at install/launch, not at build. Let the CocoaPods/Xcode flow embed
-      and sign it.</li>
-      <li><strong>16 KB page sizes / ABI coverage (Android):</strong> you must ship a <code>.so</code> for
-      every ABI you support, built with the right toolchain/NDK; a missing ABI means the app crashes on
-      those devices only. <span class="verify-tag">⚠️VERIFY</span> current Android ABI and page-size
-      requirements for your target API level.</li>
+      <li><strong>Code signing (iOS):</strong> an embedded dynamic framework must be correctly placed and
+      signed by the Xcode packaging flow. Flutter's legacy guide instructs “Embed &amp; Sign” for a compiled
+      dynamic framework.
+      <span class="src">[src: <a href="https://docs.flutter.dev/platform-integration/legacy-ffi-plugin#compiled-dynamic-library">Flutter 3.44 — iOS dynamic library</a>]</span></li>
+      <li><strong>16 KB pages (Android):</strong> since November 1, 2025, new apps and updates submitted to
+      Google Play that target Android 15 or later must support 16 KB page sizes on 64-bit devices. Apps with
+      native code must rebuild compatible libraries and test the packaged ELF alignment.
+      <span class="src">[src: <a href="https://developer.android.com/guide/practices/page-sizes">Android Developers — 16 KB page sizes, updated May 28, 2026</a>]</span></li>
       <li><strong>Symbol survival:</strong> aggressive stripping/LTO can remove your exported symbols if the
-      linker thinks they're unused. Keep them exported (the <code>#[unsafe(no_mangle)]</code> + prefix from
-      8.1) and verify they're present in the shipped binary.</li>
-      <li><strong>Size:</strong> a Rust static can be large; strip debug info for release and measure the
-      added app size.</li>
+      linker considers them unused. Inspect symbols in the <em>packaged</em> artifact, not only Cargo's
+      intermediate output.</li>
+      <li><strong>Architecture and deployment target:</strong> inspect every slice/artifact and test at least
+      one real release-mode build for each supported platform family.</li>
     </ul>
   </div>
 
   <h2>Verify the whole chain, not just the build</h2>
-  <p>"It compiled" is not "it loads and runs on a device." The end-to-end check: cross-compile for the
-  device's ABI → bundle via the plugin → install on a real device (or device-accurate simulator) →
-  <code>DynamicLibrary</code> opens → a symbol lookup succeeds → a real <code>minidb_open</code>/insert/find
-  round-trips. Each arrow is a place it can silently fail, and on mobile the failure often appears only at
-  runtime on hardware.</p>
+  <p>The release check is: build hook receives target → Cargo emits the matching library → hook registers
+  the code asset → Flutter bundles it → inspect the APK/AAB or iOS app/framework → install/launch →
+  generated <code>@Native</code> binding resolves → ABI version matches → open/insert/find/free/close
+  round-trips. Run an Android 16 KB emulator/device test and an iOS release-mode device test when those are
+  claimed as supported. A host-side unit test proves none of this.</p>
 
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
-      <p class="q">1. How does an FFI plugin differ from a regular Flutter plugin?</p>
-      <details><summary>Show answer</summary><div class="answer">An FFI plugin calls native code directly via
-      <code>dart:ffi</code> and bundles per-platform compiled native code; it does not use method channels.</div></details>
-      <p class="q">2. Which build systems compile the native code on Android and iOS?</p>
-      <details><summary>Show answer</summary><div class="answer">Android uses CMake integrated with Gradle; iOS
-      uses CocoaPods. The Rust crate is cross-compiled per target triple and wired in via the plugin's build
-      hook.</div></details>
-      <p class="q">3. Why might library loading use <code>DynamicLibrary.open</code> on Android but <code>DynamicLibrary.process</code> on iOS?</p>
-      <details><summary>Show answer</summary><div class="answer">Android ships a separate <code>.so</code> opened
-      by name; iOS commonly links the library statically into the app binary, so symbols are looked up in the
-      already-loaded process rather than a separate file.</div></details>
-      <p class="q">4. Name two packaging failures that appear only at runtime on a device.</p>
-      <details><summary>Show answer</summary><div class="answer">Any two of: missing/unsigned native library
-      (iOS signing), a missing ABI <code>.so</code> (Android), or stripped-away exported symbols — none of
-      which necessarily fail the build.</div></details>
+      <p class="q">1. What is Flutter 3.44's recommended starting template for a new direct-FFI package?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>package_ffi</code>, whose
+      <code>hook/build.dart</code> builds/registers a code asset and whose generated
+      <code>@Native</code> functions resolve against it.</div></details>
+      <p class="q">2. What must a Rust-aware build hook do beyond the stock C example?</p>
+      <details><summary>Show answer</summary><div class="answer">Map the hook target to a Rust target/toolchain,
+      invoke Cargo or select a trusted prebuilt, place the artifact in the shared output, and register the
+      correct CodeAsset/link mode.</div></details>
+      <p class="q">3. When is the legacy <code>plugin_ffi</code> path still relevant?</p>
+      <details><summary>Show answer</summary><div class="answer">When you need the Flutter Plugin API, static
+      Apple linking, a Google Play services runtime, or another OS-specific integration not handled by the
+      normal code-asset flow.</div></details>
+      <p class="q">4. What is the current Android 16 KB requirement?</p>
+      <details><summary>Show answer</summary><div class="answer">Since November 1, 2025, new Play submissions
+      and updates targeting Android 15+ must support 16 KB page sizes on 64-bit devices; native libraries
+      must be rebuilt/aligned and tested accordingly.</div></details>
     </div>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>cdylib</code> asks rustc for a dynamic system library intended for foreign consumers; the
+      final filename and linker behavior remain target-specific.
+      <span class="src">[src: <a href="https://doc.rust-lang.org/reference/linkage.html">Rust Reference — linkage</a>]</span></li>
+      <li><code>rustup target add</code> installs Rust standard-library support for a target, but a mobile
+      build still needs the platform linker, SDK/NDK, deployment settings, and signing tools.</li>
+      <li>The Dart hook is the orchestrator. Keep target selection and Cargo arguments explicit and logged;
+      do not hide cross-compilation assumptions in a shell command that only works on one machine.</li>
+    </ul>
   </div>
 
   <div class="box deeper">
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
-      <li><strong>Docs:</strong> <a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">developing packages</a>, <a href="https://dart.dev/interop/c-interop">dart:ffi</a>, <a href="https://api.dart.dev/dart-ffi/DynamicLibrary-class.html">DynamicLibrary API</a>.</li>
-      <li><strong>Rust:</strong> <a href="https://doc.rust-lang.org/cargo/reference/build-scripts.html">Cargo build scripts</a> and cross-compilation target triples (<code>rustup target add …</code>).</li>
+      <li><strong>Current flow:</strong> <a href="https://docs.flutter.dev/platform-integration/bind-native-code">Flutter 3.44 — <code>package_ffi</code></a> and <a href="https://dart.dev/tools/hooks">Dart build hooks</a>.</li>
+      <li><strong>Legacy/linking:</strong> <a href="https://docs.flutter.dev/platform-integration/legacy-ffi-plugin">legacy FFI plugin</a> and <a href="https://api.dart.dev/dart-ffi/DynamicLibrary-class.html">DynamicLibrary API</a>.</li>
+      <li><strong>Android:</strong> <a href="https://developer.android.com/guide/practices/page-sizes">16 KB page-size support</a>.</li>
       <li><strong>Forward link:</strong> the build wires the C ABI into a minimal Dart binding and round-trips one call.</li>
     </ul>
   </div>

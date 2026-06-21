@@ -13,7 +13,7 @@
   <h1>Sources &amp; annotated bibliography</h1>
   <p class="lead">Lessons are self-contained explanations. These links are evidence and optional
   deeper reading, not missing chapters the learner must leave the site to understand. Sources from the
-  Phase 0–5 review were checked on June 20, 2026; Phase 6 additions were checked on
+  Phase 0–5 review were checked on June 20, 2026; Phases 6–8 additions were checked on
   <strong>June 21, 2026</strong>.</p>
 
   <div class="box deeper">
@@ -62,12 +62,15 @@
 
   <h2>C ABI, header generation, and Dart/Flutter</h2>
   <ul>
-    <li><a href="https://github.com/mozilla/cbindgen">cbindgen upstream</a> and its
-    <a href="https://raw.githubusercontent.com/mozilla/cbindgen/main/docs.md">CLI/config reference</a>.
-    The CLI defaults to C++; this curriculum explicitly requests C.</li>
+    <li><a href="https://github.com/mozilla/cbindgen/tree/v0.29.4">cbindgen 0.29.4</a> and its
+    <a href="https://github.com/mozilla/cbindgen/blob/v0.29.4/docs.md">pinned CLI/config reference</a>.
+    Phase 8 requests C output and <code>usize_is_size_t = true</code>, then compiles a C11 consumer.</li>
     <li><a href="https://dart.dev/interop/c-interop">Dart C interop guide</a> —
     <code>dart:ffi</code> concepts and <code>package:ffigen</code> for generating Dart bindings from
     C headers.</li>
+    <li><a href="https://pub.dev/packages/ffigen/versions/20.1.1">ffigen 20.1.1</a> and
+    <a href="https://pub.dev/packages/ffi/versions/2.2.0">package:ffi 2.2.0</a> — pinned Phase 8
+    binding generator and native-allocation helper.</li>
     <li><a href="https://dart.dev/language/isolates">Dart isolates</a> and
     <a href="https://dart.dev/language/concurrency">concurrency model</a> — separate memory, message
     passing, unsendable FFI objects, blocking-operation guidance, and <code>Isolate.run</code>. Phase 7
@@ -75,15 +78,21 @@
     <li><a href="https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.isolateLocal.html"><code>NativeCallable.isolateLocal</code></a>
     and <a href="https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.listener.html"><code>NativeCallable.listener</code></a>
     — thread affinity versus asynchronous any-thread callback delivery in Dart 3.12.2.</li>
-    <li><a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">Flutter — developing
-    packages &amp; plugins</a> — FFI plugins, per-platform native build (CMake/Gradle, CocoaPods), and
-    bundling. Packaging mechanics are version-sensitive.</li>
+    <li><a href="https://docs.flutter.dev/platform-integration/bind-native-code">Flutter 3.44 — bind to
+    native code using FFI</a> — the recommended <code>package_ffi</code> template, build-hook code assets,
+    generated <code>@Native</code> bindings, and package layout. Checked June 21, 2026; the page identifies
+    Flutter 3.44.0 and a June 8, 2026 update.</li>
+    <li><a href="https://dart.dev/tools/hooks">Dart 3.12.2 build hooks</a> — hook location, build
+    lifecycle, code assets, and support for compiling/downloading Rust libraries.</li>
     <li><a href="https://api.dart.dev/dart-ffi/">dart:ffi API</a>,
     <a href="https://api.dart.dev/dart-ffi/Size-class.html"><code>Size</code></a>, and
     <a href="https://pub.dev/packages/ffi">package:ffi</a>.</li>
-    <li><a href="https://docs.flutter.dev/platform-integration/legacy-ffi-plugin">Flutter native
-    library linking</a> — dynamic/static loading distinctions and the current recommendation to use
-    native-assets build hooks for new packages.</li>
+    <li><a href="https://docs.flutter.dev/platform-integration/legacy-ffi-plugin">Flutter 3.44 legacy
+    FFI plugin</a> — dynamic/static loading distinctions and the limited cases that still need the older
+    OS-specific plugin flow.</li>
+    <li><a href="https://developer.android.com/guide/practices/page-sizes">Android 16 KB page-size
+    compatibility</a> — current Play requirement and native-library build/test guidance, updated
+    May 28, 2026.</li>
     <li><a href="https://cjycode.com/flutter_rust_bridge/">flutter_rust_bridge v2 docs</a> and
     <a href="https://github.com/fzyzcjy/flutter_rust_bridge">upstream repository</a>.</li>
   </ul>
@@ -102,8 +111,12 @@
     <li><a href="https://www.sqlite.org/lockingv3.html">Locking v3</a>.</li>
     <li><a href="https://www.sqlite.org/cintro.html">C interface introduction</a>,
     <a href="https://www.sqlite.org/c3ref/intro.html">C API reference</a>,
+    <a href="https://www.sqlite.org/c3ref/close.html">connection close lifecycle</a>,
     <a href="https://www.sqlite.org/rescode.html">result codes</a>, and
     <a href="https://www.sqlite.org/c3ref/free.html">memory-allocation routines</a>.</li>
+    <li><a href="https://www.sqlite.org/2026/sqlite-amalgamation-3530000.zip">SQLite 3.53.0
+    amalgamation archive</a> — pinned <code>sqlite3.h</code> used by Phase 8 to inspect the opaque
+    connection typedef and the version/open/close/error/free declarations.</li>
     <li><a href="https://www.sqlite.org/src/">Source repository browser</a>. Planned source dives
     should identify exact files and functions when authored, including <code>pager.c</code>,
     <code>btree.c</code>, <code>wal.c</code>, and platform VFS implementations.</li>
@@ -125,8 +138,12 @@
     <a href="https://www.mongodb.com/docs/manual/crud/">CRUD operations</a>,
     <a href="https://www.mongodb.com/docs/manual/core/index-sparse/">sparse indexes</a>,
     <a href="https://www.mongodb.com/docs/manual/reference/bson-type-comparison-order/">comparison/type bracketing</a>,
-    and the
-    <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">aggregation pipeline</a>.</li>
+    and the MongoDB 8.3
+    <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">aggregation pipeline</a>,
+    <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/group/"><code>$group</code></a>,
+    <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/count/"><code>$count</code></a>,
+    and <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline-optimization/">optimization</a>
+    references used in Phase 8.</li>
   </ul>
 
   <h2>Concurrency, isolation, and transactions</h2>

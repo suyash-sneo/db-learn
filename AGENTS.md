@@ -97,10 +97,10 @@ The full brief that generated this site is in [`docs/original-prompt.md`](docs/o
   MessagePack, BSON, JSON, and SQLite sources in the June 21, 2026 Codex accuracy pass.
 - ✅ **Phase 7 — Concurrency** — independently rechecked against SQLite 3.53.0, PostgreSQL, Rust,
   and Dart 3.12.2 primary sources in the June 21, 2026 Codex accuracy pass.
-- ✅ **Phase 8 — Real C ABI + aggregation** — authored (index + lessons + build); independent accuracy
-  review is still pending. All `PHASES` entries are `"done"`.
-- 📋 Outstanding Phase 8 ⚠️VERIFY items (version-sensitive binding and Dart/Flutter packaging) are
-  indexed exactly in `verification.html`.
+- ✅ **Phase 8 — Real C ABI + aggregation** — independently rechecked against Rust, SQLite's C API,
+  cbindgen 0.29.4, ffigen 20.1.1, Dart 3.12.2, Flutter 3.44.0, Android's current 16 KB guidance,
+  and MongoDB 8.3 primary sources in the June 21, 2026 Codex accuracy pass. All `PHASES` entries
+  are `"done"`; no Phase 8 ⚠️VERIFY items remain.
 
 ## Workflow for adding a phase (2–8)
 
@@ -183,6 +183,9 @@ when authoring Phases 2–8 so later review does not have to reconstruct or corr
 - `extern "C"` selects the target's C calling convention; it does not make arbitrary Rust types
   ABI-safe. Keep `String`, `Vec`, references with unprovable borrow requirements, generics, and
   native-layout structs out of public C signatures.
+- Exported functions whose safety depends on foreign raw-pointer validity should be
+  `pub unsafe extern "C" fn`. Otherwise safe Rust can call an allegedly safe function with an arbitrary
+  pointer and trigger undefined behavior.
 - Prefer raw pointers at foreign boundaries and document their safety contracts. Checking for null
   cannot detect dangling, misaligned, undersized, read-only, or incorrectly aliased memory.
 - `slice::from_raw_parts` requires a non-null aligned pointer even for length zero. If the ABI permits
@@ -205,14 +208,30 @@ when authoring Phases 2–8 so later review does not have to reconstruct or corr
 - Catching a panic does not prove a database handle remains logically valid. Publish state only after
   successful work, use transactional mutation, or poison the handle after a caught panic.
 - cbindgen's CLI defaults to C++ output. Use `--lang c` or `language = "C"`, pin the tool, inspect
-  generated output, and compile a C smoke test. cbindgen transcribes declarations; it does not prove
-  ownership, pointer, threading, or panic safety.
+  generated output, set `usize_is_size_t = true` when the Dart/C contract says `size_t`, and compile a
+  C smoke test. cbindgen transcribes declarations; it does not prove ownership, pointer, threading, or
+  panic safety. Do not use zero-sized placeholders for opaque handles: cbindgen can erase zero-sized
+  types from signatures. A private non-zero-sized Rust type without `repr(C)` should remain an incomplete
+  C declaration.
 - `package:ffigen` generates Dart bindings from a C header; `dart:ffi` is the runtime interop API.
   Match native Dart typedefs to the generated C header exactly. C `size_t` maps to Dart FFI `Size`.
 - Flutter native-library loading is platform/package-layout specific. Do not teach one
   `DynamicLibrary` expression as universal for desktop, Android, and Apple platforms.
 - In Dart, copy a Rust-owned native view into a Dart-owned `Uint8List` before calling the Rust free
   function. Put Rust-output cleanup and Dart-allocation cleanup in `finally` blocks.
+- Initialize output pointers/lengths/IDs to harmless defaults before parsing input or touching engine
+  state. Publish real output only after success, so errors never expose stale caller values.
+- A cursor-shaped ABI does not automatically make query execution streaming. If the engine first builds
+  `Vec<Result>`, the cursor only bounds each FFI output. Claim bounded end-to-end memory only when the
+  underlying scan/evaluator is incremental.
+- Do not let a cursor store an unchecked raw borrow to a database allocation the caller can close. Use
+  shared internal ownership, or make close fail while child objects remain. State mutation/snapshot and
+  end-of-stream behavior explicitly.
+- Prefer per-handle copied diagnostics over a borrowed thread-local error string when Dart is the first
+  consumer. Numeric error codes are stable; human-readable detail is not a machine contract.
+- For Flutter 3.44-era new direct-FFI packages, teach `package_ffi` + Dart build hooks/code assets as the
+  default. Treat the OS-specific `plugin_ffi`/CMake/CocoaPods flow as legacy and explain the limited cases
+  where Flutter still recommends it. Packaging guidance must be version-pinned.
 
 ### Database-content accuracy rules
 

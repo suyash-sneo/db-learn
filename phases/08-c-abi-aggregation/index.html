@@ -15,9 +15,9 @@
   <p class="lead">Phase 1 proved one byte buffer could cross from Rust to Dart. This phase turns that
   spike into a real, stable public interface: an opaque-handle C ABI for open/CRUD/query/cursor, with
   disciplined ownership, error reporting, and versioning; a generated C header and a Dart binding that
-  consumes it; an aggregation pipeline layered on the Phase 6 query engine; and the packaging that ships
-  the native library inside a Flutter app for iOS and Android. This is where the engine stops being a Rust
-  crate and becomes a database other code can depend on.</p>
+  consumes it; a carefully scoped optional aggregation pipeline layered on the Phase 6 query engine; and
+  Flutter 3.44 build-hook packaging that ships the native library for iOS and Android. This is where the
+  engine stops being only a Rust crate and becomes a database another runtime can call.</p>
 
   <div class="box deeper">
     <div class="box-title">Why the C ABI comes last</div>
@@ -33,8 +33,8 @@
     <p>Design an ABI-stable C surface using opaque handles and byte buffers; specify and uphold ownership,
     lifetime, and panic contracts at the boundary; iterate query results across the FFI with a cursor;
     report errors and version the ABI without breaking callers; generate a C header with cbindgen and call
-    it from Dart; implement a small aggregation pipeline on top of your evaluator; and package the native
-    library into a Flutter app for both mobile platforms.</p>
+    it from Dart; specify a small optional aggregation pipeline on top of your evaluator; and package the
+    native library with Flutter's current <code>package_ffi</code> build-hook flow.</p>
   </div>
 
   <div class="cardgrid" id="cards"></div>
