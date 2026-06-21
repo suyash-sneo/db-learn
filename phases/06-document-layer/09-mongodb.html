@@ -23,20 +23,23 @@
 
   <h2>The data model, precisely</h2>
   <ul>
-    <li><strong>Documents are BSON.</strong> "MongoDB stores data records as BSON documents … a binary
-    representation of JSON documents that contains more data types than JSON." Documents are
-    field-and-value pairs; a value can be another document, an array, or an array of documents.
+    <li><strong>Documents are BSON.</strong> MongoDB stores records as BSON documents: field-and-value
+    pairs in a binary format whose value set extends JSON. Values can include nested documents and
+    arrays.
     <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — Documents</a>]</span></li>
-    <li><strong>Field order is preserved</strong> (BSON documents are ordered, unlike a JS object), and
-    <strong>field names must be unique</strong> within a document; names cannot contain the null
-    character.
+    <li><strong>Field order is generally preserved on writes</strong>, with documented exceptions:
+    MongoDB moves <code>_id</code> first and field-renaming updates may reorder fields. Duplicate field
+    names are unsupported, and names cannot contain the null character.
     <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — field names &amp; order</a>]</span></li>
-    <li><strong><code>_id</code>:</strong> required, unique, the primary key; "always the first field";
-    auto-generated as an <code>ObjectId</code> if omitted; immutable; may be any BSON type "except arrays,
-    regex, or undefined"; MongoDB creates a unique index on it.
-    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — the _id field</a>]</span></li>
-    <li><strong>Size limit:</strong> "The maximum BSON document size is 16 mebibytes (16 MB)" — to bound
-    per-document RAM and bandwidth; larger blobs use GridFS.
+    <li><strong><code>_id</code>:</strong> required, unique, the primary key, and stored first.
+    The driver generates an <code>ObjectId</code> if it is omitted; supported values include most BSON
+    types but exclude arrays, regular expressions, and undefined. MongoDB creates a unique index on
+    <code>_id</code>, and a replacement cannot change it.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — the _id field</a>;
+    <a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.replaceOne/"><code>replaceOne()</code> — replacement cannot change <code>_id</code></a>]</span></li>
+    <li><strong>Size limit:</strong> the maximum BSON document size is 16 mebibytes. MongoDB points to
+    GridFS for files larger than that limit; the documentation does not make that limit a property of
+    this engine.
     <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">Manual — document size limit</a>]</span></li>
     <li><strong>Dot notation</strong> reaches into structure: <code>"name.last"</code> for an embedded
     field, <code>"contribs.2"</code> for the third (zero-based) array element.
@@ -56,9 +59,10 @@
   </table>
   </div>
   <p class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">Manual — CRUD operations</a>]</p>
-  <p>"All write operations in MongoDB are atomic at the document level."
-  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">Manual — CRUD</a>]</span>
-  — the exact guarantee your Phase 5-wrapped CRUD reproduces (6.4).</p>
+  <p>MongoDB documents single-document write atomicity, including concurrent-update guidance.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/write-operations-atomicity/">Manual — atomicity and transactions</a>]</span>
+  Phase 5 supplies the crash-atomic storage part for this curriculum; Phase 7 is still needed before
+  claiming equivalent concurrent behavior.</p>
 
   <h2>Query filters</h2>
   <p>Reads, updates, and deletes share one filter syntax:</p>
@@ -66,7 +70,10 @@
     <li><strong>Equality:</strong> <code>{ field: value }</code> matches documents where field equals
     value.</li>
     <li><strong>Operators:</strong> <code>{ field: { $gt: v } }</code>, with <code>$gt</code> (greater
-    than), <code>$lt</code> (less than), <code>$in</code> (matches any value in an array), and many more.
+    than), <code>$lt</code> (less than), and <code>$in</code>. For <code>$in</code>, the query supplies
+    an array of alternatives and matches a field equal to any one; MongoDB also defines behavior when the
+    stored field itself is an array.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/reference/operator/query/in/">MongoDB <code>$in</code></a>]</span>
     <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">Manual — query-filter syntax</a>]</span></li>
   </ul>
   <p>This is exactly the filter tree of 6.6: leaves are <code>{field: value}</code> or
@@ -87,7 +94,7 @@
   <table>
     <thead><tr><th>Aspect</th><th>MongoDB</th><th>Your engine</th></tr></thead>
     <tbody>
-      <tr><td>Document format</td><td>BSON</td><td>a self-describing binary (your choice, 6.2)</td></tr>
+      <tr><td>Document format</td><td>BSON</td><td>UTF-8 JSON in the Phase 6 build; versioned binary format later</td></tr>
       <tr><td><code>_id</code> type</td><td>any BSON type; auto <code>ObjectId</code></td><td>integer, auto-increment (6.1)</td></tr>
       <tr><td>Atomicity</td><td>document-level (multi-doc txns available)</td><td>document-level via Phase 5</td></tr>
       <tr><td>Filters</td><td>rich operator set</td><td>Eq/range/In + AND/OR/NOT (6.6)</td></tr>
@@ -103,9 +110,9 @@
       <details><summary>Show answer</summary><div class="answer">Required, unique primary key; always the
       first field; auto-generated <code>ObjectId</code> if omitted; immutable; unique index created on it;
       any BSON type except array/regex/undefined.</div></details>
-      <p class="q">2. What is the maximum BSON document size, and why does the limit exist?</p>
-      <details><summary>Show answer</summary><div class="answer">16 MB (mebibytes), to bound per-document
-      RAM and bandwidth; larger data uses GridFS.</div></details>
+      <p class="q">2. What is MongoDB's maximum BSON document size, and what should larger file-like data use?</p>
+      <details><summary>Show answer</summary><div class="answer">16 mebibytes. MongoDB recommends GridFS
+      for files larger than the BSON document limit; this curriculum does not inherit the same limit.</div></details>
       <p class="q">3. How does MongoDB's filter syntax map to your 6.6 filter tree?</p>
       <details><summary>Show answer</summary><div class="answer">Leaves are <code>{field: value}</code>
       (equality) or <code>{field: {$op: value}}</code> (operators); multiple fields are an implicit AND;

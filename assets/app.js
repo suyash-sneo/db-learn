@@ -95,7 +95,7 @@ const PHASES = [
       ["6.7","Query planning basics","07-planning.html","done"],
       ["6.8","Source dive: Isar","08-source-isar.html","done"],
       ["6.9","MongoDB data model & CRUD","09-mongodb.html","done"],
-      ["build","Build: collections + CRUD + index + filter","build.html","done"],
+      ["build","Build: JSON collection + CRUD + index + filter","build.html","done"],
     ] },
   { id: "p7", num: "7", title: "Concurrency", dir: "phases/07-concurrency",
     lessons: [

@@ -19,8 +19,8 @@
   <p>6.6 gave you a correct-but-slow baseline: scan everything, filter. The whole point of building
   secondary indexes (6.5) was to avoid touching documents that can't match. The <strong>query
   planner</strong> is the component that decides, for a given filter, which access path to use. A
-  good plan can be thousands of times faster than a scan; a bad plan can be slower than a scan. And —
-  the non-negotiable — <em>every</em> plan must return the same documents the predicate accepts.</p>
+  useful plan avoids unnecessary record fetches; a non-selective index can be slower than a scan. The
+  non-negotiable rule is that <em>every</em> plan returns the same documents the predicate accepts.</p>
 
   <h2>Plan = access path + residual filter</h2>
   <p>A plan has two parts:</p>
@@ -39,8 +39,8 @@
 
   <h2>Which access path? Selectivity</h2>
   <p><strong>Selectivity</strong> is the fraction of documents a condition keeps. A condition matching 5
-  of 1,000,000 documents is highly selective (great for an index); one matching 800,000 is not (an index
-  would do a huge number of random primary-index lookups — often slower than a straight scan). The core
+  of 1,000,000 documents is highly selective; one matching 800,000 is not. The latter may require almost
+  a full collection's worth of secondary entries, primary lookups, and record fetches. The core
   heuristic:</p>
   <ul>
     <li>If a filter condition is on an <strong>indexed</strong> field and is <strong>selective</strong>,
@@ -66,8 +66,8 @@
     <rect class="dg-fill-2" x="312" y="100" width="36" height="26" rx="3"/>
     <text class="dg-txt-s" x="300" y="150">touches only candidates, then residual filter</text>
   </svg>
-  <figcaption>The planner trades a guaranteed O(n) scan for an index lookup when the condition is
-  selective enough to be worth it.</figcaption>
+  <figcaption>A full scan examines every document. An index can reduce candidate document fetches when
+  the indexed condition is selective enough to justify the extra index traversal.</figcaption>
   </figure>
 
   <h2>A workable rule-based planner for your engine</h2>
@@ -75,9 +75,9 @@
     <li>Flatten the top-level <code>AND</code> into a list of conditions.</li>
     <li>Find conditions whose field has an index and whose op is index-usable (<code>Eq</code>, range,
     <code>In</code>).</li>
-    <li>If any exist, pick one (e.g. an equality over a range; if you have stats, the most selective),
-    use its index to produce candidate <code>_id</code>s, and apply the remaining conditions as a
-    residual filter.</li>
+    <li>If any exist, pick one using an explicit rule (for this build: first usable indexed conjunct;
+    there are no statistics), use it to produce candidate <code>_id</code>s, deduplicate them, and run
+    the <em>full filter</em> on every fetched candidate.</li>
     <li>Otherwise, full scan with the whole filter as residual.</li>
   </ol>
   <p><code>OR</code> across different fields is harder (you may need to union index results or fall back
@@ -86,7 +86,7 @@
 
   <div class="box warn">
     <div class="box-title">⚠️ A plan that changes results is a bug, not an optimization</div>
-    <p>The single rule that must never break: the planned query returns <em>exactly</em> the same set as
+    <p>The planner's central correctness invariant is that a planned query returns <em>exactly</em> the same set as
     the full-scan baseline (6.6). Two classic ways to violate it: (1) using an index that omits
     documents missing the field when the query should include them; (2) forgetting the residual filter so
     you return everything in the key range, including documents the rest of the predicate rejects. Test
@@ -105,7 +105,8 @@
       <p class="q">1. What two parts make up a query plan?</p>
       <details><summary>Show answer</summary><div class="answer">An access path (full scan or index scan
       that generates candidates) and a residual filter (the rest of the predicate applied by the
-      evaluator to each candidate).</div></details>
+      evaluator to each candidate). Re-running the full predicate is a simple, safe form of residual
+      evaluation.</div></details>
       <p class="q">2. What is selectivity, and how does it drive the choice of access path?</p>
       <details><summary>Show answer</summary><div class="answer">The fraction of documents a condition
       keeps. Highly selective + indexed → use the index; low selectivity or no index → full scan, since a

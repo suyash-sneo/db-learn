@@ -39,9 +39,10 @@
   <strong>June 20, 2026</strong>. Corrections include Rust 2024 unsafe attributes, non-null empty-slice
   rules, current FFI unwind behavior, <code>Box&lt;[u8]&gt;</code> buffer ownership, cbindgen's C++
   default, Dart <code>Size</code>/<code>ffigen</code>, mobile linking distinctions, and filesystem
-  durability caveats. Phases 2–8 are authored with precise claims sourced inline; their remaining
-  ⚠️VERIFY tags — concentrated in the source-dive lessons (Isar and SQLite internals) and in
-  version-sensitive Dart/Flutter packaging details — are indexed exactly below.</p>
+  durability caveats. Phases 2–5 were independently rechecked on June 20, 2026. Phase 6 was rechecked
+  on June 21, 2026; its Isar claims were resolved against tag 3.1.0+1, commit
+  <code>6643d064abf22606b6c6a741ea873e4781115ef4</code>. Phases 7–8 remain authored but await the same
+  independent pass; their current ⚠️VERIFY tags are indexed exactly below.</p>
 
   <div class="tablewrap">
   <table>
@@ -49,8 +50,6 @@
     <tbody>
       <tr><td colspan="3"><strong>Phase 0 &amp; Phase 1:</strong> none. The remaining appearances of
       ⚠️VERIFY in Lesson 0.1 explain the tag policy; they are not unverified claims.</td></tr>
-
-      <tr><td>6.8 (Source dive: Isar)</td><td>Exact Isar version/commit of any page cited; the storage engine each Isar version uses; on-disk document serialization format; how secondary indexes are keyed (composite <code>(value,id)</code> vs posting lists); what crosses the FFI boundary; the current license.</td><td>Read the <a href="https://github.com/isar/isar">isar/isar</a> core crate at a pinned tag; record the version beside each claim.</td></tr>
 
       <tr><td>7.5 (Flutter isolates)</td><td>Exact threading/blocking wording — that a synchronous FFI call runs on the calling isolate's thread without yielding to the event loop until it returns.</td><td><a href="https://dart.dev/interop/c-interop">dart.dev — C interop</a> and the <a href="https://api.dart.dev/dart-ffi/dart-ffi-library.html">dart:ffi API reference</a> for the targeted Dart version.</td></tr>
       <tr><td>7.5 (Flutter isolates)</td><td>Current capabilities/constraints of C-to-Dart callbacks and asynchronous FFI.</td><td><a href="https://dart.dev/interop/c-interop">dart:ffi docs</a> for the Dart version targeted.</td></tr>

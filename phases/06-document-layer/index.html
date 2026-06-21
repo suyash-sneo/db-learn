@@ -30,10 +30,11 @@
 
   <div class="box rust">
     <div class="box-title">What you'll be able to do after Phase 6</div>
-    <p>Serialize a schemaless document to bytes and back, store it in a collection keyed by a
+    <p>Compare document encodings, serialize the build's JSON subset to bytes and back, store it in a collection keyed by a
     primary <code>_id</code> index, perform insert/find/update/delete, build a secondary index that
     maps a field's values to documents, evaluate a filter query against documents, and choose between
-    an index lookup and a full scan — then wire it all into a small document store.</p>
+    an index lookup and a full scan. The build keeps indexes derived/in-memory until the Phase 3 and
+    Phase 5 layers are integrated behind one transactional API.</p>
   </div>
 
   <div class="cardgrid" id="cards"></div>

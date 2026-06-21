@@ -26,29 +26,31 @@
   <h2>Create (insert)</h2>
   <p>The 6.3 sequence: assign <code>_id</code> if absent → serialize → store bytes → insert
   <code>_id → RecordId</code> into the primary index → insert into every secondary index (6.5) → commit.
-  In MongoDB, "if the collection doesn't exist, insert operations will create it" and inserting a
-  document without <code>_id</code> auto-generates one.
+  MongoDB insert operations can create an absent collection, and the driver supplies an identifier when
+  an inserted document omits <code>_id</code>.
   <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — Create operations</a>; <a href="https://www.mongodb.com/docs/manual/core/document/">_id auto-generation</a>]</span></p>
 
   <h2>Read (find / get)</h2>
   <ul>
     <li><strong>By <code>_id</code>:</strong> the two-step lookup from 6.3 — primary index then heap.</li>
     <li><strong>By filter:</strong> a query (6.6) that yields a set of matching documents, served either
-    by scanning the heap or by consulting a secondary index (6.7 decides which). "You can specify query
-    filters or criteria to identify which documents to return … <code>{ field: value }</code> matches
-    documents where field equals the specified value."
+    by scanning the heap or by consulting a secondary index (6.7 decides which). MongoDB read operations
+    use query filters to select returned documents; a simple <code>{ field: value }</code> filter
+    expresses equality.
     <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — Read operations &amp; query-filter syntax</a>]</span></li>
   </ul>
 
   <h2>Update</h2>
   <p>Two flavors, mirroring MongoDB:</p>
   <ul>
-    <li><strong>Replace</strong> (<code>replaceOne</code>): swap the whole document for a new one. Keep
-    the same <code>_id</code>; re-serialize; update in place or relocate (6.3); update any secondary
-    indexes whose indexed field changed.</li>
+    <li><strong>Replace</strong> (<code>replaceOne</code>): swap the whole document for a new one.
+    <code>_id</code> is immutable in MongoDB. For this project's <code>replace(id, doc)</code>, inject
+    <code>id</code> if the replacement omits <code>_id</code>, and reject a different supplied value;
+    then re-serialize, relocate if necessary, and maintain secondary indexes.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/reference/method/db.collection.replaceOne/">MongoDB <code>replaceOne()</code> — replacement cannot change <code>_id</code></a>]</span></li>
     <li><strong>Modify</strong> (<code>updateOne</code> with operators like <code>$set</code>): apply a
-    partial change to specific fields. "Updates use the same filter syntax as read operations to identify
-    target documents, with update operators (like <code>$set</code>) to specify modifications."
+    partial change to specific fields. MongoDB uses a filter to identify targets and update operators
+    such as <code>$set</code> to describe modifications.
     <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — Update operations</a>]</span>
     Mechanically: read → apply the change in memory → write back like a replace.</li>
   </ul>
@@ -69,11 +71,11 @@
   <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — Delete operations</a>]</span></p>
 
   <h2>The atomicity guarantee you can make</h2>
-  <p>Because each CRUD operation wraps its multi-structure work in one Phase 5 transaction, you can
-  honestly promise <strong>document-level atomicity</strong>: a single insert/update/delete either fully
-  happens (heap + all indexes) or not at all. This matches MongoDB, where "all write operations in
-  MongoDB are atomic at the document level."
-  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — write operations are atomic at the document level</a>]</span></p>
+  <p>After the document layer is actually routed through one Phase 5 transaction, a single
+  insert/update/delete can be crash-atomic across the heap and every index. That is the storage guarantee
+  built so far. MongoDB separately documents single-document write atomicity, including behavior under
+  concurrent updates; reproducing that wider concurrency guarantee also depends on Phase 7.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/write-operations-atomicity/">MongoDB — atomicity and transactions</a>]</span></p>
   <div class="box warn">
     <div class="box-title">⚠️ Document-level ≠ multi-document transactional</div>
     <p>Atomic <em>per operation</em> is not the same as a multi-document transaction spanning several
@@ -102,7 +104,7 @@
       <p class="q">1. Which structures does an insert touch, and how is consistency guaranteed?</p>
       <details><summary>Show answer</summary><div class="answer">The heap (document bytes), the primary
       index (<code>_id</code> → <code>RecordId</code>), and every secondary index — all inside one
-      transaction so the change is atomic.</div></details>
+      transaction so the change is crash-atomic; Phase 7 is still needed for concurrency semantics.</div></details>
       <p class="q">2. What's the difference between a replace and an operator update (<code>$set</code>)?</p>
       <details><summary>Show answer</summary><div class="answer">Replace swaps the whole document for a new
       one; an operator update modifies specific fields. Mechanically the operator update is read → apply
@@ -113,8 +115,8 @@
       field go wrong.</div></details>
       <p class="q">4. What does "atomic at the document level" guarantee, and what does it not?</p>
       <details><summary>Show answer</summary><div class="answer">Each single write fully happens or not at
-      all (heap + indexes together). It does not make a multi-document batch commit as one unit unless you
-      wrap it in an explicit transaction.</div></details>
+      all across heap + indexes when routed through one transaction. It does not define concurrent-update
+      behavior or make a multi-document batch one unit unless those contracts are explicitly added.</div></details>
     </div>
   </div>
 

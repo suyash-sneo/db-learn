@@ -27,8 +27,8 @@
     returns a <code>RecordId</code> (page + slot) — a physical handle to where the bytes live. It knows
     nothing about <code>_id</code> or fields.</li>
     <li><strong>The primary index (B+tree, Phase 3):</strong> maps the logical key <code>_id</code> →
-    the physical <code>RecordId</code>. This is what makes "fetch document 42" an O(log n) lookup instead
-    of a scan, and it keeps <code>_id</code>s ordered (useful for range scans by id).</li>
+    the physical <code>RecordId</code>. A balanced B+tree lookup visits logarithmically many tree levels;
+    fetching the record is the second step. Range scans also benefit from ordered keys.</li>
   </ul>
   <p>This separation — logical key in an index, physical bytes in a heap — is the classic
   <strong>indirection</strong>: the document can move (compaction relocates its bytes, an update may
@@ -55,8 +55,11 @@
   <h2>Insert, step by step</h2>
   <ol>
     <li>If the document has no <code>_id</code>, assign one (e.g. an auto-incrementing counter persisted
-    in the collection header — recall Isar auto-increments when the id is null and never reuses deleted
-    ids <span class="src">[src: <a href="https://isar.dev/schema.html">Isar — auto-increment when id is null; deleted ids are not reused</a>]</span>).</li>
+    in collection metadata. Updating that counter and inserting the document must be one transaction.
+    Isar v3 is a reference for the policy: it assigns an auto-increment id when requested and does not
+    reuse deleted ids.
+    <span class="src">[src: pinned Isar v3.1.0+1
+    <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/schema.md"><code>docs/docs/schema.md</code></a>]</span></li>
     <li>Serialize the document to bytes (6.2).</li>
     <li>Store the bytes in the record store → get a <code>RecordId</code> (Phase 4).</li>
     <li>Insert <code>_id → RecordId</code> into the primary index (Phase 3). If <code>_id</code> already
@@ -64,6 +67,9 @@
     <li>Do all of this inside one transaction so a crash can't leave the heap and index disagreeing
     (Phase 5) — see the warning below.</li>
   </ol>
+  <p>An explicit id must also advance the future auto-id counter when necessary. Use checked arithmetic:
+  if no larger <code>i64</code> id can be assigned, report exhaustion rather than wrapping into an old
+  key.</p>
 
   <h2>Read, step by step</h2>
   <ol>
@@ -124,7 +130,7 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Back-links:</strong> <a href="../03-btree/index.html">Phase 3 (B+tree)</a> for the primary index, <a href="../04-records-freespace/index.html">Phase 4 (record store)</a> for the heap, <a href="../05-durability-wal/index.html">Phase 5 (transactions)</a> for atomic multi-structure writes.</li>
-      <li><strong>Docs:</strong> <a href="https://www.mongodb.com/docs/manual/core/document/">MongoDB documents</a>; <a href="https://isar.dev/schema.html">Isar id auto-increment behavior</a>.</li>
+      <li><strong>Docs:</strong> <a href="https://www.mongodb.com/docs/manual/core/document/">MongoDB documents</a>; pinned Isar v3.1.0+1 <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/schema.md">ID behavior</a>.</li>
       <li><strong>Forward link:</strong> 6.4 turns these steps into a CRUD API.</li>
     </ul>
   </div>

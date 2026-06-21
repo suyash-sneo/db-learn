@@ -18,19 +18,20 @@
   <h2>Why this matters to your DB</h2>
   <p>You're building a MongoDB-like, schemaless, embedded database. Until now the engine stored opaque
   variable-length byte records (Phase 4). A "document" is the meaning your engine assigns to those
-  bytes: a self-describing, nested map of fields to values. Deciding precisely what a document is — and
-  what is and isn't enforced about its shape — determines everything above it: serialization, indexing,
-  queries.</p>
+  bytes: a nested map of fields to values, encoded in this phase as self-describing JSON. Deciding
+  precisely what a document is — and what is and isn't enforced about its shape — determines everything
+  above it: serialization, indexing, and queries.</p>
 
   <h2>Row vs document</h2>
-  <p>A relational <strong>row</strong> conforms to a table <em>schema</em>: a fixed, declared list of
-  typed columns. The schema lives in the catalog, separate from the data; every row in the table shares
-  it, so a row can be stored as just its values in column order.</p>
-  <p>A <strong>document</strong> is a self-describing tree of field/value pairs. Each document carries
-  its own field names and types inline, so two documents in the same collection can have entirely
-  different shapes. MongoDB's model is exactly this: "MongoDB stores data records as BSON documents …
-  composed of field-and-value pairs" where "the value of any field can be any BSON data type, including
-  other documents, arrays, and arrays of documents."
+  <p>In the conventional relational model, a <strong>row</strong> is interpreted through a table
+  <em>schema</em>: declared columns and their constraints live in catalog metadata rather than being
+  repeated in every row. Particular engines vary in how strictly they enforce column types, but the
+  shared schema still supplies the row's field names and positions.</p>
+  <p>A <strong>document</strong> is logically a tree of field/value pairs. In MongoDB, BSON stores those
+  pairs with field names and value types in each document, and values can include nested documents and
+  arrays. Consequently, documents in one collection can have different shapes. A typed document store
+  can represent the same logical tree with help from external schema metadata, so “document” does not by
+  itself require one physical encoding.
   <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">MongoDB Manual — Documents</a>]</span></p>
 
   <figure>
@@ -41,7 +42,7 @@
     <text class="dg-txt-s" x="50" y="52" text-anchor="middle">42</text><text class="dg-txt-s" x="114" y="52" text-anchor="middle">"Ada"</text><text class="dg-txt-s" x="178" y="52" text-anchor="middle">1815</text>
     <text class="dg-txt-s" x="20" y="84">schema (id, name, born) stored once, elsewhere</text>
 
-    <text class="dg-txt" x="300" y="24" font-weight="700">document: self-describing tree</text>
+    <text class="dg-txt" x="300" y="24" font-weight="700">this build: self-describing document</text>
     <rect class="dg-fill-2" x="300" y="34" width="240" height="120" rx="6"/>
     <text class="dg-txt-s" x="312" y="56">_id: 42</text>
     <text class="dg-txt-s" x="312" y="76">name: "Ada"</text>
@@ -49,32 +50,34 @@
     <text class="dg-txt-s" x="312" y="116">tags: ["math", "poetry"]</text>
     <text class="dg-txt-s" x="312" y="136">addr: { city: "London" }</text>
   </svg>
-  <figcaption>A row needs an external schema to interpret; a document carries its own structure.</figcaption>
+  <figcaption>The row uses shared schema metadata; this build repeats field names and value types in
+  each encoded document.</figcaption>
   </figure>
 
   <h2>What "schemaless" really means</h2>
-  <p>"Schemaless" does not mean "no structure" — every document is a precise byte string with a defined
-  layout. It means the structure is <strong>per-document</strong> and <strong>not enforced by the
-  engine</strong>. Consequences for the storage layer:</p>
+  <p>"Schemaless" does not mean "no structure." It means this project does not require one fixed field
+  layout for every document in a collection. A document still has a precise logical tree and encoded byte
+  representation. Other document databases may offer optional schema validation; the no-validator rule
+  below is a deliberate choice for this engine.</p>
   <ul>
-    <li><strong>Field names travel with the data.</strong> You can't store values positionally; each
-    document repeats its keys. (This is why binary document formats and field-name reuse matter —
-    Phase 6.2.)</li>
+    <li><strong>Field names travel with this project's encoded document.</strong> A separate per-type
+    schema could support positional encoding—as Isar v3 does—but arbitrary documents need their keys or
+    an equivalent dictionary in the encoded representation.</li>
     <li><strong>Documents are variable-length and irregular.</strong> Exactly the case Phase 4's slotted
     pages and overflow chains were built for. A document <em>is</em> a variable-length record.</li>
-    <li><strong>No declared types to validate against.</strong> Type information is encoded inside each
-    value, so the serializer must be self-describing (it records each value's type), not schema-driven.</li>
+    <li><strong>No collection-wide declared field types.</strong> This project therefore chooses a
+    self-describing value encoding. That is a design consequence here, not a law of every document
+    database: a typed document store can use a schema-driven binary layout.</li>
     <li><strong>The engine can't assume any field exists</strong> except the primary key. Indexing and
     queries must tolerate missing fields.</li>
   </ul>
 
   <h2>The one field the engine does require: <code>_id</code></h2>
-  <p>Even a schemaless store needs a stable, unique handle for each document so it can be addressed,
-  updated, and referenced by indexes. That handle is the primary key. Following MongoDB: "each document
-  stored in a standard collection requires a unique <code>_id</code> field that acts as a primary key,"
-  it "is always the first field," and "if an inserted document omits the <code>_id</code> field, the
-  MongoDB driver automatically generates" one; MongoDB "creates a unique index on the <code>_id</code>
-  field."
+  <p>This engine needs a stable, unique handle for each document so it can be addressed,
+  updated, and referenced by indexes. That handle is the primary key. MongoDB requires a unique
+  <code>_id</code> primary key in a standard collection, places that field first, creates a unique
+  <code>_id</code> index, and has the driver generate an identifier when an inserted document omits
+  one.
   <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">MongoDB Manual — Documents: the _id field</a>]</span></p>
   <p>Your engine adopts the same contract: every document has an <code>_id</code>; if the caller doesn't
   supply one, the engine assigns it; the <code>_id</code> uniquely identifies the document within its
@@ -82,25 +85,28 @@
   <code>_id</code> → the document's storage location (a Phase 4 <code>RecordId</code>).</p>
   <div class="box warn">
     <div class="box-title">⚠️ Design choice, not a universal law</div>
-    <p>MongoDB allows an <code>_id</code> of almost any BSON type (it auto-generates a 12-byte
-    <code>ObjectId</code> when absent). Your build will <em>simplify</em> to an integer <code>_id</code>
+    <p>MongoDB allows an <code>_id</code> of most BSON types and its drivers commonly generate an
+    <code>ObjectId</code> when the field is absent. Your build will <em>simplify</em> to an integer <code>_id</code>
     (like Isar's <code>Id</code>, an alias for <code>int</code>
-    <span class="src">[src: <a href="https://isar.dev/schema.html">Isar — the Id field is "an alias for int"</a>]</span>),
+    <span class="src">[src: pinned Isar v3.1.0+1
+    <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/schema.md"><code>docs/docs/schema.md</code></a>]</span>),
     because integer keys are trivial to order in a B+tree and auto-increment. State this assumption in
     your code; it's a simplification, not a requirement of the document model.</p>
   </div>
 
   <h2>Collections</h2>
-  <p>Documents are grouped into <strong>collections</strong> — "like a database table … can only contain
-  a single type of Dart object" in Isar's words, or a namespace of related documents in MongoDB.
-  <span class="src">[src: <a href="https://isar.dev/schema.html">Isar — "A collection is like a database table"</a>]</span>
+  <p>Documents are grouped into <strong>collections</strong>. MongoDB uses collections as namespaces for
+  documents whose shapes may differ. Isar v3 uses a stricter typed model: a collection corresponds to one
+  Dart object type.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/databases-and-collections/">MongoDB — databases and collections</a>;
+  pinned Isar v3.1.0+1 <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/schema.md"><code>docs/docs/schema.md</code></a>]</span>
   In your engine a collection is the pairing of (a) a record store holding the document bytes and (b) a
   primary index mapping <code>_id</code> → <code>RecordId</code>, plus any secondary indexes (6.5). Each
   collection is independent: its own key space, its own indexes.</p>
 
   <h2>The shape of the layer you're about to build</h2>
   <ul>
-    <li>A document is serialized to bytes by a self-describing format → <strong>6.2</strong>.</li>
+    <li>This build serializes a document to self-describing JSON bytes → <strong>6.2</strong>.</li>
     <li>Those bytes are stored as a record; <code>_id</code> → location lives in the primary index → <strong>6.3</strong>.</li>
     <li>Insert/find/update/delete operate through that mapping → <strong>6.4</strong>.</li>
     <li>Indexing other fields needs a second mapping value → <code>_id</code> → <strong>6.5</strong>.</li>
@@ -112,12 +118,14 @@
     <div class="checks">
       <p class="q">1. What is the key structural difference between a relational row and a document?</p>
       <details><summary>Show answer</summary><div class="answer">A row stores values positionally against
-      an external shared schema; a document is self-describing — it carries its own field names and types
-      inline, so documents in one collection can differ in shape.</div></details>
+      shared schema metadata; this build's JSON document carries field names and value syntax inline, so
+      documents in one collection can differ in shape. Other document stores may use a declared schema
+      and positional encoding.</div></details>
       <p class="q">2. Does "schemaless" mean documents have no structure? What does it actually mean?</p>
       <details><summary>Show answer</summary><div class="answer">No — each document has a precise byte
-      layout. It means structure is per-document and not enforced by the engine; types are encoded inside
-      each value rather than declared once.</div></details>
+      layout. Here it means the collection has no mandatory fixed field set or field-type declaration;
+      documents can differ in shape. Optional validation or a typed convenience layer could still be
+      added above storage.</div></details>
       <p class="q">3. Which single field does the engine require, and what role does it play?</p>
       <details><summary>Show answer</summary><div class="answer">The <code>_id</code> primary key: unique
       within the collection, auto-assigned if omitted, and the key of the primary index that maps to the
@@ -133,7 +141,7 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Docs:</strong> <a href="https://www.mongodb.com/docs/manual/core/document/">MongoDB — Documents &amp; the data model</a> (the model your engine emulates).</li>
-      <li><strong>Docs:</strong> <a href="https://isar.dev/schema.html">Isar — collections, the <code>Id</code> field</a> (an embedded-Dart take on the same ideas).</li>
+      <li><strong>Docs:</strong> pinned Isar v3.1.0+1 <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/schema.md">schema documentation</a> — collections and the <code>Id</code> field in a typed embedded store.</li>
       <li><strong>Forward link:</strong> 6.2 chooses how to turn a document into bytes; 6.3 stores those bytes keyed by <code>_id</code>.</li>
     </ul>
   </div>

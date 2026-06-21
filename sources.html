@@ -12,8 +12,9 @@
   <div class="crumbs"><a href="index.html">Home</a> › Sources</div>
   <h1>Sources &amp; annotated bibliography</h1>
   <p class="lead">Lessons are self-contained explanations. These links are evidence and optional
-  deeper reading, not missing chapters the learner must leave the site to understand. Web sources
-  on this page were opened and checked on <strong>June 20, 2026</strong>.</p>
+  deeper reading, not missing chapters the learner must leave the site to understand. Sources from the
+  Phase 0–5 review were checked on June 20, 2026; Phase 6 additions were checked on
+  <strong>June 21, 2026</strong>.</p>
 
   <div class="box deeper">
     <div class="box-title">Source policy</div>
@@ -49,12 +50,14 @@
   <h2>Serialization</h2>
   <ul>
     <li><a href="https://serde.rs/">Serde guide</a> — framework data model, derive, and attributes.</li>
-    <li><a href="https://docs.rs/serde_json/latest/serde_json/fn.to_vec.html"><code>serde_json::to_vec</code></a>,
-    <a href="https://docs.rs/serde_json/latest/serde_json/fn.from_slice.html"><code>from_slice</code></a>,
-    and <a href="https://docs.rs/serde_json/latest/serde_json/enum.Value.html"><code>Value</code></a>.</li>
-    <li><a href="https://bsonspec.org/">BSON specification</a> and
-    <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack specification</a> —
-    candidates to compare in the document phase.</li>
+    <li><a href="https://docs.rs/serde_json/1.0.145/serde_json/fn.to_vec.html"><code>serde_json::to_vec</code></a>,
+    <a href="https://docs.rs/serde_json/1.0.145/serde_json/fn.from_slice.html"><code>from_slice</code></a>,
+    and <a href="https://docs.rs/serde_json/1.0.145/serde_json/enum.Value.html"><code>Value</code></a>
+    at the version pinned by the Phase 6 build.</li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc8259">RFC 8259 (JSON)</a>,
+    <a href="https://bsonspec.org/">BSON specification</a>, and the pinned
+    <a href="https://github.com/msgpack/msgpack/blob/8aa09e2a6a9180a49fc62ecfefe149f063cc5e4b/spec.md">MessagePack specification</a>
+    — encoding contracts compared in Phase 6.</li>
   </ul>
 
   <h2>C ABI, header generation, and Dart/Flutter</h2>
@@ -104,17 +107,21 @@
 
   <h2>Document and embedded-engine references</h2>
   <ul>
-    <li><a href="https://github.com/isar/isar">Isar upstream repository</a> — Apache-2.0. Its current
-    README warns that v4 is not ready for production and directs production use to stable v3. Treat
-    branch/version architecture separately; do not blend v3 and v4 claims.</li>
-    <li><a href="https://deepwiki.com/isar/isar">DeepWiki Isar index</a> — useful secondary navigation,
-    not a substitute for repository source when making exact architecture claims.</li>
+    <li>Isar v3.1.0+1 at commit
+    <a href="https://github.com/isar/isar/tree/6643d064abf22606b6c6a741ea873e4781115ef4"><code>6643d064…</code></a>
+    — pinned source for the MDBX dependency, schema-driven object layout, index databases, C ABI, Dart
+    ports, and Apache-2.0 license discussed in Lesson 6.8. The
+    <a href="https://github.com/isar/isar#readme">current README</a> is used only for current v3/v4
+    status, checked June 21, 2026.</li>
     <li><a href="http://www.lmdb.tech/doc/">LMDB documentation</a> and
     <a href="https://libmdbx.dqdkfa.ru/">libmdbx documentation</a> — references for embedded
     B-tree/MVCC designs. Later lessons must cite the exact version and source file they discuss.</li>
     <li><a href="https://www.mongodb.com/docs/manual/data-modeling/">MongoDB data modeling</a>,
     <a href="https://www.mongodb.com/docs/manual/core/document/">documents</a>,
-    <a href="https://www.mongodb.com/docs/manual/crud/">CRUD operations</a>, and the
+    <a href="https://www.mongodb.com/docs/manual/crud/">CRUD operations</a>,
+    <a href="https://www.mongodb.com/docs/manual/core/index-sparse/">sparse indexes</a>,
+    <a href="https://www.mongodb.com/docs/manual/reference/bson-type-comparison-order/">comparison/type bracketing</a>,
+    and the
     <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">aggregation pipeline</a>.</li>
   </ul>
 

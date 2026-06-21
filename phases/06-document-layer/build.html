@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Build — collections + CRUD + index + filter</title>
+<title>Build — collections, CRUD, indexes, and filters</title>
 <link rel="stylesheet" href="../../assets/style.css">
 <script>window.PAGE = { id: "p6:build", root: "../../" };</script>
 </head>
@@ -11,96 +11,121 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 6</a> › Build</div>
   <span class="pill">Build · AI off</span>
-  <h1>Build: a document store with CRUD, a secondary index &amp; a filter planner</h1>
-  <div class="goal"><b>Goal:</b> Compose your record store (Phase 4) into a collection of schemaless
-  documents keyed by <code>_id</code>, support insert/get/replace/delete, build a secondary index on a
-  field, evaluate filter queries, and choose between an index lookup and a full scan — verified against a
-  scan oracle.</div>
+  <h1>Build: a JSON document collection with CRUD, an index, and a filter planner</h1>
+  <div class="goal"><b>Goal:</b> Layer one collection over the Phase 4 record store: validate and encode
+  documents, assign integer ids, rebuild derived indexes on open, maintain a sparse secondary index,
+  evaluate a precisely defined filter language, and prove index plans return the same rows as a scan.</div>
 
   <div class="box warn">
     <div class="box-title">⚠️ AI off</div>
-    <p>The document layer — id assignment, index maintenance, the query evaluator, and the planner — is
-    core database logic. No worked implementation here: only contracts, stubs, failing tests, and
-    graduated hints. Cite the BSON/MessagePack specs and the MongoDB Manual for behavior; write the code
-    yourself.</p>
+    <p>The evaluator, index maintenance, and planner are database-component logic. This page supplies
+    formats, contracts, <code>todo!()</code> stubs, failing tests, and graduated hints—not a working
+    implementation.</p>
   </div>
 
-  <h2>Deliverable</h2>
-  <p>A Rust 2024 module <code>docstore</code> built on your Phase 4 <code>recstore</code>: a
-  <code>DocStore</code> holding documents (modeled as <code>serde_json::Value</code> objects), each with
-  an integer <code>_id</code>. It supports <code>insert</code>, <code>get</code>, <code>replace</code>,
-  <code>delete</code>, <code>create_index</code>, and <code>find(&amp;Filter)</code> — with
-  <code>find</code> using a secondary index when one applies and a full scan otherwise, always returning
-  the same set as the scan baseline.</p>
+  <h2>Scope and honest layering</h2>
+  <p>This build uses <strong>UTF-8 JSON</strong> through <code>serde_json::Value</code>. The top level
+  must be an object. That keeps the bytes inspectable, but it does not provide BSON types or a native
+  binary value. A future codec change requires a persisted format version and migration.</p>
+  <p>The Phase 3 and Phase 5 implementations are not yet wired into one reusable stack, so this exercise
+  keeps primary and secondary indexes in memory and rebuilds them from record bytes on open. It does
+  <strong>not</strong> claim crash atomicity: a failed heap mutation can leave duplicate/orphan records
+  until the real Phase 5 transaction layer is integrated. Successful operations must keep in-memory
+  state coherent; open must reject duplicate ids as corruption.</p>
 
-  <h2>Fixed design decisions</h2>
+  <h2>Package dependency</h2>
+  <p>Keep the workspace on Rust edition 2024 and add a pinned JSON codec dependency to the crate that
+  owns <code>docstore.rs</code>. The Phase 2 and Phase 4 crates remain path dependencies as established
+  in their builds.</p>
+<span class="code-label">Cargo.toml</span>
+<pre><code>[dependencies]
+serde_json = <span class="tok-s">"=1.0.145"</span></code></pre>
+  <p class="src">[src: <a href="https://docs.rs/serde_json/1.0.145/serde_json/">serde_json
+  1.0.145 documentation</a>]</p>
+
+  <h2>Required Phase 4 extension</h2>
+  <p>Add one enumeration API to <code>RecStore</code>. It must visit each live record exactly once,
+  ignore tombstones/free/overflow pages as standalone records, preserve <code>RecordId</code>, and return
+  an error for malformed page structure. The implementation remains your work.</p>
+  <span class="code-label">append to the Phase 4 RecStore impl</span>
+<pre><code><span class="tok-k">pub fn</span> <span class="tok-f">scan</span>(&amp;<span class="tok-k">mut self</span>)
+    -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;(<span class="tok-f">RecordId</span>, <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;)&gt;&gt; {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"visit typed record pages and every live slot; reconstruct overflow payloads"</span>)
+}</code></pre>
+
+  <h2>Fixed project semantics</h2>
   <ul>
-    <li><strong>Document model:</strong> <code>serde_json::Value</code> that is a JSON object at the top
-    level. (You may swap the on-disk codec to MessagePack via <code>rmp_serde</code>; JSON keeps the
-    build debuggable. Record your choice.)</li>
-    <li><strong><code>_id</code>:</strong> an <code>i64</code> stored in the document under the key
-    <code>"_id"</code>. If absent on insert, assign <code>next_id</code> (a monotonically increasing
-    counter; never reuse a deleted id). If present, use it and reject a duplicate.</li>
-    <li><strong>Heap:</strong> serialized document bytes live in <code>RecStore</code>; insert returns a
-    <code>RecordId</code>.</li>
-    <li><strong>Primary index:</strong> <code>_id → RecordId</code>, kept as an in-memory
-    <code>BTreeMap&lt;i64, RecordId&gt;</code>. <em>Simplification:</em> rebuild it by scanning the heap
-    on <code>open</code>; persisting it as the Phase 3 B+tree is a labeled stretch goal. The heap (in the
-    pager file) is the source of truth.</li>
-    <li><strong>Secondary index:</strong> <code>field → (key → list of _id)</code> as
-    <code>BTreeMap&lt;Key, Vec&lt;i64&gt;&gt;</code>, also rebuilt on open. Keys are ordered by one total
-    order (the <code>Key</code> enum below).</li>
-    <li><strong>Indexable key types:</strong> only <code>Null</code>, <code>Bool</code>, integer
-    <code>Number</code>, and <code>String</code> are indexable; floats, arrays, and objects yield no
-    index entry (document this). This sidesteps float ordering and keeps one comparison rule for both the
-    index and the evaluator.</li>
-    <li><strong>Atomicity:</strong> in this build the in-memory indexes plus the heap write happen
-    together per operation; in a real engine all of it is one Phase 5 transaction. Note the gap.</li>
+    <li><strong>Ids:</strong> <code>_id</code> is an <code>i64</code>. Auto ids begin at 1 and increase
+    with checked arithmetic. An explicit id advances the next auto id if necessary. Deleted ids are not
+    reused. Exhaustion returns an error.</li>
+    <li><strong>Replace:</strong> <code>replace(id, doc)</code> inserts <code>id</code> when
+    <code>doc</code> omits <code>_id</code>, and rejects a different supplied id.</li>
+    <li><strong>Index definitions:</strong> the caller passes indexed field paths to
+    <code>create</code>/<code>open</code>. Definitions are not persisted in this exercise; a real catalog
+    is a required later integration. Open rebuilds exactly the requested indexes.</li>
+    <li><strong>Sparse secondary index:</strong> a missing path has no entry; explicit JSON
+    <code>null</code> does. Each key maps to a sorted set of ids, preventing duplicates.</li>
+    <li><strong>Indexable values:</strong> null, bool, integer, and string. Floats, arrays, and objects
+    receive no secondary-index entry.</li>
+    <li><strong>Field paths:</strong> split on <code>.</code>; reject empty segments. Object segments
+    are exact keys; array segments are non-negative decimal <code>usize</code> indexes. A failed step is
+    missing. Keys containing a literal dot are not addressable in this version.</li>
+    <li><strong>Eq/Ne:</strong> deep JSON equality/inequality, but any comparison leaf with a missing
+    field is false.</li>
+    <li><strong>Ranges:</strong> only integer-to-integer and string-to-string. All type mismatches and
+    unsupported values are false.</li>
+    <li><strong>In:</strong> the query value must be an array; the field matches when deeply equal to one
+    member. This build does not implement MongoDB's array-field expansion.</li>
+    <li><strong>Planner:</strong> only an indexable <code>Eq</code>, same-type range, or
+    <code>In</code> leaf may generate candidates. For top-level <code>And</code>, choose the first usable
+    indexed leaf. All other filters scan. Every candidate is fetched and checked against the
+    <em>complete</em> filter.</li>
   </ul>
 
   <h2>Ordered milestones</h2>
   <ol>
-    <li><strong>M1 — Collection &amp; primary index.</strong> <code>create</code>/<code>open</code>;
-    <code>insert</code> (assign/validate <code>_id</code>, serialize, store, index); <code>get</code> by
-    id; <code>open</code> rebuilds the primary index from a heap scan.</li>
-    <li><strong>M2 — Replace &amp; delete.</strong> Maintain the heap + primary index (and later secondary
-    indexes) on update/delete; relocation repoints the primary index; delete frees the record.</li>
-    <li><strong>M3 — The evaluator.</strong> <code>key_of</code>, dot-notation field access, and
-    <code>matches(&amp;Filter, &amp;Value) -&gt; bool</code> over Eq/Ne/Gt/Ge/Lt/Le/In + And/Or/Not/All.</li>
-    <li><strong>M4 — Full-scan find.</strong> <code>find</code> = iterate all docs, keep those that
-    match. This is your oracle.</li>
-    <li><strong>M5 — Secondary index + planner.</strong> <code>create_index(field)</code> (one-time
-    scan + incremental maintenance in insert/replace/delete); <code>find</code> uses an index for a
-    selective indexed condition and applies the rest as a residual — returning the same set as M4.</li>
+    <li><strong>M1 — Lifecycle.</strong> Compose <code>Pager::create/open</code> with
+    <code>RecStore::open</code>; implement <code>scan</code>; rebuild the primary index, requested
+    secondary indexes, and next-id state. Reject malformed JSON, non-object documents, bad ids, and
+    duplicate ids during open.</li>
+    <li><strong>M2 — CRUD.</strong> Normalize ids, serialize before mutating storage, insert/get,
+    replace by inserting new bytes then retiring the old record, and delete. Update every in-memory index
+    on successful operations.</li>
+    <li><strong>M3 — Evaluator.</strong> Resolve dot paths through objects and numeric array positions;
+    implement the exact missing/type/Eq/Ne/range/In semantics above plus And/Or/Not/All.</li>
+    <li><strong>M4 — Scan oracle.</strong> Evaluate every primary id in order. This is the correctness
+    reference.</li>
+    <li><strong>M5 — Secondary index and planner.</strong> Build sparse indexes, report the selected
+    <code>Plan</code>, generate/deduplicate candidate ids, then recheck the full predicate.</li>
   </ol>
 
   <h2>Acceptance criteria</h2>
   <ul>
-    <li>All five Rust tests below pass.</li>
-    <li><code>insert</code> assigns an <code>_id</code> when absent, honors an explicit one, and rejects a
-    duplicate; <code>get</code> round-trips the document.</li>
-    <li><code>find</code> with a full scan correctly evaluates equality, range, and boolean-combined
-    filters.</li>
-    <li>After <code>create_index</code>, <code>find</code> on the indexed field returns exactly the same
-    document set as the full-scan oracle (asserted by comparing the two).</li>
-    <li><code>replace</code> and <code>delete</code> keep every index consistent: a query on a changed
-    field no longer returns the stale match, and a deleted document disappears from id, scan, and index
-    results.</li>
-    <li><em>Manual/external:</em> wrapping each operation in one Phase 5 transaction (crash atomicity)
-    and persisting the indexes as B+trees are labeled stretch goals, not covered by these tests.</li>
+    <li>All nine supplied tests pass unchanged.</li>
+    <li>Auto and explicit ids cannot collide or wrap; duplicate ids and invalid documents are rejected.</li>
+    <li>Replace preserves the requested id; delete and replace remove stale secondary entries.</li>
+    <li>Missing, explicit null, cross-type ranges, <code>Ne</code>, <code>Not</code>, and
+    <code>In</code> follow the written contract.</li>
+    <li>Equality and range index plans return exactly the scan oracle's ids.</li>
+    <li>Reopen reconstructs primary/secondary indexes and the next auto id from live records.</li>
+    <li>Manual integration check: route record and persisted B+tree mutations through one Phase 5
+    transaction before claiming crash atomicity; persist collection/index definitions in a catalog.</li>
   </ul>
 
-  <h2>Stub: <code>src/docstore.rs</code></h2>
+  <h2>Stubs: <code>src/docstore.rs</code></h2>
   <span class="code-label">src/docstore.rs — implement every todo!()</span>
-<pre><code><span class="tok-k">use</span> std::collections::BTreeMap;
+<pre><code><span class="tok-k">use</span> std::collections::{BTreeMap, BTreeSet};
+<span class="tok-k">use</span> pager::{BlockIo, Pager, PagerError};
+<span class="tok-k">use</span> recstore::{RecError, RecordId, RecStore};
 <span class="tok-k">use</span> serde_json::Value;
-<span class="tok-k">use</span> recstore::{RecStore, RecordId, RecError};
-<span class="tok-k">use</span> pager::BlockIo;
 
-<span class="tok-c">// One total order across the indexable value types (design decision above).</span>
-<span class="tok-c">// Derived Ord ranks by variant order first, then by contained value.</span>
 <span class="tok-m">#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]</span>
-<span class="tok-k">pub enum</span> <span class="tok-f">Key</span> { Null, Bool(<span class="tok-f">bool</span>), Int(<span class="tok-f">i64</span>), Str(<span class="tok-f">String</span>) }
+<span class="tok-k">pub enum</span> <span class="tok-f">Key</span> {
+    Null,
+    Bool(<span class="tok-f">bool</span>),
+    Int(<span class="tok-f">i64</span>),
+    Str(<span class="tok-f">String</span>),
+}
 
 <span class="tok-m">#[derive(Clone, Copy, Debug, PartialEq, Eq)]</span>
 <span class="tok-k">pub enum</span> <span class="tok-f">Cmp</span> { Eq, Ne, Gt, Ge, Lt, Le, In }
@@ -114,213 +139,292 @@
     All,
 }
 
+<span class="tok-m">#[derive(Clone, Debug, PartialEq, Eq)]</span>
+<span class="tok-k">pub enum</span> <span class="tok-f">Plan</span> {
+    FullScan,
+    Index { field: <span class="tok-f">String</span> },
+}
+
 <span class="tok-m">#[derive(Debug)]</span>
 <span class="tok-k">pub enum</span> <span class="tok-f">DocError</span> {
+    Pager(<span class="tok-f">PagerError</span>),
     Rec(<span class="tok-f">RecError</span>),
     Serde(<span class="tok-f">String</span>),
     Duplicate(<span class="tok-f">i64</span>),
+    IdExhausted,
     NotFound,
     BadDocument(&amp;<span class="tok-k">'static</span> <span class="tok-f">str</span>),
+    Corrupt(&amp;<span class="tok-k">'static</span> <span class="tok-f">str</span>),
+}
+<span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;<span class="tok-f">PagerError</span>&gt; <span class="tok-k">for</span> <span class="tok-f">DocError</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: <span class="tok-f">PagerError</span>) -&gt; <span class="tok-k">Self</span> { <span class="tok-f">Self</span>::<span class="tok-f">Pager</span>(e) }
 }
 <span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;<span class="tok-f">RecError</span>&gt; <span class="tok-k">for</span> <span class="tok-f">DocError</span> {
-    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: <span class="tok-f">RecError</span>) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">DocError</span>::<span class="tok-f">Rec</span>(e) }
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: <span class="tok-f">RecError</span>) -&gt; <span class="tok-k">Self</span> { <span class="tok-f">Self</span>::<span class="tok-f">Rec</span>(e) }
 }
 <span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;serde_json::Error&gt; <span class="tok-k">for</span> <span class="tok-f">DocError</span> {
-    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: serde_json::Error) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">DocError</span>::<span class="tok-f">Serde</span>(e.<span class="tok-f">to_string</span>()) }
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: serde_json::Error) -&gt; <span class="tok-k">Self</span> {
+        <span class="tok-f">Self</span>::<span class="tok-f">Serde</span>(e.<span class="tok-f">to_string</span>())
+    }
 }
-<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">DocError</span>&gt;;
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; =
+    std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">DocError</span>&gt;;
 
 <span class="tok-k">pub struct</span> <span class="tok-f">DocStore</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; {
     rec: <span class="tok-f">RecStore</span>&lt;<span class="tok-f">B</span>&gt;,
     primary: <span class="tok-f">BTreeMap</span>&lt;<span class="tok-f">i64</span>, <span class="tok-f">RecordId</span>&gt;,
-    secondary: <span class="tok-f">BTreeMap</span>&lt;<span class="tok-f">String</span>, <span class="tok-f">BTreeMap</span>&lt;<span class="tok-f">Key</span>, <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt;&gt;&gt;,
-    next_id: <span class="tok-f">i64</span>,
+    index_fields: <span class="tok-f">BTreeSet</span>&lt;<span class="tok-f">String</span>&gt;,
+    secondary: <span class="tok-f">BTreeMap</span>&lt;<span class="tok-f">String</span>,
+        <span class="tok-f">BTreeMap</span>&lt;<span class="tok-f">Key</span>, <span class="tok-f">BTreeSet</span>&lt;<span class="tok-f">i64</span>&gt;&gt;&gt;,
+    next_id: <span class="tok-f">Option</span>&lt;<span class="tok-f">i64</span>&gt;,
 }
 
 <span class="tok-k">impl</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; <span class="tok-f">DocStore</span>&lt;<span class="tok-f">B</span>&gt; {
-    <span class="tok-c">// ---- lifecycle (M1) ----</span>
-    <span class="tok-k">pub fn</span> <span class="tok-f">create</span>(io: <span class="tok-f">B</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: RecStore::create(io, ...); empty indexes; next_id = 1"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">create</span>(
+        io: <span class="tok-f">B</span>,
+        page_size: <span class="tok-f">u16</span>,
+        cache_capacity: <span class="tok-f">usize</span>,
+        index_fields: <span class="tok-f">Vec</span>&lt;<span class="tok-f">String</span>&gt;,
+    ) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-k">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: Pager::create; RecStore::open; normalize requested index paths; empty state"</span>)
     }
-    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(io: <span class="tok-f">B</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: open RecStore; scan all records; rebuild primary index + next_id (+ any indexes)"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(
+        io: <span class="tok-f">B</span>,
+        cache_capacity: <span class="tok-f">usize</span>,
+        index_fields: <span class="tok-f">Vec</span>&lt;<span class="tok-f">String</span>&gt;,
+    ) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-k">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: Pager::open + RecStore::open; scan/validate docs; reject duplicate ids; rebuild indexes and checked next_id"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">into_inner</span>(<span class="tok-k">self</span>) -&gt; <span class="tok-f">B</span> {
+        <span class="tok-k">self</span>.rec.<span class="tok-f">into_pager</span>().<span class="tok-f">into_inner</span>()
     }
 
-    <span class="tok-c">// ---- CRUD (M1/M2) ----</span>
     <span class="tok-k">pub fn</span> <span class="tok-f">insert</span>(&amp;<span class="tok-k">mut self</span>, doc: <span class="tok-f">Value</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">i64</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M1/M5: ensure _id; serialize; rec.insert; primary.insert; add to each secondary index"</span>)
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: require object; assign/validate id; serialize first; reject duplicate/exhaustion; insert record; update all indexes"</span>)
     }
-    <span class="tok-k">pub fn</span> <span class="tok-f">get</span>(&amp;<span class="tok-k">mut self</span>, id: <span class="tok-f">i64</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Option</span>&lt;<span class="tok-f">Value</span>&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: primary[id] -&gt; RecordId -&gt; rec.get -&gt; deserialize"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">get</span>(&amp;<span class="tok-k">mut self</span>, id: <span class="tok-f">i64</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Option</span>&lt;<span class="tok-f">Value</span>&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: primary id to RecordId; rec.get; deserialize and revalidate id"</span>)
     }
-    <span class="tok-k">pub fn</span> <span class="tok-f">replace</span>(&amp;<span class="tok-k">mut self</span>, id: <span class="tok-f">i64</span>, doc: <span class="tok-f">Value</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M2/M5: read old doc; remove its index entries; write new bytes (relocate if needed); repoint primary; add new index entries"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">replace</span>(&amp;<span class="tok-k">mut self</span>, id: <span class="tok-f">i64</span>, doc: <span class="tok-f">Value</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: require existing; normalize _id; serialize; insert new record; swap primary/index entries; retire old record; document non-atomic failure gap"</span>)
     }
-    <span class="tok-k">pub fn</span> <span class="tok-f">delete</span>(&amp;<span class="tok-k">mut self</span>, id: <span class="tok-f">i64</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">bool</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M2/M5: read doc; remove from each secondary index; remove primary entry; rec.delete"</span>)
-    }
-
-    <span class="tok-c">// ---- evaluator (M3) ----</span>
-    <span class="tok-k">fn</span> <span class="tok-f">key_of</span>(v: &amp;<span class="tok-f">Value</span>) -&gt; <span class="tok-f">Option</span>&lt;<span class="tok-f">Key</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: map null/bool/int/string -&gt; Key; float/array/object -&gt; None"</span>)
-    }
-    <span class="tok-k">fn</span> <span class="tok-f">field</span>&lt;<span class="tok-k">'a</span>&gt;(doc: &amp;<span class="tok-k">'a</span> <span class="tok-f">Value</span>, path: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">Option</span>&lt;&amp;<span class="tok-k">'a</span> <span class="tok-f">Value</span>&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: dot-notation walk: split on '.', descend objects, index arrays by number"</span>)
-    }
-    <span class="tok-k">pub fn</span> <span class="tok-f">matches</span>(f: &amp;<span class="tok-f">Filter</span>, doc: &amp;<span class="tok-f">Value</span>) -&gt; <span class="tok-f">bool</span> {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: recursive; Compare resolves field + key_of + Cmp using Key ordering; And/Or/Not/All"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">delete</span>(&amp;<span class="tok-k">mut self</span>, id: <span class="tok-f">i64</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">bool</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: read old doc; delete record; only after success remove primary and secondary entries"</span>)
     }
 
-    <span class="tok-c">// ---- find: scan + planner (M4/M5) ----</span>
-    <span class="tok-k">pub fn</span> <span class="tok-f">find</span>(&amp;<span class="tok-k">mut self</span>, filter: &amp;<span class="tok-f">Filter</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;(<span class="tok-f">i64</span>, <span class="tok-f">Value</span>)&gt;&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: pick candidate ids via an indexed condition if any, else all ids (M4); fetch each; keep those where matches(filter, doc); sort by id"</span>)
+    <span class="tok-k">fn</span> <span class="tok-f">field</span>&lt;<span class="tok-k">'a</span>&gt;(doc: &amp;<span class="tok-k">'a</span> <span class="tok-f">Value</span>, path: &amp;<span class="tok-f">str</span>)
+        -&gt; <span class="tok-f">Option</span>&lt;&amp;<span class="tok-k">'a</span> <span class="tok-f">Value</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: reject empty segments; descend object names or numeric array positions"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">key_of</span>(value: &amp;<span class="tok-f">Value</span>) -&gt; <span class="tok-f">Option</span>&lt;<span class="tok-f">Key</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: null/bool/i64/string only"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">matches</span>(filter: &amp;<span class="tok-f">Filter</span>, doc: &amp;<span class="tok-f">Value</span>) -&gt; <span class="tok-f">bool</span> {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: exact missing, deep Eq/Ne, same-type range, In-array, and boolean semantics"</span>)
     }
 
-    <span class="tok-c">// ---- secondary index (M5) ----</span>
-    <span class="tok-k">pub fn</span> <span class="tok-f">create_index</span>(&amp;<span class="tok-k">mut self</span>, field: &amp;<span class="tok-f">str</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
-        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: scan all docs; for each, key_of(field) -&gt; push id into secondary[field][key]"</span>)
+    <span class="tok-k">pub fn</span> <span class="tok-f">plan</span>(&amp;<span class="tok-k">self</span>, filter: &amp;<span class="tok-f">Filter</span>) -&gt; <span class="tok-f">Plan</span> {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: direct usable Compare or first usable top-level And child; otherwise FullScan"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">find_scan</span>(&amp;<span class="tok-k">mut self</span>, filter: &amp;<span class="tok-f">Filter</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;(<span class="tok-f">i64</span>, <span class="tok-f">Value</span>)&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: snapshot sorted primary ids; get each doc; retain full-filter matches"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">find</span>(&amp;<span class="tok-k">mut self</span>, filter: &amp;<span class="tok-f">Filter</span>)
+        -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;(<span class="tok-f">i64</span>, <span class="tok-f">Value</span>)&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: execute plan; deduplicate candidate ids; fetch; recheck complete filter; sort by id"</span>)
     }
 }</code></pre>
 
   <h2>Failing tests</h2>
-  <span class="code-label">append to src/docstore.rs</span>
+  <span class="code-label">append as inline unit tests in src/docstore.rs</span>
 <pre><code><span class="tok-m">#[cfg(test)]</span>
 <span class="tok-k">mod</span> tests {
     <span class="tok-k">use super</span>::*;
-    <span class="tok-k">use</span> serde_json::json;
     <span class="tok-k">use</span> pager::MemBlock;
+    <span class="tok-k">use</span> serde_json::json;
 
-    <span class="tok-k">fn</span> <span class="tok-f">fresh</span>() -&gt; <span class="tok-f">DocStore</span>&lt;<span class="tok-f">MemBlock</span>&gt; {
-        <span class="tok-f">DocStore</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() }).<span class="tok-f">unwrap</span>()
+    <span class="tok-k">fn</span> <span class="tok-f">fresh</span>(indexes: &amp;[&amp;<span class="tok-k">str</span>]) -&gt; <span class="tok-f">DocStore</span>&lt;<span class="tok-f">MemBlock</span>&gt; {
+        <span class="tok-f">DocStore</span>::<span class="tok-f">create</span>(
+            <span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(),
+            4096,
+            8,
+            indexes.<span class="tok-f">iter</span>().<span class="tok-f">map</span>(|s| (*s).<span class="tok-f">to_string</span>()).<span class="tok-f">collect</span>(),
+        ).<span class="tok-f">unwrap</span>()
     }
-    <span class="tok-c">// scan oracle: brute-force the filter over every document</span>
-    <span class="tok-k">fn</span> <span class="tok-f">oracle</span>(s: &amp;<span class="tok-k">mut</span> <span class="tok-f">DocStore</span>&lt;<span class="tok-f">MemBlock</span>&gt;, f: &amp;<span class="tok-f">Filter</span>) -&gt; <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt; {
-        <span class="tok-k">let</span> ids: <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt; = s.primary.<span class="tok-f">keys</span>().<span class="tok-f">copied</span>().<span class="tok-f">collect</span>();
-        <span class="tok-k">let mut</span> out = <span class="tok-f">Vec</span>::<span class="tok-f">new</span>();
-        <span class="tok-k">for</span> id <span class="tok-k">in</span> ids {
-            <span class="tok-k">let</span> d = s.<span class="tok-f">get</span>(id).<span class="tok-f">unwrap</span>().<span class="tok-f">unwrap</span>();
-            <span class="tok-k">if</span> <span class="tok-f">DocStore</span>::&lt;<span class="tok-f">MemBlock</span>&gt;::<span class="tok-f">matches</span>(f, &amp;d) { out.<span class="tok-f">push</span>(id); }
+    <span class="tok-k">fn</span> <span class="tok-f">ids</span>(rows: <span class="tok-f">Vec</span>&lt;(<span class="tok-f">i64</span>, <span class="tok-f">Value</span>)&gt;) -&gt; <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt; {
+        rows.<span class="tok-f">into_iter</span>().<span class="tok-f">map</span>(|(id, _)| id).<span class="tok-f">collect</span>()
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">eq</span>(field: &amp;<span class="tok-k">str</span>, value: <span class="tok-f">Value</span>) -&gt; <span class="tok-f">Filter</span> {
+        <span class="tok-f">Filter</span>::<span class="tok-f">Compare</span> { field: field.<span class="tok-f">into</span>(), op: <span class="tok-f">Cmp</span>::<span class="tok-f">Eq</span>, value }
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">ids_are_assigned_advanced_and_not_duplicated</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>(&amp;[]);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"x"</span>: 1})).<span class="tok-f">unwrap</span>(), 1);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: 10, <span class="tok-s">"x"</span>: 2})).<span class="tok-f">unwrap</span>(), 10);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"x"</span>: 3})).<span class="tok-f">unwrap</span>(), 11);
+        <span class="tok-m">assert!</span>(<span class="tok-f">matches!</span>(
+            s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: 10})),
+            <span class="tok-f">Err</span>(<span class="tok-f">DocError</span>::<span class="tok-f">Duplicate</span>(10))
+        ));
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(11).<span class="tok-f">unwrap</span>().<span class="tok-f">unwrap</span>()[<span class="tok-s">"_id"</span>], <span class="tok-f">json!</span>(11));
+
+        <span class="tok-k">let mut</span> exhausted = <span class="tok-f">fresh</span>(&amp;[]);
+        exhausted.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: <span class="tok-f">i64</span>::<span class="tok-f">MAX</span>})).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert!</span>(<span class="tok-f">matches!</span>(
+            exhausted.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"x"</span>: 1})),
+            <span class="tok-f">Err</span>(<span class="tok-f">DocError</span>::<span class="tok-f">IdExhausted</span>)
+        ));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">invalid_documents_and_conflicting_replace_ids_fail</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>(&amp;[]);
+        <span class="tok-m">assert!</span>(<span class="tok-f">matches!</span>(s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>([1, 2])), <span class="tok-f">Err</span>(<span class="tok-f">DocError</span>::<span class="tok-f">BadDocument</span>(_))));
+        <span class="tok-m">assert!</span>(<span class="tok-f">matches!</span>(s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: <span class="tok-s">"x"</span>})), <span class="tok-f">Err</span>(<span class="tok-f">DocError</span>::<span class="tok-f">BadDocument</span>(_))));
+        <span class="tok-k">let</span> id = s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"x"</span>: 1})).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert!</span>(<span class="tok-f">matches!</span>(s.<span class="tok-f">replace</span>(id, <span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: id + 1})), <span class="tok-f">Err</span>(<span class="tok-f">DocError</span>::<span class="tok-f">BadDocument</span>(_))));
+        s.<span class="tok-f">replace</span>(id, <span class="tok-f">json!</span>({<span class="tok-s">"x"</span>: 2})).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">get</span>(id).<span class="tok-f">unwrap</span>().<span class="tok-f">unwrap</span>()[<span class="tok-s">"_id"</span>], <span class="tok-f">json!</span>(id));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">comparison_contract_covers_missing_types_not_and_in</span>() {
+        <span class="tok-k">let</span> doc = <span class="tok-f">json!</span>({
+            <span class="tok-s">"n"</span>: 5,
+            <span class="tok-s">"nil"</span>: <span class="tok-f">null</span>,
+            <span class="tok-s">"s"</span>: <span class="tok-s">"five"</span>,
+            <span class="tok-s">"nested"</span>: { <span class="tok-s">"items"</span>: [{ <span class="tok-s">"v"</span>: 7 }] }
+        });
+        <span class="tok-k">let</span> cmp = |field: &amp;<span class="tok-k">str</span>, op, value| <span class="tok-f">Filter</span>::<span class="tok-f">Compare</span> { field: field.<span class="tok-f">into</span>(), op, value };
+        <span class="tok-m">assert!</span>(<span class="tok-f">DocStore</span>::&lt;<span class="tok-f">MemBlock</span>&gt;::<span class="tok-f">matches</span>(&amp;eq(<span class="tok-s">"nested.items.0.v"</span>, <span class="tok-f">json!</span>(7)), &amp;doc));
+        <span class="tok-m">assert!</span>(!<span class="tok-f">DocStore</span>::&lt;<span class="tok-f">MemBlock</span>&gt;::<span class="tok-f">matches</span>(&amp;cmp(<span class="tok-s">"missing"</span>, <span class="tok-f">Cmp</span>::<span class="tok-f">Ne</span>, <span class="tok-f">json!</span>(1)), &amp;doc));
+        <span class="tok-m">assert!</span>(<span class="tok-f">DocStore</span>::&lt;<span class="tok-f">MemBlock</span>&gt;::<span class="tok-f">matches</span>(&amp;<span class="tok-f">Filter</span>::<span class="tok-f">Not</span>(<span class="tok-f">Box</span>::<span class="tok-f">new</span>(eq(<span class="tok-s">"missing"</span>, <span class="tok-f">json!</span>(1)))), &amp;doc));
+        <span class="tok-m">assert!</span>(!<span class="tok-f">DocStore</span>::&lt;<span class="tok-f">MemBlock</span>&gt;::<span class="tok-f">matches</span>(&amp;cmp(<span class="tok-s">"s"</span>, <span class="tok-f">Cmp</span>::<span class="tok-f">Gt</span>, <span class="tok-f">json!</span>(4)), &amp;doc));
+        <span class="tok-m">assert!</span>(<span class="tok-f">DocStore</span>::&lt;<span class="tok-f">MemBlock</span>&gt;::<span class="tok-f">matches</span>(&amp;cmp(<span class="tok-s">"n"</span>, <span class="tok-f">Cmp</span>::<span class="tok-f">In</span>, <span class="tok-f">json!</span>([4, 5, 6])), &amp;doc));
+        <span class="tok-m">assert!</span>(<span class="tok-f">DocStore</span>::&lt;<span class="tok-f">MemBlock</span>&gt;::<span class="tok-f">matches</span>(&amp;eq(<span class="tok-s">"nil"</span>, <span class="tok-f">Value</span>::<span class="tok-f">Null</span>), &amp;doc));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">equality_index_matches_scan_and_omits_missing</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>(&amp;[<span class="tok-s">"city"</span>]);
+        s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"London"</span>})).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-f">null</span>})).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"name"</span>: <span class="tok-s">"missing city"</span>})).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> f = eq(<span class="tok-s">"city"</span>, <span class="tok-f">Value</span>::<span class="tok-f">Null</span>);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">plan</span>(&amp;f), <span class="tok-f">Plan</span>::<span class="tok-f">Index</span> { field: <span class="tok-s">"city"</span>.<span class="tok-f">into</span>() });
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()), <span class="tok-f">ids</span>(s.<span class="tok-f">find_scan</span>(&amp;f).<span class="tok-f">unwrap</span>()));
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()).<span class="tok-f">len</span>(), 1);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">range_index_with_residual_matches_scan</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>(&amp;[<span class="tok-s">"age"</span>]);
+        <span class="tok-k">for</span> (age, city) <span class="tok-k">in</span> [(25, <span class="tok-s">"London"</span>), (31, <span class="tok-s">"London"</span>), (40, <span class="tok-s">"Paris"</span>)] {
+            s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"age"</span>: age, <span class="tok-s">"city"</span>: city})).<span class="tok-f">unwrap</span>();
         }
-        out.<span class="tok-f">sort</span>();
-        out
-    }
-    <span class="tok-k">fn</span> <span class="tok-f">ids_of</span>(rows: <span class="tok-f">Vec</span>&lt;(<span class="tok-f">i64</span>, <span class="tok-f">Value</span>)&gt;) -&gt; <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt; {
-        <span class="tok-k">let mut</span> v: <span class="tok-f">Vec</span>&lt;<span class="tok-f">i64</span>&gt; = rows.<span class="tok-f">into_iter</span>().<span class="tok-f">map</span>(|(id, _)| id).<span class="tok-f">collect</span>();
-        v.<span class="tok-f">sort</span>(); v
-    }
-
-    <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">insert_assigns_id_and_roundtrips</span>() {
-        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
-        <span class="tok-k">let</span> id = s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"London"</span>, <span class="tok-s">"age"</span>: 31})).<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let</span> got = s.<span class="tok-f">get</span>(id).<span class="tok-f">unwrap</span>().<span class="tok-f">unwrap</span>();
-        <span class="tok-m">assert_eq!</span>(got[<span class="tok-s">"city"</span>], <span class="tok-f">json!</span>(<span class="tok-s">"London"</span>));
-        <span class="tok-m">assert_eq!</span>(got[<span class="tok-s">"_id"</span>], <span class="tok-f">json!</span>(id));
-    }
-
-    <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">explicit_id_honored_and_dup_rejected</span>() {
-        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
-        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: 100, <span class="tok-s">"x"</span>: 1})).<span class="tok-f">unwrap</span>(), 100);
-        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: 100, <span class="tok-s">"x"</span>: 2})), <span class="tok-f">Err</span>(<span class="tok-f">DocError</span>::<span class="tok-f">Duplicate</span>(100))));
-    }
-
-    <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">full_scan_equality_and_range</span>() {
-        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
-        s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"London"</span>, <span class="tok-s">"age"</span>: 31})).<span class="tok-f">unwrap</span>();
-        s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"London"</span>, <span class="tok-s">"age"</span>: 25})).<span class="tok-f">unwrap</span>();
-        s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"Paris"</span>,  <span class="tok-s">"age"</span>: 40})).<span class="tok-f">unwrap</span>();
         <span class="tok-k">let</span> f = <span class="tok-f">Filter</span>::<span class="tok-f">And</span>(<span class="tok-f">vec!</span>[
-            <span class="tok-f">Filter</span>::<span class="tok-f">Compare</span> { field: <span class="tok-s">"city"</span>.<span class="tok-f">into</span>(), op: <span class="tok-f">Cmp</span>::<span class="tok-f">Eq</span>, value: <span class="tok-f">json!</span>(<span class="tok-s">"London"</span>) },
-            <span class="tok-f">Filter</span>::<span class="tok-f">Compare</span> { field: <span class="tok-s">"age"</span>.<span class="tok-f">into</span>(),  op: <span class="tok-f">Cmp</span>::<span class="tok-f">Gt</span>, value: <span class="tok-f">json!</span>(30) },
+            <span class="tok-f">Filter</span>::<span class="tok-f">Compare</span> { field: <span class="tok-s">"age"</span>.<span class="tok-f">into</span>(), op: <span class="tok-f">Cmp</span>::<span class="tok-f">Gt</span>, value: <span class="tok-f">json!</span>(30) },
+            eq(<span class="tok-s">"city"</span>, <span class="tok-f">json!</span>(<span class="tok-s">"London"</span>)),
         ]);
-        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids_of</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()), <span class="tok-f">oracle</span>(&amp;<span class="tok-k">mut</span> s, &amp;f));
-        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids_of</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()).<span class="tok-f">len</span>(), 1);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">plan</span>(&amp;f), <span class="tok-f">Plan</span>::<span class="tok-f">Index</span> { field: <span class="tok-s">"age"</span>.<span class="tok-f">into</span>() });
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()), <span class="tok-f">ids</span>(s.<span class="tok-f">find_scan</span>(&amp;f).<span class="tok-f">unwrap</span>()));
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()).<span class="tok-f">len</span>(), 1);
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">index_returns_same_as_scan</span>() {
-        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
-        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0..50 {
-            <span class="tok-k">let</span> city = <span class="tok-k">if</span> i % 3 == 0 { <span class="tok-s">"London"</span> } <span class="tok-k">else</span> { <span class="tok-s">"Paris"</span> };
-            s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: city, <span class="tok-s">"age"</span>: i})).<span class="tok-f">unwrap</span>();
-        }
-        s.<span class="tok-f">create_index</span>(<span class="tok-s">"city"</span>).<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let</span> f = <span class="tok-f">Filter</span>::<span class="tok-f">Compare</span> { field: <span class="tok-s">"city"</span>.<span class="tok-f">into</span>(), op: <span class="tok-f">Cmp</span>::<span class="tok-f">Eq</span>, value: <span class="tok-f">json!</span>(<span class="tok-s">"London"</span>) };
-        <span class="tok-c">// index-served result must equal the scan oracle</span>
-        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids_of</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()), <span class="tok-f">oracle</span>(&amp;<span class="tok-k">mut</span> s, &amp;f));
+    <span class="tok-k">fn</span> <span class="tok-f">or_uses_scan</span>() {
+        <span class="tok-k">let</span> s = <span class="tok-f">fresh</span>(&amp;[<span class="tok-s">"city"</span>]);
+        <span class="tok-k">let</span> f = <span class="tok-f">Filter</span>::<span class="tok-f">Or</span>(<span class="tok-f">vec!</span>[eq(<span class="tok-s">"city"</span>, <span class="tok-f">json!</span>(<span class="tok-s">"London"</span>)), eq(<span class="tok-s">"city"</span>, <span class="tok-f">json!</span>(<span class="tok-s">"Paris"</span>))]);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">plan</span>(&amp;f), <span class="tok-f">Plan</span>::<span class="tok-f">FullScan</span>);
     }
 
     <span class="tok-m">#[test]</span>
-    <span class="tok-k">fn</span> <span class="tok-f">replace_and_delete_maintain_indexes</span>() {
-        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>();
+    <span class="tok-k">fn</span> <span class="tok-f">replace_and_delete_remove_stale_index_entries</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>(&amp;[<span class="tok-s">"city"</span>]);
         <span class="tok-k">let</span> a = s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"London"</span>})).<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let</span> _b = s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"London"</span>})).<span class="tok-f">unwrap</span>();
-        s.<span class="tok-f">create_index</span>(<span class="tok-s">"city"</span>).<span class="tok-f">unwrap</span>();
-        <span class="tok-k">let</span> f = <span class="tok-f">Filter</span>::<span class="tok-f">Compare</span> { field: <span class="tok-s">"city"</span>.<span class="tok-f">into</span>(), op: <span class="tok-f">Cmp</span>::<span class="tok-f">Eq</span>, value: <span class="tok-f">json!</span>(<span class="tok-s">"London"</span>) };
-        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids_of</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()).<span class="tok-f">len</span>(), 2);
-        <span class="tok-c">// move a out of London, delete the other</span>
-        s.<span class="tok-f">replace</span>(a, <span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: a, <span class="tok-s">"city"</span>: <span class="tok-s">"Paris"</span>})).<span class="tok-f">unwrap</span>();
-        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids_of</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()), <span class="tok-f">oracle</span>(&amp;<span class="tok-k">mut</span> s, &amp;f));
-        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids_of</span>(s.<span class="tok-f">find</span>(&amp;f).<span class="tok-f">unwrap</span>()).<span class="tok-f">len</span>(), 1);
-        <span class="tok-m">assert!</span>(s.<span class="tok-f">delete</span>(a).<span class="tok-f">unwrap</span>());
-        <span class="tok-m">assert!</span>(s.<span class="tok-f">get</span>(a).<span class="tok-f">unwrap</span>().<span class="tok-f">is_none</span>());
+        <span class="tok-k">let</span> b = s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"London"</span>})).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">replace</span>(a, <span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"Paris"</span>})).<span class="tok-f">unwrap</span>();
+        s.<span class="tok-f">delete</span>(b).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> london = eq(<span class="tok-s">"city"</span>, <span class="tok-f">json!</span>(<span class="tok-s">"London"</span>));
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids</span>(s.<span class="tok-f">find</span>(&amp;london).<span class="tok-f">unwrap</span>()), <span class="tok-f">Vec</span>::&lt;<span class="tok-f">i64</span>&gt;::<span class="tok-f">new</span>());
+        <span class="tok-m">assert!</span>(s.<span class="tok-f">get</span>(b).<span class="tok-f">unwrap</span>().<span class="tok-f">is_none</span>());
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">reopen_rebuilds_indexes_and_next_id</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>(&amp;[<span class="tok-s">"city"</span>]);
+        s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"_id"</span>: 40, <span class="tok-s">"city"</span>: <span class="tok-s">"London"</span>})).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> io = s.<span class="tok-f">into_inner</span>();
+        <span class="tok-k">let mut</span> s = <span class="tok-f">DocStore</span>::<span class="tok-f">open</span>(io, 8, <span class="tok-f">vec!</span>[<span class="tok-s">"city"</span>.<span class="tok-f">into</span>()]).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(<span class="tok-f">ids</span>(s.<span class="tok-f">find</span>(&amp;eq(<span class="tok-s">"city"</span>, <span class="tok-f">json!</span>(<span class="tok-s">"London"</span>))).<span class="tok-f">unwrap</span>()), <span class="tok-f">vec!</span>[40]);
+        <span class="tok-m">assert_eq!</span>(s.<span class="tok-f">insert</span>(<span class="tok-f">json!</span>({<span class="tok-s">"city"</span>: <span class="tok-s">"Paris"</span>})).<span class="tok-f">unwrap</span>(), 41);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">reopen_rejects_duplicate_ids_as_corruption</span>() {
+        <span class="tok-k">let mut</span> s = <span class="tok-f">fresh</span>(&amp;[]);
+        s.rec.<span class="tok-f">insert</span>(<span class="tok-s">br#"{"_id":5,"copy":1}"#</span>).<span class="tok-f">unwrap</span>();
+        s.rec.<span class="tok-f">insert</span>(<span class="tok-s">br#"{"_id":5,"copy":2}"#</span>).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> io = s.<span class="tok-f">into_inner</span>();
+        <span class="tok-m">assert!</span>(<span class="tok-f">matches!</span>(
+            <span class="tok-f">DocStore</span>::<span class="tok-f">open</span>(io, 8, <span class="tok-f">vec!</span>[]),
+            <span class="tok-f">Err</span>(<span class="tok-f">DocError</span>::<span class="tok-f">Corrupt</span>(_))
+        ));
     }
 }</code></pre>
-  <p class="src">The tests read <code>s.primary</code> directly in the oracle; keep that field crate-visible
-  to the test module (same file). The oracle re-evaluates the filter by brute force, so every
-  index-served <code>find</code> is checked against the ground-truth predicate on the same data.</p>
 
   <h2>Stuck? — graduated hints</h2>
-  <details><summary>M1: open() can't find next_id or the index after reopening</summary><div class="answer">
-    <strong>Nudge:</strong> The heap is the source of truth; the indexes are derived.
-    <br><strong>Technique:</strong> on <code>open</code>, iterate every record in the <code>RecStore</code>,
-    deserialize each, read its <code>_id</code>, and fill <code>primary</code>; set
-    <code>next_id = max(_id) + 1</code>. You'll need a way to enumerate all records — expose an iterator
-    over <code>(RecordId, bytes)</code> from your Phase 4 crate.</div></details>
+  <details><summary>Open rebuilds the wrong next id</summary><div class="answer">
+    <strong>Nudge:</strong> Derive it from validated live documents, not slot numbers.
+    <br><strong>Bigger nudge:</strong> Track the maximum explicit <code>_id</code> while scanning.
+    <br><strong>Technique:</strong> start at <code>Some(1)</code>; for every id at or above the current
+    candidate, use <code>checked_add(1)</code>. <code>i64::MAX</code> changes the state to
+    <code>None</code>, meaning auto-id exhaustion.</div></details>
 
-  <details><summary>M3: comparing a number and a string panics or gives nonsense</summary><div class="answer">
-    <strong>Nudge:</strong> One total order, defined once.
-    <br><strong>Technique:</strong> convert both sides through <code>key_of</code> to the <code>Key</code>
-    enum and compare <code>Key</code>s; the derived <code>Ord</code> ranks by variant
-    (Null&lt;Bool&lt;Int&lt;Str) then value. If either side isn't an indexable key (float/array/object),
-    define the comparison result explicitly (e.g. only <code>Eq</code> on deep-equal <code>Value</code>s,
-    everything else false) and use the <em>same</em> rule in the index.</div></details>
+  <details><summary>Indexed and scanned range results disagree</summary><div class="answer">
+    <strong>Nudge:</strong> Storage order is broader than range-predicate semantics.
+    <br><strong>Bigger nudge:</strong> A query <code>age &gt; 30</code> must only scan the
+    <code>Key::Int</code> subrange, never later enum variants such as strings.
+    <br><strong>Technique:</strong> construct same-variant lower/upper <code>Bound</code>s, deduplicate
+    ids, then run <code>matches(full_filter, doc)</code> anyway.</div></details>
 
-  <details><summary>M5: indexed find returns fewer/more rows than the scan</summary><div class="answer">
-    <strong>Nudge:</strong> A plan = access path + residual filter; both halves must be right.
-    <br><strong>Technique:</strong> use the index only to produce <em>candidate ids</em> for one
-    condition; then still run <code>matches(full_filter, doc)</code> on each candidate (the residual).
-    For equality, candidates = <code>secondary[field][key_of(value)]</code>; for a range, scan the
-    <code>BTreeMap</code> sub-range. Never return index hits without re-checking the whole
-    predicate.</div></details>
+  <details><summary>Replace leaves two copies after an I/O error</summary><div class="answer">
+    <strong>Nudge:</strong> No operation ordering makes two record-store writes crash-atomic.
+    <br><strong>Bigger nudge:</strong> The exercise intentionally exposes the composition gap.
+    <br><strong>Technique:</strong> keep successful in-memory publication ordered and make open reject
+    duplicate ids; the actual fix is to execute insert-new, index changes, and retire-old through one
+    Phase 5 transaction—not to invent a fragile cleanup sequence.</div></details>
 
-  <details><summary>M2: after replace, a stale value still matches</summary><div class="answer">
-    <strong>Nudge:</strong> You must remove the <em>old</em> entry before adding the new one.
-    <br><strong>Technique:</strong> read the existing document first, compute its old key for each indexed
-    field, remove that id from <code>secondary[field][old_key]</code>, then write the new doc and insert
-    the new key. Do the same removal in <code>delete</code>. (In a real engine this whole sequence is one
-    Phase 5 transaction.)</div></details>
+  <details><summary>Missing fields accidentally match null</summary><div class="answer">
+    <strong>Nudge:</strong> <code>Option::None</code> and <code>Some(Value::Null)</code> are different.
+    <br><strong>Technique:</strong> field resolution returns <code>None</code> for a missing path; every
+    Compare returns false immediately. An explicit null proceeds to Eq/Ne and receives a
+    <code>Key::Null</code> secondary entry.</div></details>
 
   <h2>Definition of Done</h2>
   <ul>
-    <li>☐ All five tests pass.</li>
-    <li>☐ <code>insert</code> assigns/honors/validates <code>_id</code>; <code>get</code> round-trips.</li>
-    <li>☐ Full-scan <code>find</code> handles equality, range, and And/Or/Not.</li>
-    <li>☐ Indexed <code>find</code> returns exactly the scan oracle's set (asserted).</li>
-    <li>☐ <code>replace</code>/<code>delete</code> keep primary and secondary indexes consistent.</li>
-    <li>☐ You documented the codec choice, the indexable-type rule, and the one comparison order.</li>
-    <li>☐ You noted the labeled stretch goals (transactional wrapping; B+tree-persisted indexes).</li>
+    <li>☐ All nine tests pass unchanged.</li>
+    <li>☐ <code>RecStore::scan</code> enumerates each live record exactly once.</li>
+    <li>☐ Lifecycle, id overflow, duplicate-id corruption, and replacement-id rules are explicit.</li>
+    <li>☐ Evaluator and index candidate bounds implement the same written semantics.</li>
+    <li>☐ Every index plan is checked against <code>find_scan</code>.</li>
+    <li>☐ Reopen rebuilds requested indexes and next-id state.</li>
+    <li>☐ The transaction/catalog integration gap is documented and not mislabeled as atomic.</li>
     <li>☐ <strong>You wrote every implementation line yourself.</strong></li>
   </ul>
 
   <div class="box deeper">
     <div class="box-title">📚 Source anchors</div>
-    <p>Behavior references: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB CRUD &amp; filters</a>,
-    <a href="https://www.mongodb.com/docs/manual/core/document/">the document model &amp; <code>_id</code></a>,
-    <a href="https://bsonspec.org/spec.html">BSON</a> / <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack</a> for the codec,
-    and <a href="https://serde.rs/">serde</a> / <a href="https://docs.rs/serde_json/">serde_json</a> for the Rust side.</p>
+    <p>Use <a href="https://www.rfc-editor.org/rfc/rfc8259">RFC 8259</a> for JSON,
+    <a href="https://www.mongodb.com/docs/manual/core/document/">MongoDB documents</a> only for the
+    external model being compared, and the exact project semantics in Lessons 6.5–6.7 for index and
+    filter behavior. This build intentionally implements a smaller, different subset.</p>
   </div>
 
   <div class="pager" id="pager"></div>

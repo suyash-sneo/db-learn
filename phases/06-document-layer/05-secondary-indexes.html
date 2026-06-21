@@ -18,8 +18,9 @@
   <h2>Why this matters to your DB</h2>
   <p>The primary index only answers "by <code>_id</code>." Every other query — "users in London,"
   "orders over $100" — would otherwise scan every document. A secondary index is the same B+tree
-  machinery (Phase 3) pointed at a different key, turning an O(n) scan into an O(log n) lookup. It's the
-  difference between a query that's instant and one that reads the whole collection.</p>
+  machinery (Phase 3) pointed at a different key. An equality lookup costs the tree search plus work
+  proportional to the number of matching ids and their primary-record fetches; an index is not
+  automatically faster when most documents match.</p>
 
   <h2>The core mapping: field value → <code>_id</code></h2>
   <p>A secondary index on field <code>f</code> is a B+tree whose <strong>key</strong> is the value of
@@ -51,26 +52,32 @@
   <ul>
     <li><strong>Posting list:</strong> the key's payload is a list/set of <code>_id</code>s.</li>
     <li><strong>Composite key:</strong> make the B+tree key the pair <code>(field_value, _id)</code> so
-    every entry is unique; all documents with a given value form a contiguous key range you scan. (SQLite
-    does this — a non-unique index appends the rowid to the key.)</li>
+    every entry is unique; all documents with a given value form a contiguous key range you scan. SQLite
+    ordinary secondary-index records use the indexed columns followed by the table rowid for rowid
+    tables.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html#record_format">SQLite file
+    format §2.4 — index keys followed by rowid</a>]</span></li>
   </ul>
   <p>A <strong>unique index</strong> is the special case where you forbid a second entry for the same
   value (how the primary <code>_id</code> index itself behaves; Isar exposes this as a unique
   <code>@Index</code>).
-  <span class="src">[src: <a href="https://isar.dev/schema.html">Isar — indexes via <code>@Index</code>, including unique and composite</a>]</span></p>
+  <span class="src">[src: pinned Isar v3.1.0+1
+  <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/indexes.md"><code>docs/docs/indexes.md</code></a>]</span></p>
 
   <h2>Composite and multi-entry indexes</h2>
   <ul>
     <li><strong>Composite (multi-field) index</strong> on <code>(a, b)</code>: the key is the tuple, so
     the tree is ordered by <code>a</code> then <code>b</code>. It accelerates queries on <code>a</code>
     alone (a prefix) and on <code>a</code> AND <code>b</code>, but not on <code>b</code> alone — the
-    leftmost-prefix rule. Isar documents "composite … indexes."
-    <span class="src">[src: <a href="https://isar.dev/schema.html">Isar — composite indexes</a>]</span></li>
+    leftmost-prefix rule. Isar v3 documents that a prefix of a composite index can be used.
+    <span class="src">[src: pinned Isar v3.1.0+1
+    <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/queries.md"><code>docs/docs/queries.md</code></a>]</span></li>
     <li><strong>Multi-entry index</strong> on a list/array field: index <em>each element</em> separately,
     so a document with <code>tags: ["math","poetry"]</code> produces two index entries both pointing at
     its <code>_id</code>. This is how "array contains x" stays fast. Isar calls these multi-entry
     indexes.
-    <span class="src">[src: <a href="https://isar.dev/schema.html">Isar — multi-entry indexes for lists</a>]</span></li>
+    <span class="src">[src: pinned Isar v3.1.0+1
+    <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/indexes.md"><code>docs/docs/indexes.md</code></a>]</span></li>
   </ul>
 
   <h2>The cost: every write maintains every index</h2>
@@ -80,12 +87,14 @@
   writes, more space.</strong> Index the fields you actually query; don't index everything.</p>
   <div class="box warn">
     <div class="box-title">⚠️ Missing fields and type ordering</div>
-    <p>Schemaless documents may lack the indexed field entirely. Decide explicitly: a document missing
-    field <code>f</code> typically gets <em>no</em> entry in <code>f</code>'s index (so it won't match
-    equality/range on <code>f</code>) — which means a query that must include such documents can't be
-    served by that index alone. Also pin down how you order keys <em>across types</em> (is the number 5
-    less than the string "5"?). Pick one total order, document it, and use it consistently in the index
-    and the evaluator (6.6), or comparisons will disagree.</p>
+    <p>Schemaless documents may lack the indexed field. This project chooses a <strong>sparse</strong>
+    policy: missing fields produce no entry, while an explicit <code>null</code> does. That differs from
+    MongoDB's default non-sparse indexes, which include missing fields as null-like entries; MongoDB
+    sparse indexes omit them.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/index-sparse/">MongoDB —
+    sparse versus non-sparse indexes</a>]</span>
+    Also define a total byte ordering for index keys, but do not confuse sort order with query semantics:
+    this project permits range comparisons only when both operands have the same supported type.</p>
   </div>
 
   <h2>Building an index on existing data</h2>
@@ -99,7 +108,8 @@
       <p class="q">1. What does a secondary index map, and why to <code>_id</code> rather than <code>RecordId</code>?</p>
       <details><summary>Show answer</summary><div class="answer">Field value → the <code>_id</code>(s) of
       matching documents. Using <code>_id</code> means relocating a document's bytes doesn't require
-      touching the secondary index — only the primary index repoints.</div></details>
+      touching the secondary index—only the primary index repoints. Output cost still grows with the
+      number of matching ids.</div></details>
       <p class="q">2. Give two ways to handle a non-unique index key.</p>
       <details><summary>Show answer</summary><div class="answer">Store a posting list of <code>_id</code>s
       per key, or make the B+tree key a composite <code>(value, _id)</code> so every entry is unique and
@@ -119,7 +129,7 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Back-link:</strong> <a href="../03-btree/index.html">Phase 3</a> — the same B+tree, keyed by a field instead of <code>_id</code>.</li>
-      <li><strong>Docs:</strong> <a href="https://isar.dev/schema.html">Isar indexes</a> (unique/composite/multi-entry); <a href="https://www.mongodb.com/docs/manual/indexes/">MongoDB indexes</a>.</li>
+      <li><strong>Docs:</strong> pinned Isar v3.1.0+1 <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/docs/docs/indexes.md">indexes</a>; <a href="https://www.mongodb.com/docs/manual/indexes/">MongoDB indexes</a>.</li>
       <li><strong>Forward link:</strong> 6.6 evaluates filters; 6.7 decides when to use an index vs scan.</li>
     </ul>
   </div>

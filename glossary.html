@@ -112,9 +112,9 @@
     flushed before it can be safely evicted or before commit.</dd>
 
     <dt data-term="document schemaless self-describing">Document</dt>
-    <dd>A self-describing, variable-length record — a serialized tree of fields and values, where each
-    document carries its own structure (schemaless), unlike a relational row whose meaning comes from a
-    fixed table schema. Stored as opaque bytes by the lower layers.</dd>
+    <dd>A variable-length logical tree of fields and values. In this curriculum's schemaless layer, the
+    encoded bytes carry field names/types; a typed document database may instead use shared schema
+    metadata and positional fields. Lower storage layers treat the encoding as opaque bytes.</dd>
 
     <dt data-term="extern c no_mangle repr">extern "C" / #[unsafe(no_mangle)] / #[repr(C)]</dt>
     <dd>The three Rust attributes that produce C-compatible output:
@@ -168,9 +168,10 @@
     protected as a unit.</dd>
 
     <dt data-term="messagepack serialization compact">MessagePack</dt>
-    <dd>A compact, self-describing binary serialization format (type tags inline, like JSON but
-    smaller). One candidate document codec, alongside JSON text and BSON.
-    <span class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec</a>]</span></dd>
+    <dd>A binary serialization format with one-byte format codes, compact encodings for small values,
+    separate text/binary types, and length framing. Whether it is smaller than another format depends on
+    the data.
+    <span class="src">[src: pinned <a href="https://github.com/msgpack/msgpack/blob/8aa09e2a6a9180a49fc62ecfefe149f063cc5e4b/spec.md">MessagePack spec</a>]</span></dd>
 
     <dt data-term="mvcc multiversion concurrency control snapshot">MVCC</dt>
     <dd>Multi-version concurrency control: a write creates a new <em>version</em> rather than
@@ -242,9 +243,9 @@
     plus a format crate (e.g. <code>serde_json</code>) converts structs to/from bytes.</dd>
 
     <dt data-term="schemaless schema-on-read flexible">Schemaless</dt>
-    <dd>Structure lives in each document, not in an engine-enforced table schema: two documents in one
-    collection may have different fields. The engine stores opaque bytes; meaning is the application's
-    responsibility.</dd>
+    <dd>No single mandatory field layout is imposed on every document in a collection. Documents can
+    differ in shape; optional validation or typed APIs may still exist above storage. This curriculum's
+    build uses self-describing JSON bytes, while Isar v3 demonstrates a typed schema-driven alternative.</dd>
 
     <dt data-term="secondary index field value lookup">Secondary index</dt>
     <dd>An index on a non-primary field, mapping a field's values to the <code>_id</code>s of documents
@@ -252,8 +253,9 @@
     multi-entry (array) variants exist; each write must keep every index consistent.</dd>
 
     <dt data-term="selectivity fraction matches">Selectivity</dt>
-    <dd>The fraction of documents a condition keeps. Highly selective + indexed → use the index; low
-    selectivity or no index → full scan. The core intuition a planner uses to pick an access path.</dd>
+    <dd>The fraction of documents a condition keeps. Lower fractions often make an index attractive,
+    but the decision also depends on index traversal, result cardinality, primary lookups, record fetches,
+    and scan cost.</dd>
 
     <dt data-term="send sync marker traits threads rust">Send / Sync</dt>
     <dd>Rust marker traits for thread safety: <code>Send</code> means a value can be moved to another

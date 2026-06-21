@@ -11,9 +11,9 @@
 <main>
   <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 6</a> › 6.2</div>
   <h1>6.2 — Serialization: BSON vs MessagePack vs JSON</h1>
-  <div class="goal"><b>Goal:</b> Understand how a document becomes bytes, why a <em>self-describing
-  binary</em> format beats text for a database, and the concrete trade-offs between JSON, MessagePack,
-  and BSON — so you can pick one and know what you gave up.</div>
+  <div class="goal"><b>Goal:</b> Understand how a document becomes bytes and compare JSON, MessagePack,
+  and BSON without assuming one format wins every workload—then choose a deliberately limited codec for
+  the build.</div>
 
   <h2>Why this matters to your DB</h2>
   <p>A document lives in memory as a tree of fields and values; on disk it's a byte string in a record
@@ -22,31 +22,43 @@
   single field, whether you can tell a string from binary, and whether you can navigate a document
   without parsing all of it.</p>
 
-  <h2>What "self-describing" means and why a DB needs it</h2>
-  <p>Because your store is schemaless (6.1), the bytes themselves must say what each value is — there's
-  no external schema to consult. A <strong>self-describing</strong> format tags every value with its
-  type inline. MessagePack is described exactly this way: it "uses a type-prefixed byte format where the
-  first byte determines the data type … This makes it self-describing — deserializers can determine type
-  information from the binary stream itself."
-  <span class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec — format overview</a>]</span>
-  BSON does the same with a one-byte type code before each element.
+  <h2>What "self-describing" means</h2>
+  <p>This project has no external field schema, so its document bytes need enough tags and framing to
+  reconstruct each value's type and boundaries. MessagePack uses a one-byte format code (sometimes
+  followed by length/type data); BSON places a one-byte type code before each named element.
+  <span class="src">[src: pinned MessagePack specification
+  <a href="https://github.com/msgpack/msgpack/blob/8aa09e2a6a9180a49fc62ecfefe149f063cc5e4b/spec.md"><code>spec.md</code></a>]</span>
   <span class="src">[src: <a href="https://bsonspec.org/spec.html">BSON spec — each element is <code>type_code · name · value</code></a>]</span></p>
+  <p>A typed store can instead keep types in schema metadata and encode fields positionally. Isar v3's
+  object builder is an example: it writes schema-known properties at calculated offsets and puts
+  variable-size data in a dynamic region.
+  <span class="src">[src: pinned Isar v3.1.0+1
+  <a href="https://github.com/isar/isar/blob/6643d064abf22606b6c6a741ea873e4781115ef4/packages/isar_core/src/object/object_builder.rs"><code>object_builder.rs</code></a>]</span>
+  Self-description is required by <em>this schemaless format choice</em>, not by all databases.</p>
 
   <h2>JSON — the baseline (text)</h2>
   <ul>
-    <li><strong>Human-readable, ubiquitous</strong>, and self-describing in a loose sense (you can see
-    the structure).</li>
-    <li><strong>But:</strong> numbers are decimal text (slow to parse, lossy for large integers); there's
-    <strong>no binary type</strong> (blobs must be base64-encoded, inflating size ~33%); no length
-    prefixes, so to skip a value you must parse it; every key is repeated as text.</li>
-    <li><strong>Verdict:</strong> great as an interchange/debug format, poor as an on-disk database
-    format. Many engines accept JSON at the edge and store a binary form internally.</li>
+    <li><strong>Human-readable and ubiquitous.</strong> Its values are object, array, number, string,
+    boolean, and null; it has no native byte-string type.
+    <span class="src">[src: <a href="https://www.rfc-editor.org/rfc/rfc8259">RFC 8259 §§3–5</a>]</span></li>
+    <li><strong>Binary needs an application convention.</strong> Base64 is common; it emits four encoded
+    characters for each complete three-byte input group, plus padding for a short final group—not a fixed
+    33% for every tiny value.
+    <span class="src">[src: <a href="https://www.rfc-editor.org/rfc/rfc4648#section-4">RFC 4648 §4</a>]</span></li>
+    <li><strong>Numbers require a compatibility contract.</strong> JSON's grammar permits decimal
+    numbers, but interoperable exact integer range depends on the producer and consumer; RFC 8259 notes
+    exact agreement for integers in the IEEE-754 binary64 range <code>[-(2**53)+1, (2**53)-1]</code>.
+    <span class="src">[src: <a href="https://www.rfc-editor.org/rfc/rfc8259#section-6">RFC 8259 §6</a>]</span></li>
+    <li><strong>No container length prefix.</strong> A reader generally has to parse structural syntax to
+    find a nested value's end. That can be acceptable for a learning build and debugging, but is a
+    trade-off rather than a universal disqualification.</li>
   </ul>
 
   <h2>MessagePack — compact, self-describing binary</h2>
-  <p>MessagePack is "an object serialization specification like JSON" that encodes the same data model in
-  far fewer bytes by tagging each value with a one-byte format code.
-  <span class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec</a>]</span>
+  <p>MessagePack encodes a JSON-like object model plus binary and extension values using a one-byte
+  format code followed, where needed, by lengths and payload.
+  <span class="src">[src: pinned MessagePack
+  <a href="https://github.com/msgpack/msgpack/blob/8aa09e2a6a9180a49fc62ecfefe149f063cc5e4b/spec.md">specification</a>]</span>
   Its first-byte families pack small values into a single byte:</p>
   <div class="tablewrap">
   <table>
@@ -62,11 +74,11 @@
     </tbody>
   </table>
   </div>
-  <p class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec — first-byte format families</a>]</p>
+  <p class="src">[src: pinned MessagePack <a href="https://github.com/msgpack/msgpack/blob/8aa09e2a6a9180a49fc62ecfefe149f063cc5e4b/spec.md">specification — format table</a>]</p>
   <p>Unlike JSON it <strong>distinguishes binary (<code>bin</code>) from text (<code>str</code>)</strong>
   and "encodes type information in the binary format itself," with serializers told they "SHOULD use the
   format which represents the data in the smallest number of bytes."
-  <span class="src">[src: <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack spec — bin vs str, smallest-format rule</a>]</span>
+  <span class="src">[src: pinned MessagePack <a href="https://github.com/msgpack/msgpack/blob/8aa09e2a6a9180a49fc62ecfefe149f063cc5e4b/spec.md">specification — bin/str and serialization rules</a>]</span>
   The cost: it's compact but <em>not random-access</em> — to reach the 5th field you generally walk the
   preceding ones (their length prefixes let you skip quickly, but it's still sequential).</p>
 
@@ -98,11 +110,10 @@
   <p>A BSON string is encoded as an <code>int32</code> giving "the number of bytes … plus one for the
   trailing null byte," then the UTF-8 bytes, then <code>0x00</code>.
   <span class="src">[src: <a href="https://bsonspec.org/spec.html">BSON spec — string framing</a>]</span>
-  The defining trait: <strong>BSON length-prefixes documents, arrays, and strings</strong>. That makes
-  it <em>traversable</em> — you can skip an entire embedded document or string by reading its length and
-  jumping, without parsing the contents. That's exactly what a database wants for fast field access and
-  partial reads. The price is size: BSON is often <em>larger</em> than MessagePack (and sometimes larger
-  than the equivalent JSON for small values) because of those length prefixes and richer type tags.</p>
+  BSON length-prefixes documents and strings; BSON arrays use the same embedded-document representation
+  with numeric field names. A decoder can skip many values after reading their type-specific framing,
+  but BSON has no field-offset table: finding a field by name still requires walking preceding elements.
+  Length prefixes improve skipping and validation; they do not create true random field access.</p>
 
   <figure>
   <svg viewBox="0 0 560 150" role="img" aria-label="BSON document layout: int32 length, then typed elements, then trailing zero byte">
@@ -113,7 +124,8 @@
     <rect class="dg-fill-2" x="412" y="44" width="60" height="40" rx="4"/><text class="dg-txt-s" x="442" y="68" text-anchor="middle">0x00</text>
     <text class="dg-txt-s" x="20" y="116">length prefix lets you skip the whole doc; each element is self-typed; 0x00 ends the list</text>
   </svg>
-  <figcaption>BSON trades bytes for traversability: length prefixes mean you can skip without parsing.</figcaption>
+  <figcaption>BSON framing lets a decoder skip many values efficiently, but fields are still found by a
+  sequential element walk.</figcaption>
   </figure>
 
   <h2>Choosing for your engine</h2>
@@ -125,18 +137,16 @@
       <tr><td>Self-describing</td><td>loosely</td><td>yes</td><td>yes</td></tr>
       <tr><td>Binary type</td><td>no (base64)</td><td>yes</td><td>yes</td></tr>
       <tr><td>Length-prefixed (skippable)</td><td>no</td><td>partial</td><td>yes (docs/arrays/strings)</td></tr>
-      <tr><td>Compactness</td><td>worst</td><td>best</td><td>middling</td></tr>
-      <tr><td>Random field access</td><td>no</td><td>no</td><td>good</td></tr>
+      <tr><td>Size</td><td>workload-dependent text size</td><td>often compact; measure</td><td>field names + framing; measure</td></tr>
+      <tr><td>Field lookup without another index</td><td>sequential parse</td><td>sequential walk</td><td>sequential walk with type-aware skipping</td></tr>
     </tbody>
   </table>
   </div>
-  <p>For a document database, a self-describing binary format is the right call; BSON's traversability
-  is the feature that justifies its extra bytes. For <strong>your build</strong> the learning is in the
-  storage/index/query layers, not in hand-rolling a serializer, so you'll lean on Rust's
-  <code>serde</code> (Phase 0.9) with a self-describing format and treat the encoded bytes as the
-  document payload. Picking MessagePack (via a serde codec) keeps documents compact; picking JSON keeps
-  them debuggable. Either is fine for the build as long as it round-trips losslessly — just record which
-  one and why.</p>
+  <p>Format choice depends on the supported value types, compatibility requirements, update/read patterns,
+  and measured data. For <strong>this build</strong>, use UTF-8 JSON through
+  <code>serde_json::Value</code> so bytes are inspectable while the lesson focuses on storage, indexes,
+  and queries. That deliberately omits a native binary value and BSON-specific types. A later format
+  change needs a file-format version and migration plan; it is not a transparent codec swap.</p>
 
   <div class="box rust">
     <div class="box-title">🦀 Rust just-in-time</div>
@@ -150,18 +160,19 @@
   <div class="box check">
     <div class="box-title">✅ Concept check</div>
     <div class="checks">
-      <p class="q">1. Why must a schemaless store use a self-describing format?</p>
-      <details><summary>Show answer</summary><div class="answer">There's no external schema, so the bytes
-      must carry each value's type inline; both MessagePack and BSON tag every value with a type
-      code.</div></details>
+      <p class="q">1. Why does this engine use a self-describing format?</p>
+      <details><summary>Show answer</summary><div class="answer">This build has no external field schema,
+      so the bytes must carry enough names, types, and boundaries to reconstruct the document (or refer
+      to an equivalent dictionary). MessagePack and BSON demonstrate binary forms of that approach;
+      JSON is the simpler format chosen for the exercise.</div></details>
       <p class="q">2. Name two concrete weaknesses of JSON as an on-disk database format.</p>
       <details><summary>Show answer</summary><div class="answer">No binary type (blobs become bloated
-      base64) and no length prefixes (you must parse a value to skip it); also numbers are decimal text
-      and keys repeat as text.</div></details>
+      base64 or another convention) and no container-length prefix, so structure must be parsed to locate
+      an arbitrary nested value. Number interoperability also requires a documented numeric range.</div></details>
       <p class="q">3. What does BSON's length-prefixing of documents/arrays/strings buy you, and at what cost?</p>
       <details><summary>Show answer</summary><div class="answer">Traversability — you can skip a whole
-      sub-document/string by reading its length and jumping, enabling fast field access — at the cost of
-      extra bytes (BSON is often larger than MessagePack).</div></details>
+      sub-document/string once its start is known, and validate boundaries. It adds framing bytes, but
+      does not provide a field-offset table or O(1) lookup by field name.</div></details>
       <p class="q">4. Which BSON byte starts a UTF-8 string element, and how is the string framed?</p>
       <details><summary>Show answer</summary><div class="answer">Type code <code>0x02</code>; the string is
       an <code>int32</code> (byte count including the trailing null) then the UTF-8 bytes then
@@ -173,7 +184,7 @@
     <div class="box-title">📚 Go deeper / verify</div>
     <ul>
       <li><strong>Spec:</strong> <a href="https://bsonspec.org/spec.html">BSON specification</a> — full type-code table and grammar.</li>
-      <li><strong>Spec:</strong> <a href="https://github.com/msgpack/msgpack/blob/master/spec.md">MessagePack specification</a> — format families and rules.</li>
+      <li><strong>Spec:</strong> pinned <a href="https://github.com/msgpack/msgpack/blob/8aa09e2a6a9180a49fc62ecfefe149f063cc5e4b/spec.md">MessagePack specification</a> — format families and rules.</li>
       <li><strong>Rust:</strong> <a href="https://serde.rs/">serde</a> + <a href="https://docs.rs/rmp-serde/">rmp-serde</a> / <a href="https://docs.rs/serde_json/">serde_json</a>.</li>
       <li><strong>Forward link:</strong> 6.3 stores the serialized bytes as a record keyed by <code>_id</code>.</li>
     </ul>

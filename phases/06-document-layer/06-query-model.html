@@ -44,11 +44,12 @@
 <span class="tok-c">//   Not(Box&lt;Filter&gt;),</span>
 <span class="tok-c">//   All,            // matches every document (empty filter)</span>
 <span class="tok-c">// }</span></code></pre>
-  <p>This mirrors MongoDB's model: a leaf is <code>{field: value}</code> or
+  <p>The tree is inspired by MongoDB's model: a leaf is <code>{field: value}</code> or
   <code>{field: {$op: value}}</code>; an implicit AND joins multiple fields; <code>$and</code>/<code>$or</code>
   combine sub-filters.
   <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/crud/">MongoDB — filters; equality and <code>$gt</code>/<code>$lt</code>/<code>$in</code> operators</a>]</span>
-  An empty filter (<code>All</code>) returns the whole collection.</p>
+  An empty filter (<code>All</code>) returns the whole collection. The exact semantics below are a
+  deliberately smaller project contract, not full MongoDB compatibility.</p>
 
   <h2>The evaluator</h2>
   <p>Evaluation is a recursive walk of the filter tree against a single document:</p>
@@ -56,10 +57,32 @@
     <li><strong>Compare:</strong> resolve <code>field</code> in the document (supporting dot notation for
     nested fields and array indices, as MongoDB does — e.g. <code>"name.last"</code>, <code>"tags.0"</code>
     <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/document/">MongoDB — dot notation for embedded fields and array elements</a>]</span>);
-    if the field is missing, the comparison is false (unless the op specifically tests for absence). Then
-    apply <code>op</code> using your defined value ordering (6.5).</li>
+    if the field is missing, every <code>Compare</code> leaf in this phase is false. Then apply the
+    explicit comparison rules below.</li>
     <li><strong>And:</strong> all children match. <strong>Or:</strong> any child matches.
     <strong>Not:</strong> the child doesn't match. <strong>All:</strong> always true.</li>
+  </ul>
+  <p>For this build, split a path on <code>.</code>. Each segment must be non-empty. At an object,
+  a segment is an exact field name; at an array, it must parse as a non-negative decimal
+  <code>usize</code> index. A failed step means “missing.” There is no escaping syntax, so object keys
+  containing <code>.</code> cannot be addressed by this first query language. This is a deliberately
+  small project grammar, not a complete copy of MongoDB's field-path rules.</p>
+  <h2>Exact comparison contract for this build</h2>
+  <ul>
+    <li><strong>Eq / Ne:</strong> use <code>serde_json::Value</code> deep equality. Because a missing
+    field makes the leaf false, <code>Ne</code> is not the same expression as
+    <code>Not(Eq(...))</code> for a missing path. This differs from MongoDB's <code>$ne</code>, which also
+    selects documents missing the field.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/reference/operator/query/ne/">MongoDB <code>$ne</code> missing-field behavior</a>]</span></li>
+    <li><strong>Gt / Ge / Lt / Le:</strong> supported only for integer-to-integer and
+    string-to-string comparisons. A type mismatch, float, null, bool, array, or object is false. The
+    B+tree still needs a total key order, but a total sort order does not require cross-type range
+    predicates. MongoDB likewise type-brackets comparison query predicates, with numeric types treated as
+    comparable to one another.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/reference/bson-type-comparison-order/">MongoDB — comparison order and type bracketing</a>]</span></li>
+    <li><strong>In:</strong> the filter value must be an array; it matches when the field value is deeply
+    equal to any array member. This first build does not add MongoDB's special behavior for array-valued
+    fields.</li>
   </ul>
   <p>Crucially, the evaluator takes a <em>document</em>, not a collection — it doesn't know or care
   whether that document came from a full scan or an index lookup. This separation (predicate vs.
@@ -80,17 +103,15 @@
   <h2>The simplest correct query: full scan + filter</h2>
   <p>Before any optimization, <code>find(filter)</code> can always be implemented as: iterate every
   document in the collection (via the primary index or a heap scan), run <code>matches(doc)</code>, and
-  collect the ones that return true. This is O(n) but <strong>always correct for any filter</strong> —
-  it's your baseline and your test oracle. Every clever plan in 6.7 must return the same set as this.</p>
+  collect the ones that return true. This is O(n) and is correct for the filter semantics just defined;
+  it is your baseline and test oracle. Every plan in 6.7 must return the same set as this implementation.</p>
 
   <div class="box warn">
     <div class="box-title">⚠️ Define comparison semantics before you optimize</div>
-    <p>The trap in a schemaless store is comparing across types and missing fields. Pin down: How do you
-    order a number vs a string? What does <code>age &gt; 30</code> mean for a document whose
-    <code>age</code> is the string <code>"old"</code> or is absent? MongoDB has a defined BSON type
-    ordering for exactly this. Choose your rules, encode them in <em>one</em> comparison function, and
-    make both the evaluator and the index use it — otherwise an indexed query and a scanned query can
-    disagree, which is the worst kind of bug.</p>
+    <p>The trap in a schemaless store is mixing sort order, query comparison, and missing-field rules.
+    The build's contract above makes <code>"old" &gt; 30</code> false and a missing
+    <code>age</code> false. Encode those rules once and make index candidate generation a safe
+    prefilter—then re-run the full predicate on every candidate.</p>
   </div>
 
   <div class="box check">
@@ -103,14 +124,15 @@
       <details><summary>Show answer</summary><div class="answer">So matching is independent of how
       candidates were produced (scan or index); the planner can change strategy without affecting
       correctness.</div></details>
-      <p class="q">3. What is the always-correct baseline implementation of <code>find</code>?</p>
+      <p class="q">3. What is the correctness baseline for <code>find</code>?</p>
       <details><summary>Show answer</summary><div class="answer">Full scan + filter: evaluate
-      <code>matches</code> on every document and collect the true ones. O(n) but correct for any filter;
-      it's the oracle for optimized plans.</div></details>
+      <code>matches</code> on every document and collect the true ones. It examines every document and is
+      correct for the filter contract defined in this lesson; it is the oracle for optimized plans.</div></details>
       <p class="q">4. Why must comparison semantics be defined in one place?</p>
       <details><summary>Show answer</summary><div class="answer">In a schemaless store you compare across
-      types and handle missing fields; if the evaluator and the index use different rules, an indexed
-      query and a scanned query can return different results.</div></details>
+      types and handle missing fields. The index may have a total storage order, while range predicates
+      are same-type only; if candidate bounds and evaluator semantics disagree, indexed and scanned
+      queries can return different results.</div></details>
     </div>
   </div>
 
