@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3.2 B-tree vs B+tree; internal vs leaf</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:3.2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.2</div>
+  <h1>3.2 — B-tree vs B+tree; internal vs leaf nodes</h1>
+  <div class="goal"><b>Goal:</b> Learn the precise difference between a B-tree and a B+tree, why
+  databases overwhelmingly choose the B+ variant, and the distinct jobs of internal and leaf nodes.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>"B-tree" gets used loosely, but the variant you build changes the layout, the scan behavior, and
+  the code. You're building a <strong>B+tree</strong>, and you need to know exactly what that implies
+  so your node formats and traversal are correct.</p>
+
+  <h2>The core distinction</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>B-tree</th><th>B+tree</th></tr></thead>
+    <tbody>
+      <tr><td>Where values live</td><td>In <em>every</em> node (internal and leaf)</td><td>Only in <strong>leaf</strong> nodes</td></tr>
+      <tr><td>Internal nodes hold</td><td>Keys + values + child pointers</td><td>Keys + child pointers only (no values)</td></tr>
+      <tr><td>Keys in leaves</td><td>Each key appears once, anywhere</td><td>All keys appear in leaves; internal keys are <em>copies</em> used only as routers</td></tr>
+      <tr><td>Range scans</td><td>Need tree traversal between leaves</td><td>Leaves are linked in order → scan by following the links</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The B+tree's defining move: <strong>keep all data in the leaves, use internal nodes purely as a
+  routing layer, and link the leaves together in key order.</strong></p>
+
+  <h2>Why databases prefer B+trees</h2>
+  <ul>
+    <li><strong>Higher fanout.</strong> Because internal nodes store only keys and child pointers (no
+    payloads), each internal page holds <em>more</em> keys, so the tree is even shallower. The payloads
+    that would bloat internal nodes live only in leaves.</li>
+    <li><strong>Cheap range scans.</strong> Leaves form a linked list in sorted order. A range query
+    descends once to the start leaf, then walks the leaf links — no repeated root-to-leaf traversals.
+    This is the killer feature for the query layer.</li>
+    <li><strong>Uniform leaf access.</strong> Every full-record read ends at a leaf, so the access cost
+    is predictable (always full height), which simplifies reasoning and caching.</li>
+  </ul>
+
+  <figure>
+  <svg viewBox="0 0 560 210" role="img" aria-label="B+tree with routing internal node and linked leaves holding values">
+    <rect class="dg-bg" x="0" y="0" width="560" height="210" rx="10"/>
+    <rect class="dg-node-w" x="200" y="24" width="160" height="26" rx="4"/>
+    <text class="dg-txt-s" x="280" y="42" text-anchor="middle">internal: [ 30 | 60 ] (routers)</text>
+    <path class="dg-edge" d="M230,50 L120,96"/><path class="dg-edge" d="M280,50 L280,96"/><path class="dg-edge" d="M330,50 L440,96"/>
+    <rect class="dg-node" x="40" y="98" width="150" height="40" rx="4"/><text class="dg-txt-s" x="115" y="114" text-anchor="middle">leaf: 10→v, 20→v</text><text class="dg-txt-s" x="115" y="130" text-anchor="middle">(&lt; 30)</text>
+    <rect class="dg-node" x="205" y="98" width="150" height="40" rx="4"/><text class="dg-txt-s" x="280" y="114" text-anchor="middle">leaf: 30→v, 45→v</text><text class="dg-txt-s" x="280" y="130" text-anchor="middle">(30–59)</text>
+    <rect class="dg-node" x="370" y="98" width="150" height="40" rx="4"/><text class="dg-txt-s" x="445" y="114" text-anchor="middle">leaf: 60→v, 80→v</text><text class="dg-txt-s" x="445" y="130" text-anchor="middle">(≥ 60)</text>
+    <path class="dg-arrow" d="M190,118 L205,118" marker-end="url(#a32)"/>
+    <path class="dg-arrow" d="M355,118 L370,118" marker-end="url(#a32)"/>
+    <text class="dg-txt-s" x="280" y="170" text-anchor="middle">leaves linked in key order → range scan follows the arrows</text>
+    <defs><marker id="a32" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Internal nodes route; leaves hold the values and are chained in order.</figcaption>
+  </figure>
+
+  <h2>Internal vs leaf: two node types, one page each</h2>
+  <p>You'll implement two on-page formats:</p>
+  <ul>
+    <li><strong>Internal node:</strong> an ordered list of separator keys and one more child pointer
+    than keys. For <code>n</code> keys there are <code>n+1</code> children; key <code>k<sub>i</sub></code>
+    separates child <code>i</code> (keys &lt; k<sub>i</sub>) from child <code>i+1</code> (keys ≥
+    k<sub>i</sub>, depending on your convention).</li>
+    <li><strong>Leaf node:</strong> an ordered list of (key, value) entries plus a pointer to the next
+    leaf (the sibling link for range scans).</li>
+  </ul>
+  <p>A one-byte type tag at the start of the page distinguishes them — exactly how SQLite encodes its
+  four page types (interior/leaf × table/index) with the type byte at offset 0 of the page header
+  (values 2, 5, 10, 13). <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6, "B-tree Pages" — page-type byte</a>]</span></p>
+
+  <div class="box deeper">
+    <div class="box-title">SQLite's table b-tree is a special case worth knowing</div>
+    <p>SQLite's <em>table</em> b-trees are B+trees keyed by a 64-bit integer rowid, with the row data
+    stored only in the leaves; its <em>index</em> b-trees store the indexed keys.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6</a>]</span>
+    Your schemaless engine will key its primary store by a document id, which is structurally the same
+    idea: an ordered B+tree from id → document bytes, with data in the leaves.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. In a B+tree, where do values live, and what do internal nodes contain?</p>
+      <details><summary>Show answer</summary><div class="answer">Values live only in leaves; internal
+      nodes hold separator keys and child pointers only (routing).</div></details>
+      <p class="q">2. Why does a B+tree achieve higher fanout than a B-tree?</p>
+      <details><summary>Show answer</summary><div class="answer">Internal nodes carry no payloads, so more
+      keys+pointers fit per page, making the tree shallower.</div></details>
+      <p class="q">3. What makes range scans cheap in a B+tree?</p>
+      <details><summary>Show answer</summary><div class="answer">Leaves are linked in key order, so after
+      descending to the start you just follow sibling links instead of re-traversing from the root.</div></details>
+      <p class="q">4. For an internal node with <code>n</code> separator keys, how many children?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>n + 1</code> children.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6</a> — the four page types and the type byte.</li>
+      <li><strong>Book:</strong> <em>Database Internals</em>, Ch.2–4 — B-tree vs B+tree, separator keys, sibling links.</li>
+      <li><strong>Forward link:</strong> 3.3 (laying these two formats inside a page), 3.4 (search uses the router/leaf split).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

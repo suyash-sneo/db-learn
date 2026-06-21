@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>2.3 Page numbers ↔ offsets</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p2:2.3", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 2</a> › 2.3</div>
+  <h1>2.3 — Page numbers ↔ byte offsets</h1>
+  <div class="goal"><b>Goal:</b> Nail the arithmetic that converts a page number to a byte offset and
+  back, decide whether your page numbers start at 0 or 1, and understand why this one formula is the
+  pager's whole job.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Every read and write in the engine ultimately becomes "seek to offset X, transfer page-size
+  bytes." Higher layers speak in page numbers; the pager is the only place that knows the formula
+  translating a page number into a file offset. Get this off by one and the entire file is misread.</p>
+
+  <h2>The core formula</h2>
+  <p>If pages are numbered starting at <strong>0</strong>:</p>
+  <span class="code-label">offset (0-based numbering)</span>
+<pre><code>offset = page_no * page_size</code></pre>
+  <p>If pages are numbered starting at <strong>1</strong> (SQLite's convention), page 1 begins at byte
+  0:</p>
+  <span class="code-label">offset (1-based numbering)</span>
+<pre><code>offset = (page_no - 1) * page_size</code></pre>
+  <p>SQLite numbers pages from 1, and computes the offset of page <code>n</code> as
+  <code>(n − 1) × page_size</code>; page 1 starts at byte 0 and holds the 100-byte file header.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.2, "Pages"</a> — pages numbered from 1; the database header is the first 100 bytes of page 1]</span></p>
+
+  <div class="box deeper">
+    <div class="box-title">0-based or 1-based? Pick deliberately</div>
+    <p>Both work. 1-based mirrors SQLite and lets you reserve "page 0" as a sentinel meaning "no page"
+    (handy for the freelist and tree pointers — a child pointer of 0 means "none"). 0-based makes the
+    arithmetic marginally simpler. The important thing is to <em>choose one, document it, and never
+    mix conventions</em> across the codebase. This curriculum uses SQLite-style 1-based numbering with
+    page 0 reserved as the null page so your examples line up with the source dives.</p>
+  </div>
+
+  <figure>
+  <svg viewBox="0 0 560 160" role="img" aria-label="Page numbers map to byte offsets by multiplication">
+    <rect class="dg-bg" x="0" y="0" width="560" height="160" rx="10"/>
+    <text class="dg-txt" x="20" y="28" font-weight="700">1-based, page_size = 4096</text>
+    <rect class="dg-box" x="20" y="44" width="120" height="50" rx="6"/><text class="dg-txt-s" x="80" y="66" text-anchor="middle">page 1</text><text class="dg-txt-s" x="80" y="84" text-anchor="middle">byte 0</text>
+    <rect class="dg-box" x="144" y="44" width="120" height="50" rx="6"/><text class="dg-txt-s" x="204" y="66" text-anchor="middle">page 2</text><text class="dg-txt-s" x="204" y="84" text-anchor="middle">byte 4096</text>
+    <rect class="dg-box" x="268" y="44" width="120" height="50" rx="6"/><text class="dg-txt-s" x="328" y="66" text-anchor="middle">page 3</text><text class="dg-txt-s" x="328" y="84" text-anchor="middle">byte 8192</text>
+    <rect class="dg-box-a" x="392" y="44" width="120" height="50" rx="6"/><text class="dg-txt-s" x="452" y="66" text-anchor="middle">page 4</text><text class="dg-txt-s" x="452" y="84" text-anchor="middle">byte 12288</text>
+    <text class="dg-txt-s" x="20" y="128">offset(n) = (n − 1) × 4096</text>
+    <text class="dg-txt-s" x="20" y="146">e.g. page 4 → (4 − 1) × 4096 = 12288</text>
+  </svg>
+  <figcaption>One multiply (and one subtract for 1-based) turns a page number into a seek target.</figcaption>
+  </figure>
+
+  <h2>In Rust</h2>
+  <span class="code-label">rust — the pager's central conversion (toy module)</span>
+<pre><code><span class="tok-k">struct</span> <span class="tok-f">Layout</span> { page_size: <span class="tok-f">u64</span> }
+
+<span class="tok-k">impl</span> <span class="tok-f">Layout</span> {
+    <span class="tok-c">// 1-based page numbers; page 0 is the reserved "null page".</span>
+    <span class="tok-k">fn</span> <span class="tok-f">offset</span>(&amp;<span class="tok-k">self</span>, page_no: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">u64</span> {
+        <span class="tok-f">debug_assert!</span>(page_no &gt;= 1, <span class="tok-s">"page 0 is the null page"</span>);
+        (page_no - 1) * <span class="tok-k">self</span>.page_size
+    }
+
+    <span class="tok-k">fn</span> <span class="tok-f">page_count</span>(&amp;<span class="tok-k">self</span>, file_len: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">u64</span> {
+        file_len / <span class="tok-k">self</span>.page_size <span class="tok-c">// assumes file_len is a whole multiple</span>
+    }
+}</code></pre>
+  <div class="box warn">
+    <div class="box-title">⚠️ Use <code>u64</code> for offsets, not <code>usize</code></div>
+    <p>A database file can exceed 4&nbsp;GiB, and <code>usize</code> is 32-bit on some targets. File
+    offsets and page counts should be <code>u64</code> so the math doesn't silently overflow on a
+    32-bit platform. Multiplication of a 32-bit <code>page_no</code> by a 32-bit
+    <code>page_size</code> overflows long before the file does. Convert to a wider type before
+    multiplying.</p>
+  </div>
+
+  <h2>Why this is literally the pager's job</h2>
+  <p>Strip everything else away and the pager exposes two operations to the layers above:</p>
+  <ul>
+    <li><code>read_page(n) -&gt; bytes</code>: compute <code>offset(n)</code>, seek there, read
+    <code>page_size</code> bytes (with <code>read_exact</code>, from 0.8).</li>
+    <li><code>write_page(n, bytes)</code>: compute <code>offset(n)</code>, seek there, write
+    <code>page_size</code> bytes (with <code>write_all</code>).</li>
+  </ul>
+  <p>Everything else — caching, dirty tracking, durability — is an optimization or safety layer
+  wrapped around these two. The next lesson (2.4) puts a small abstraction in front of the raw file so
+  the rest never seeks directly.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. With 1-based numbering and a 4096-byte page, what offset is page 7 at?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>(7 − 1) × 4096 = 24576</code>.</div></details>
+      <p class="q">2. Why reserve page number 0 instead of using it for data?</p>
+      <details><summary>Show answer</summary><div class="answer">So 0 can act as a null/"no page" sentinel
+      in pointers (freelist links, tree child pointers) — there's no real page to confuse it with.</div></details>
+      <p class="q">3. Why compute offsets in <code>u64</code> rather than <code>usize</code>?</p>
+      <details><summary>Show answer</summary><div class="answer">Files can exceed 4&nbsp;GiB and
+      <code>usize</code> may be 32-bit; <code>u64</code> avoids overflow on 32-bit targets.</div></details>
+      <p class="q">4. Which two operations are the irreducible core of the pager?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>read_page(n)</code> and
+      <code>write_page(n)</code>, each built on the offset formula plus seek + exact read/write.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.2</a> — page numbering and the page-1 special case.</li>
+      <li><strong>Recall:</strong> 0.8 (Seek / read_exact / write_all) is the mechanism this formula feeds into.</li>
+      <li><strong>Forward link:</strong> 2.4 wraps these reads/writes in a VFS; Phase 3 stores one tree node per page number.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

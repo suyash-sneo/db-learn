@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Build — a persistent B+tree</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:build", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › Build</div>
+  <span class="pill">Build · AI off</span>
+  <h1>Build: a persistent B+tree on the pager</h1>
+  <div class="goal"><b>Goal:</b> Implement an ordered map from byte-string keys to byte-string values,
+  stored as a B+tree whose nodes are pages from your Phase 2 pager: get, insert (with split), delete
+  (with merge/borrow), and an ordered range scan.</div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ AI off</div>
+    <p>The B+tree is the core index — per the project rules there is no worked implementation here, only
+    contracts, stubs, failing tests, and graduated hints. Use the lessons, the SQLite file-format spec,
+    and the compiler. Splitting and balancing are exactly the skills being tested; do not have an AI
+    write them.</p>
+  </div>
+
+  <h2>Deliverable</h2>
+  <p>A Rust 2024 module <code>btree</code> built on the Phase 2 <code>pager</code> crate (as a path or
+  workspace dependency). It exposes an ordered key/value map persisted in a single file.</p>
+
+  <h2>Fixed design decisions</h2>
+  <ul>
+    <li>Keys and values are <code>&amp;[u8]</code>. Order is lexicographic byte order (<code>[u8]</code>'s
+    natural <code>Ord</code>).</li>
+    <li>Two node types (leaf, internal) with a 1-byte type tag, stored as slotted pages in a pager page.</li>
+    <li><strong>Bound key+value sizes</strong> so any single entry fits in a page with room to split
+    (e.g. an entry may be at most ¼ of usable page space). Oversized entries return a typed error;
+    overflow pages are deferred to Phase 4. Document this limit.</li>
+    <li>The root page number is stored in the file header (extend your Phase 2 header with a 4-byte
+    "root page" field, or keep it in a dedicated metadata page).</li>
+    <li>Separator convention (write it as a comment and never deviate): child <code>cᵢ</code> holds keys
+    <code>&lt; kᵢ</code>; rightmost child holds keys <code>≥</code> the last separator.</li>
+  </ul>
+
+  <h2>Ordered milestones</h2>
+  <ol>
+    <li><strong>M1 — Node codec.</strong> Encode/decode a leaf and an internal node to/from a page's
+    bytes (slotted layout). Round-trip tested in isolation.</li>
+    <li><strong>M2 — Search.</strong> <code>get(key)</code>: descend internal nodes, binary-search the
+    leaf. Build the root-to-leaf path stack you'll reuse.</li>
+    <li><strong>M3 — Insert, no split.</strong> Insert into a leaf with room; keep entries sorted.</li>
+    <li><strong>M4 — Leaf split.</strong> Split a full leaf, fix sibling links, copy a separator up;
+    handle the parent-has-room case.</li>
+    <li><strong>M5 — Internal split + new root.</strong> Propagate splits upward (move the median up);
+    grow a new root when the old root splits.</li>
+    <li><strong>M6 — Delete + rebalance.</strong> Remove from a leaf; borrow from a sibling or merge;
+    propagate; shrink the root when it has one child.</li>
+    <li><strong>M7 — Range scan.</strong> Iterate <code>[lo, hi]</code> in order via the leaf links.</li>
+  </ol>
+
+  <h2>Acceptance criteria</h2>
+  <ul>
+    <li>All Rust tests below pass.</li>
+    <li>Inserting many keys in random order, then reading them all back, returns every value (split
+    correctness).</li>
+    <li>A range scan returns keys in sorted order and exactly the keys in range.</li>
+    <li>After deleting half the keys (random order), the remaining keys are all still found and the
+    deleted ones are absent (merge/borrow correctness).</li>
+    <li>The tree survives close+reopen: persist, drop, reopen from the file, and all data is intact
+    (assuming a <code>sync</code> before drop).</li>
+    <li>An over-limit entry returns the typed <code>EntryTooLarge</code> error (tested).</li>
+  </ul>
+
+  <h2>Stub: <code>src/btree.rs</code></h2>
+  <span class="code-label">src/btree.rs — implement every todo!()</span>
+<pre><code><span class="tok-k">use</span> pager::{Pager, BlockIo};
+
+<span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">pub enum</span> <span class="tok-f">BTreeError</span> {
+    Pager(pager::PagerError),
+    EntryTooLarge { needed: <span class="tok-f">usize</span>, max: <span class="tok-f">usize</span> },
+    Corrupt(&amp;<span class="tok-k">'static</span> <span class="tok-f">str</span>),
+}
+<span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;pager::PagerError&gt; <span class="tok-k">for</span> <span class="tok-f">BTreeError</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: pager::PagerError) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">BTreeError</span>::<span class="tok-f">Pager</span>(e) }
+}
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">BTreeError</span>&gt;;
+
+<span class="tok-k">const</span> <span class="tok-f">TAG_LEAF</span>: <span class="tok-f">u8</span> = 1;
+<span class="tok-k">const</span> <span class="tok-f">TAG_INTERNAL</span>: <span class="tok-f">u8</span> = 2;
+
+<span class="tok-c">// Decoded views over a page's bytes. Encode/decode is M1.</span>
+<span class="tok-k">struct</span> <span class="tok-f">Leaf</span>&lt;<span class="tok-f">'p</span>&gt; { bytes: &amp;<span class="tok-f">'p</span> <span class="tok-k">mut</span> [<span class="tok-f">u8</span>] }
+<span class="tok-k">struct</span> <span class="tok-f">Internal</span>&lt;<span class="tok-f">'p</span>&gt; { bytes: &amp;<span class="tok-f">'p</span> <span class="tok-k">mut</span> [<span class="tok-f">u8</span>] }
+
+<span class="tok-k">pub struct</span> <span class="tok-f">BTree</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; {
+    pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;,
+    root: <span class="tok-f">u64</span>,
+}
+
+<span class="tok-k">impl</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; <span class="tok-f">BTree</span>&lt;<span class="tok-f">B</span>&gt; {
+    <span class="tok-k">pub fn</span> <span class="tok-f">create</span>(<span class="tok-k">mut</span> pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"allocate an empty leaf as the root; store its page no in the header"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;, root: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">BTree</span> { pager, root } }
+
+    <span class="tok-k">pub fn</span> <span class="tok-f">get</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Option</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: descend to leaf, binary search"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">insert</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;[<span class="tok-f">u8</span>], val: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3-M5: find leaf; insert; split + propagate; grow root if needed"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">delete</span>(&amp;<span class="tok-k">mut self</span>, key: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">bool</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: remove; borrow/merge; propagate; shrink root"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">range</span>(&amp;<span class="tok-k">mut self</span>, lo: &amp;[<span class="tok-f">u8</span>], hi: &amp;[<span class="tok-f">u8</span>]) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;(<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;, <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;)&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M7: descend to lo, walk leaf links until key &gt; hi"</span>)
+    }
+
+    <span class="tok-k">fn</span> <span class="tok-f">max_entry_bytes</span>(&amp;<span class="tok-k">self</span>) -&gt; <span class="tok-f">usize</span> {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"usable page space / 4, used to reject oversized entries"</span>)
+    }
+}</code></pre>
+
+  <h2>Failing tests</h2>
+  <span class="code-label">append to src/btree.rs (uses pager::MemBlock)</span>
+<pre><code><span class="tok-m">#[cfg(test)]</span>
+<span class="tok-k">mod</span> tests {
+    <span class="tok-k">use super</span>::*;
+    <span class="tok-k">use</span> pager::MemBlock;
+
+    <span class="tok-k">fn</span> <span class="tok-f">fresh</span>() -&gt; <span class="tok-f">BTree</span>&lt;<span class="tok-f">MemBlock</span>&gt; {
+        <span class="tok-k">let</span> pager = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() }, 4096, 64).<span class="tok-f">unwrap</span>();
+        <span class="tok-f">BTree</span>::<span class="tok-f">create</span>(pager).<span class="tok-f">unwrap</span>()
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">insert_get_roundtrip_forces_splits</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let</span> n = 5000u32;
+        <span class="tok-c">// pseudo-random order via a simple LCG so a split cascade happens</span>
+        <span class="tok-k">let mut</span> x = 1u32;
+        <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..n {
+            x = x.<span class="tok-f">wrapping_mul</span>(1664525).<span class="tok-f">wrapping_add</span>(1013904223);
+            <span class="tok-k">let</span> k = x.<span class="tok-f">to_be_bytes</span>();
+            t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>();
+        }
+        x = 1;
+        <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..n {
+            x = x.<span class="tok-f">wrapping_mul</span>(1664525).<span class="tok-f">wrapping_add</span>(1013904223);
+            <span class="tok-k">let</span> k = x.<span class="tok-f">to_be_bytes</span>();
+            <span class="tok-m">assert_eq!</span>(t.<span class="tok-f">get</span>(&amp;k).<span class="tok-f">unwrap</span>().<span class="tok-f">as_deref</span>(), <span class="tok-f">Some</span>(&amp;k[..]));
+        }
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">range_is_sorted_and_bounded</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..1000 { <span class="tok-k">let</span> k = i.<span class="tok-f">to_be_bytes</span>(); t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>(); }
+        <span class="tok-k">let</span> out = t.<span class="tok-f">range</span>(&amp;100u32.<span class="tok-f">to_be_bytes</span>(), &amp;200u32.<span class="tok-f">to_be_bytes</span>()).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(out.<span class="tok-f">len</span>(), 101); <span class="tok-c">// 100..=200 inclusive</span>
+        <span class="tok-m">assert!</span>(out.<span class="tok-f">windows</span>(2).<span class="tok-f">all</span>(|w| w[0].0 &lt; w[1].0)); <span class="tok-c">// sorted, strictly increasing keys</span>
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">delete_then_search_forces_merges</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..2000 { <span class="tok-k">let</span> k = i.<span class="tok-f">to_be_bytes</span>(); t.<span class="tok-f">insert</span>(&amp;k, &amp;k).<span class="tok-f">unwrap</span>(); }
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> (0u32..2000).<span class="tok-f">step_by</span>(2) { <span class="tok-m">assert!</span>(t.<span class="tok-f">delete</span>(&amp;i.<span class="tok-f">to_be_bytes</span>()).<span class="tok-f">unwrap</span>()); }
+        <span class="tok-k">for</span> i <span class="tok-k">in</span> 0u32..2000 {
+            <span class="tok-k">let</span> got = t.<span class="tok-f">get</span>(&amp;i.<span class="tok-f">to_be_bytes</span>()).<span class="tok-f">unwrap</span>().<span class="tok-f">is_some</span>();
+            <span class="tok-m">assert_eq!</span>(got, i % 2 == 1); <span class="tok-c">// odds remain, evens gone</span>
+        }
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">rejects_oversized_entry</span>() {
+        <span class="tok-k">let mut</span> t = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let</span> big = <span class="tok-f">vec!</span>[0u8; 4096];
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(t.<span class="tok-f">insert</span>(b<span class="tok-s">"k"</span>, &amp;big), <span class="tok-f">Err</span>(<span class="tok-f">BTreeError</span>::<span class="tok-f">EntryTooLarge</span> { .. })));
+    }
+}</code></pre>
+  <p class="src">A persistence test (close + reopen) belongs in an integration test under
+  <code>tests/</code> using a temp file + <code>FileBlock</code>; remember <code>use super::*</code>
+  works inline but an integration test must import your crate by name.</p>
+
+  <h2>Stuck? — graduated hints</h2>
+  <details><summary>M1: how do I store variable-length entries in a page?</summary><div class="answer">
+    <strong>Nudge:</strong> Re-read 3.3 — sorted slot array at the front, cells at the back.
+    <br><strong>Bigger:</strong> Each slot is a 2-byte offset to a cell; the header tracks count and the
+    start of free space.
+    <br><strong>Technique:</strong> keep slots sorted by key; to insert, shift slots (cheap) and place
+    the cell wherever it fits (Phase 4 adds compaction).</div></details>
+
+  <details><summary>M4/M5: my keys go missing after splits</summary><div class="answer">
+    <strong>Nudge:</strong> Leaf split copies the separator up; internal split moves the median up
+    (3.5).
+    <br><strong>Bigger:</strong> Verify your separator convention is identical in <code>get</code> and in
+    split.
+    <br><strong>Technique:</strong> after each split, assert the parent's separators still partition the
+    children correctly before descending in a test.</div></details>
+
+  <details><summary>M5: borrow-checker fights me passing pages up the path</summary><div class="answer">
+    <strong>Nudge:</strong> You can't hold mutable borrows of two pages from the same pager at once.
+    <br><strong>Technique:</strong> work one page at a time — read a node into an owned buffer, mutate,
+    write it back via the pager, then move to the parent using the path stack from M2. Avoid holding two
+    live page borrows simultaneously.</div></details>
+
+  <details><summary>M6: deletes corrupt the parent separator</summary><div class="answer">
+    <strong>Nudge:</strong> After borrow/merge the separator must describe the new boundary (3.6).
+    <br><strong>Technique:</strong> re-derive the separator from the children after redistribution rather
+    than patching it incrementally.</div></details>
+
+  <h2>Definition of Done</h2>
+  <ul>
+    <li>☐ All four unit tests pass plus a temp-file persistence integration test.</li>
+    <li>☐ Random-order insert of thousands of keys round-trips (splits proven).</li>
+    <li>☐ Range scan is sorted and exactly bounded.</li>
+    <li>☐ Delete with borrow/merge keeps the surviving keys correct.</li>
+    <li>☐ Separator convention is documented and identical across search/insert/delete.</li>
+    <li>☐ Oversized entries are rejected; the inline-only limitation is documented.</li>
+    <li>☐ <strong>You wrote every implementation line yourself.</strong></li>
+  </ul>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Source anchors</div>
+    <p>Recheck the <a href="https://www.sqlite.org/fileformat2.html">slotted b-tree page layout (§1.6)</a>
+    and <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.binary_search_by"><code>binary_search_by</code></a>
+    while implementing. For the balance algorithm, re-read 3.5/3.6 and skim <a href="https://www.sqlite.org/src/file/src/btree.c">btree.c</a>'s <code>balance</code> for ideas only.</p>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

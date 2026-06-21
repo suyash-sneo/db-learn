@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>4.6 Source dive: SQLite record/cell + freelist</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p4:4.6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 4</a> › 4.6</div>
+  <h1>4.6 — Source dive: SQLite records, cells &amp; freelist</h1>
+  <div class="goal"><b>Goal:</b> Confirm the slotted-page, overflow, and freelist concepts against
+  SQLite's spec and code, and collect the precise field layouts you'll mirror in the build.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>For Phase 4 the most authoritative reading is the <strong>file-format specification</strong> (it
+    is the contract the code implements), backed by <code>src/btree.c</code> for the page-manipulation
+    routines.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §1.5, §1.6, §2</a>; <a href="https://www.sqlite.org/src/file/src/btree.c">src/btree.c</a>]</span></p>
+  </div>
+
+  <h2>Spec-confirmed facts to reuse</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Fact</th><th>Value</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr><td>Record format</td><td>header of varint serial-types, then values</td><td>§2 <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">fileformat §2</a>]</span></td></tr>
+      <tr><td>B-tree page header</td><td>8 bytes (leaf) / 12 bytes (interior)</td><td>§1.6 <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">fileformat §1.6</a>]</span></td></tr>
+      <tr><td>Cell pointer array</td><td>2-byte big-endian offsets after the header</td><td>§1.6 <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">fileformat §1.6</a>]</span></td></tr>
+      <tr><td>Overflow page link</td><td>first 4 bytes = next overflow page (0 = last)</td><td>§1.6 <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">fileformat §1.6</a>]</span></td></tr>
+      <tr><td>Freelist header fields</td><td>offset 32 = first trunk page; offset 36 = total free pages</td><td>§1.3/§1.5 <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">fileformat §1.5</a>]</span></td></tr>
+      <tr><td>Freelist trunk page</td><td>int0 = next trunk, int1 = leaf count, then leaf page numbers</td><td>§1.5 <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">fileformat §1.5</a>]</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Code routines to grep (verify each name)</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Concept</th><th>Look for in btree.c</th></tr></thead>
+    <tbody>
+      <tr><td>Pack a fragmented page (compaction)</td><td><code>defragmentPage</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Allocate space within a page</td><td><code>allocateSpace</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Free space within a page (freeblocks)</td><td><code>freeSpace</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Allocate a whole page (freelist first)</td><td><code>allocateBtreePage</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Return a page to the freelist</td><td><code>freePage</code> / <code>freePage2</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Walk/clear an overflow chain</td><td><code>clearCell</code> / overflow handling <span class="verify-tag">⚠️VERIFY</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Reading <code>defragmentPage</code> alongside your 4.4 compaction, and <code>allocateBtreePage</code>
+  /<code>freePage</code> alongside your 4.5 freelist, is the most useful comparison in this phase: you'll
+  see the same two ideas (in-page reclaim, whole-page recycle) you implemented, hardened with extra
+  cases.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Source dive discipline</div>
+    <p>These names are anchors to look up, not facts to trust — each carries a ⚠️VERIFY because the exact
+    current symbol/signature must be confirmed in the file. The spec sections, by contrast, are the
+    authoritative contract. When the build asks for a layout, cite the spec section, not this page.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. For Phase 4 layouts, which SQLite document is the authority — the code or the spec?</p>
+      <details><summary>Show answer</summary><div class="answer">The file-format spec; the code implements
+      it. Cite §1.5/§1.6/§2 for byte layouts.</div></details>
+      <p class="q">2. Which spec offsets hold the freelist head and free-page count?</p>
+      <details><summary>Show answer</summary><div class="answer">Offset 32 (first freelist trunk page) and
+      offset 36 (total freelist pages).</div></details>
+      <p class="q">3. What does the first 4 bytes of an overflow page hold?</p>
+      <details><summary>Show answer</summary><div class="answer">The page number of the next overflow page,
+      or 0 if it's the last in the chain.</div></details>
+      <p class="q">4. Which routine corresponds to your 4.4 compaction?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>defragmentPage</code> (verify against
+      the source) — it packs live cells to reclaim fragmented free space.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">file format §1.5, §1.6, §2</a>.</li>
+      <li><strong>Source:</strong> <a href="https://www.sqlite.org/src/file/src/btree.c">btree.c</a>.</li>
+      <li><strong>Forward link:</strong> the build assembles slotted pages + overflow + freelist into a record store.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

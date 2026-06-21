@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>2.5 The page cache / buffer pool</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p2:2.5", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 2</a> › 2.5</div>
+  <h1>2.5 — The page cache / buffer pool</h1>
+  <div class="goal"><b>Goal:</b> Keep recently used pages in memory, serve repeat reads without
+  touching disk, track which cached pages were modified ("dirty"), and evict pages when memory is full
+  — without ever losing a change.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Disk is orders of magnitude slower than RAM. A B+tree lookup touches the same root and upper
+  nodes on every query; reading them from disk each time would be catastrophic. The buffer pool keeps
+  hot pages in memory so most accesses are RAM-speed, and it's the single point that decides when a
+  modified page is allowed to go back to disk — which makes it central to durability later.</p>
+
+  <h2>What the buffer pool does</h2>
+  <p>It sits between the engine and the VFS and maintains a fixed-capacity set of in-memory page
+  frames plus a map from page number → frame. On <code>get_page(n)</code>:</p>
+  <ol>
+    <li>If page <code>n</code> is already cached (a "hit"), return the in-memory copy.</li>
+    <li>If not (a "miss"), find a free frame (evicting one if necessary), read page <code>n</code> from
+    the VFS into it, record the mapping, and return it.</li>
+  </ol>
+  <p>On modification, the engine marks the page <strong>dirty</strong>. Dirty pages must be written
+  back before their frame can be reused, and must be flushed at commit time.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 200" role="img" aria-label="Buffer pool with page table mapping page numbers to frames">
+    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
+    <text class="dg-txt" x="20" y="26" font-weight="700">Page table</text>
+    <rect class="dg-box" x="20" y="38" width="150" height="120" rx="6"/>
+    <text class="dg-txt-s" x="95" y="62" text-anchor="middle">page 5 → frame 0</text>
+    <text class="dg-txt-s" x="95" y="84" text-anchor="middle">page 9 → frame 2</text>
+    <text class="dg-txt-s" x="95" y="106" text-anchor="middle">page 2 → frame 1</text>
+    <text class="dg-txt-s" x="95" y="128" text-anchor="middle">…</text>
+    <text class="dg-txt" x="220" y="26" font-weight="700">Frames (fixed capacity)</text>
+    <rect class="dg-box-a" x="220" y="38" width="100" height="34" rx="6"/><text class="dg-txt-s" x="270" y="60" text-anchor="middle">frame 0 · dirty</text>
+    <rect class="dg-box" x="220" y="78" width="100" height="34" rx="6"/><text class="dg-txt-s" x="270" y="100" text-anchor="middle">frame 1</text>
+    <rect class="dg-box" x="220" y="118" width="100" height="34" rx="6"/><text class="dg-txt-s" x="270" y="140" text-anchor="middle">frame 2</text>
+    <path class="dg-arrow" d="M330,130 L420,130" marker-end="url(#a25)"/>
+    <text class="dg-txt-s" x="375" y="122" text-anchor="middle">miss → read_at</text>
+    <rect class="dg-box" x="424" y="100" width="116" height="60" rx="6"/><text class="dg-txt-s" x="482" y="134" text-anchor="middle">VFS / file</text>
+    <defs><marker id="a25" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>The page table maps page numbers to frames; misses fall through to the VFS.</figcaption>
+  </figure>
+
+  <h2>The pin/reference problem</h2>
+  <p>While a higher layer is reading or editing a page, that frame must <strong>not</strong> be
+  evicted out from under it. Buffer pools solve this with a pin count (a.k.a. reference count): a page
+  in use is "pinned" and ineligible for eviction; when the caller is done it "unpins." Only unpinned
+  pages can be evicted.</p>
+  <div class="box rust">
+    <div class="box-title">🦀 Rust makes this a borrow-checker question</div>
+    <p>In Rust, "this page must stay alive and not move while I hold a reference to it" is exactly what
+    the borrow checker enforces. A simple design hands out a guard object (like a
+    <code>RefMut</code>-style handle) whose <code>Drop</code> unpins the page, so you cannot forget to
+    unpin. Designs using <code>Rc&lt;RefCell&lt;Page&gt;&gt;</code> or returning indices instead of
+    references are common; each trades ergonomics against checking. You'll feel this tension in the
+    build — it's a genuine design exercise, not boilerplate.</p>
+  </div>
+
+  <h2>Eviction policies</h2>
+  <p>When the pool is full and you need a frame, you must choose a victim. Common policies:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Policy</th><th>Idea</th><th>Trade-off</th></tr></thead>
+    <tbody>
+      <tr><td>FIFO</td><td>Evict the oldest-loaded page</td><td>Simple; ignores how hot a page is</td></tr>
+      <tr><td>LRU</td><td>Evict the least-recently-used page</td><td>Good general default; needs per-access bookkeeping</td></tr>
+      <tr><td>Clock (second chance)</td><td>Approximate LRU with a reference bit and a rotating hand</td><td>Cheaper than true LRU; widely used in real DBs</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>For your engine, LRU or Clock are both reasonable. Start simple; the policy is swappable as long
+  as the invariant below holds.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ The one invariant you cannot break</div>
+    <p>A <strong>dirty</strong> page must be written back to the VFS <em>before</em> its frame is
+    reused for another page, or the modification is lost. Eviction of a dirty page is therefore
+    "write it out, then reuse the frame." Eviction of a clean page can just drop it (the disk copy is
+    already current). Also note: writing a dirty page out during eviction is <em>not</em> a commit —
+    durability still depends on <code>sync</code> at the right time (2.6, Phase 5). Eviction order and
+    commit order are different concerns and must not be conflated.</p>
+  </div>
+
+  <h2>Clean vs dirty vs durable</h2>
+  <ul>
+    <li><strong>Clean cached page:</strong> in memory, identical to disk. Safe to drop.</li>
+    <li><strong>Dirty cached page:</strong> in memory, newer than disk. Must be written before reuse;
+    a crash now loses it.</li>
+    <li><strong>Written but not synced:</strong> handed to the OS, but maybe still in the OS cache, not
+    on the device. A crash may still lose it — the subject of 2.6.</li>
+  </ul>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why does the buffer pool exist at all?</p>
+      <details><summary>Show answer</summary><div class="answer">To serve hot pages (e.g. tree upper
+      levels) from RAM instead of re-reading them from much slower disk on every access.</div></details>
+      <p class="q">2. What does pinning a page prevent?</p>
+      <details><summary>Show answer</summary><div class="answer">Eviction of a frame while a caller still
+      holds a reference to it — which would leave a dangling/invalid view.</div></details>
+      <p class="q">3. What must happen before a dirty frame is reused for another page?</p>
+      <details><summary>Show answer</summary><div class="answer">Its current contents must be written
+      back to the VFS, or the modification is lost.</div></details>
+      <p class="q">4. Is writing a dirty page during eviction the same as committing it?</p>
+      <details><summary>Show answer</summary><div class="answer">No. The write reaches the OS but
+      durability still requires a <code>sync</code> at a defined commit point; eviction order and
+      commit order are separate.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> <em>Database Internals</em> (Petrov), "Buffer management" — pinning, eviction, the LRU/Clock family.</li>
+      <li><strong>Course:</strong> CMU 15-445 "Database Storage / Buffer Pools" lectures cover this design in depth. <span class="verify-tag">⚠️VERIFY</span> the specific lecture number/timestamp before citing one.</li>
+      <li><strong>Forward link:</strong> 2.6 (sync vs eviction), Phase 5 (the WAL changes when dirty pages may go to the main file).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

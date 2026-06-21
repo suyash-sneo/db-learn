@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>4.1 Fixed vs variable-length records</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p4:4.1", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 4</a> › 4.1</div>
+  <h1>4.1 — Fixed- vs variable-length records</h1>
+  <div class="goal"><b>Goal:</b> Understand why a record's layout is a design choice, what fixed-length
+  records buy and cost, and why a schemaless document store is inherently variable-length — which forces
+  the slotted-page design that follows.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>A "record" is the unit of data inside a page (a row, a document, an index entry). How you lay it out
+  determines whether you can address it cheaply, update it in place, and reclaim its space. Your engine
+  is schemaless and stores documents of wildly differing sizes, so this lesson establishes why you can't
+  take the easy fixed-length road.</p>
+
+  <h2>Fixed-length records: simple but rigid</h2>
+  <p>If every record is exactly <code>R</code> bytes, a page is an array of slots and record
+  <code>i</code> lives at offset <code>header + i × R</code> — the same O(1) addressing trick as pages
+  within a file. Deletion is trivial (mark the slot free; any record fits any slot). The cost:</p>
+  <ul>
+    <li><strong>Wasted space.</strong> Every record must be padded to the largest possible size. A
+    schema with one rare long field bloats every row.</li>
+    <li><strong>No variable data.</strong> Strings, blobs, and documents have no natural fixed size;
+    forcing one means truncation or huge padding.</li>
+    <li><strong>Schema rigidity.</strong> Changing <code>R</code> means rewriting every record.</li>
+  </ul>
+  <p>Fixed-length layouts still appear <em>inside</em> databases — for fixed-width columns, for the slot
+  array itself, for page headers — but rarely for whole user records.</p>
+
+  <h2>Variable-length records: flexible but needs bookkeeping</h2>
+  <p>Allow each record to be its own size and you stop wasting space, but you lose O(1) addressing: you
+  no longer know where record <code>i</code> is without help, because records before it have different
+  sizes. You also can't reuse a freed hole for a record of a different size without thought. The
+  solution to both problems is the <strong>slotted page</strong> (4.2): an indirection array that maps a
+  stable slot index to the current byte offset of a variable-length record.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 170" role="img" aria-label="Fixed-length slots versus variable-length records needing an offset array">
+    <rect class="dg-bg" x="0" y="0" width="560" height="170" rx="10"/>
+    <text class="dg-txt" x="20" y="24" font-weight="700">fixed: addressable by index</text>
+    <rect class="dg-box" x="20" y="34" width="60" height="34" rx="4"/><rect class="dg-box" x="84" y="34" width="60" height="34" rx="4"/><rect class="dg-box" x="148" y="34" width="60" height="34" rx="4"/>
+    <text class="dg-txt-s" x="50" y="55" text-anchor="middle">R</text><text class="dg-txt-s" x="114" y="55" text-anchor="middle">R</text><text class="dg-txt-s" x="178" y="55" text-anchor="middle">R</text>
+    <text class="dg-txt" x="300" y="24" font-weight="700">variable: needs offsets</text>
+    <rect class="dg-box" x="300" y="34" width="40" height="34" rx="4"/><rect class="dg-box" x="344" y="34" width="90" height="34" rx="4"/><rect class="dg-box" x="438" y="34" width="60" height="34" rx="4"/>
+    <text class="dg-txt-s" x="320" y="55" text-anchor="middle">a</text><text class="dg-txt-s" x="389" y="55" text-anchor="middle">bb</text><text class="dg-txt-s" x="468" y="55" text-anchor="middle">c</text>
+    <text class="dg-txt-s" x="20" y="110">offset(i) = header + i·R  (pure arithmetic)</text>
+    <text class="dg-txt-s" x="300" y="110">offset(i) = slot_array[i]  (a lookup)</text>
+  </svg>
+  <figcaption>Variable-length records trade arithmetic addressing for a small offset lookup.</figcaption>
+  </figure>
+
+  <h2>What "a record" is in your schemaless engine</h2>
+  <p>Your engine stores documents serialized to bytes (BSON/MessagePack, Phase 6). A document is a
+  variable-length blob: <code>{}</code> is a few bytes; a document with arrays and nested objects can be
+  kilobytes. There is no fixed <code>R</code>. Therefore:</p>
+  <ul>
+    <li>Records are variable-length → you need slotted pages (4.2).</li>
+    <li>Some records exceed a page → you need overflow pages (4.3).</li>
+    <li>Updates change a record's size → you need in-page compaction and possibly relocation (4.4).</li>
+    <li>Deletes free whole pages → you need a freelist (4.5).</li>
+  </ul>
+  <p>This lesson is the "why"; the next four are the "how."</p>
+
+  <div class="box deeper">
+    <div class="box-title">SQLite's record format, for reference</div>
+    <p>SQLite serializes each row as a "record" with a header of varint "serial types" followed by the
+    column values, and stores that record as the payload of a b-tree cell.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §2 "Record Format"</a>]</span>
+    The key idea you'll reuse: a record is a self-describing, variable-length byte string, and the page
+    layer treats it as opaque payload. <span class="verify-tag">⚠️VERIFY</span> the exact serial-type
+    encoding against §2 if you cite specific type codes.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What's the addressing advantage of fixed-length records, and its main cost?</p>
+      <details><summary>Show answer</summary><div class="answer">O(1) offset = header + i×R, but every
+      record is padded to the maximum size, wasting space and forbidding truly variable data.</div></details>
+      <p class="q">2. Why do variable-length records lose direct index addressing?</p>
+      <details><summary>Show answer</summary><div class="answer">Records have different sizes, so you can't
+      compute record i's position; you need a stored offset (the slot array).</div></details>
+      <p class="q">3. Why is a schemaless document store inherently variable-length?</p>
+      <details><summary>Show answer</summary><div class="answer">Documents differ in shape and size with no
+      common fixed width; serializing them yields variable-length blobs.</div></details>
+      <p class="q">4. Name the four mechanisms variable-length records force you to build.</p>
+      <details><summary>Show answer</summary><div class="answer">Slotted pages, overflow pages, in-page
+      compaction/relocation, and a freelist.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §2</a> — the record format.</li>
+      <li><strong>Book:</strong> <em>Database Internals</em>, "Slotted pages / cell layout."</li>
+      <li><strong>Forward link:</strong> 4.2 (slotted pages), Phase 6 (documents are the variable-length records you'll store).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 4 — Records &amp; free space</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p4", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 4</div>
+  <span class="pill">Phase 4</span>
+  <h1>Records &amp; free space</h1>
+  <p class="lead">Phase 3 stored small, inline entries by bounding their size. Real data is messy:
+  variable-length records, documents bigger than a page, deletions that leave holes. This phase makes
+  your storage honest — slotted pages for variable-length records, overflow pages for big ones,
+  compaction for the holes, and a freelist so freed pages get reused instead of growing the file
+  forever.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Why this comes after the B+tree</div>
+    <p>You needed a working tree first to feel the pain: bounded entry sizes, no space reclamation,
+    pages that fragment as you delete. Phase 4 lifts those restrictions. Slotted pages and the freelist
+    are not glamorous, but they are what separates a toy from a database that can run for months without
+    bloating.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 4</div>
+    <p>Store variable-length records in slotted pages, spill oversized values to overflow-page chains,
+    reclaim space within a page by compaction, and maintain a persistent freelist of reusable pages —
+    then wire it all into a small record store.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p4");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

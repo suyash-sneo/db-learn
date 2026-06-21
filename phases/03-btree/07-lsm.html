@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3.7 B-tree vs LSM revisited</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:3.7", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.7</div>
+  <h1>3.7 — B-tree vs LSM, revisited</h1>
+  <div class="goal"><b>Goal:</b> Understand the LSM-tree alternative, the read/write/space trade-offs
+  between B+trees and LSMs, and articulate <em>why this project deliberately chose a B+tree</em>.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>"B-tree or LSM?" is the central storage-engine decision. You've committed to a B+tree, but you
+  should be able to defend that choice and recognize when the other would be better — both because it
+  deepens understanding and because reviewers will ask.</p>
+
+  <h2>The LSM idea in one paragraph</h2>
+  <p>A Log-Structured Merge tree never updates data in place. Writes go to an in-memory sorted structure
+  (the "memtable") plus a sequential write-ahead log. When the memtable fills, it is flushed to disk as
+  an immutable sorted file (an "SSTable"). Over time many SSTables accumulate and are periodically merged
+  ("compaction") into fewer, larger sorted files, discarding overwritten and deleted entries. Deletes are
+  recorded as "tombstone" markers that suppress older values until compaction removes them.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 170" role="img" aria-label="LSM write path: memtable flushes to immutable SSTables which compact">
+    <rect class="dg-bg" x="0" y="0" width="560" height="170" rx="10"/>
+    <rect class="dg-box-a" x="20" y="40" width="120" height="44" rx="6"/><text class="dg-txt-s" x="80" y="66" text-anchor="middle">memtable (RAM)</text>
+    <path class="dg-arrow" d="M142,62 L186,62" marker-end="url(#a37)"/><text class="dg-txt-s" x="164" y="52" text-anchor="middle">flush</text>
+    <rect class="dg-box" x="190" y="30" width="100" height="28" rx="4"/><text class="dg-txt-s" x="240" y="49" text-anchor="middle">SSTable 1</text>
+    <rect class="dg-box" x="190" y="64" width="100" height="28" rx="4"/><text class="dg-txt-s" x="240" y="83" text-anchor="middle">SSTable 2</text>
+    <rect class="dg-box" x="190" y="98" width="100" height="28" rx="4"/><text class="dg-txt-s" x="240" y="117" text-anchor="middle">SSTable 3</text>
+    <path class="dg-arrow" d="M292,78 L356,78" marker-end="url(#a37)"/><text class="dg-txt-s" x="324" y="68" text-anchor="middle">compaction</text>
+    <rect class="dg-box-a" x="360" y="56" width="170" height="44" rx="6"/><text class="dg-txt-s" x="445" y="82" text-anchor="middle">merged, fewer SSTables</text>
+    <defs><marker id="a37" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>LSM turns random updates into sequential writes plus background merges.</figcaption>
+  </figure>
+
+  <h2>The trade-offs (the "amplification" lens)</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>B+tree</th><th>LSM tree</th></tr></thead>
+    <tbody>
+      <tr><td>Writes</td><td>Update in place; may do random page writes; can re-write a page for one change (write amplification)</td><td>Sequential appends; generally lower write amplification, higher raw throughput</td></tr>
+      <tr><td>Reads (point)</td><td>One root-to-leaf descent</td><td>May check memtable + several SSTables (mitigated by Bloom filters)</td></tr>
+      <tr><td>Range scans</td><td>Excellent: follow linked leaves</td><td>Must merge across multiple sorted files</td></tr>
+      <tr><td>Space</td><td>Can have partially-empty pages (internal fragmentation)</td><td>Temporary space amplification from un-compacted overwrites/tombstones</td></tr>
+      <tr><td>Background work</td><td>Mostly none</td><td>Continuous compaction (CPU/IO cost, tuning)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The classic framing is the <strong>RUM conjecture</strong> / read-write-space amplification
+  trade-off: you can optimize for read, write, or space, but improving one tends to cost another. LSMs
+  trade read and space cost for write throughput; B+trees trade write amplification for simpler, faster
+  reads and scans. <span class="verify-tag">⚠️VERIFY</span> attribute the RUM conjecture precisely
+  (Athanassoulis et al., 2016) before citing it as a hard result.</p>
+
+  <h2>Who uses which</h2>
+  <ul>
+    <li><strong>B+tree engines:</strong> SQLite, classic relational engines, LMDB, Berkeley DB. Strong
+    reads and range scans; the default for embedded read-heavy workloads.</li>
+    <li><strong>LSM engines:</strong> RocksDB/LevelDB, Cassandra, and notably <strong>Isar</strong>'s
+    storage in some versions. Strong write throughput; popular for write-heavy and large-dataset stores.
+    <span class="verify-tag">⚠️VERIFY</span> Isar's exact storage engine and version before stating it
+    relies on a specific LSM/B-tree design — Isar's internals differ across major versions (see 6.8).</li>
+  </ul>
+
+  <h2>Why this project chose a B+tree</h2>
+  <ol>
+    <li><strong>Workload fit.</strong> An embedded, on-device database for a mobile app is read-heavy and
+    relies on range/ordered queries — the B+tree's strengths.</li>
+    <li><strong>No background threads needed.</strong> Compaction implies ongoing background work and
+    tuning; a B+tree needs none, which suits a single-file embedded engine and a from-scratch learning
+    project.</li>
+    <li><strong>Simpler crash story.</strong> One in-place file with a WAL (Phase 5) is conceptually
+    tighter than coordinating many immutable files plus a log plus compaction.</li>
+    <li><strong>It's the better teacher.</strong> The B+tree forces you to confront pages, splitting,
+    and balance directly — the foundational ideas. An LSM could be a future v2.</li>
+  </ol>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What does an LSM do instead of updating data in place?</p>
+      <details><summary>Show answer</summary><div class="answer">Buffers writes in a memtable + log,
+      flushes immutable sorted SSTables, and periodically compacts them, using tombstones for deletes.</div></details>
+      <p class="q">2. Why can LSM point reads be slower than B+tree point reads?</p>
+      <details><summary>Show answer</summary><div class="answer">A key may live in the memtable or any of
+      several SSTables, so a read may probe multiple files (Bloom filters help but don't eliminate this).</div></details>
+      <p class="q">3. Which structure is better for range scans and why?</p>
+      <details><summary>Show answer</summary><div class="answer">The B+tree — linked sorted leaves give a
+      contiguous ordered walk, whereas an LSM must merge across sorted files.</div></details>
+      <p class="q">4. Give one concrete reason this project picked a B+tree.</p>
+      <details><summary>Show answer</summary><div class="answer">Any of: read/range-heavy mobile workload,
+      no background compaction, simpler single-file crash story, better learning value.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Paper:</strong> O'Neil et al., "The Log-Structured Merge-Tree (LSM-Tree)" (1996); Athanassoulis et al., "Designing Access Methods: The RUM Conjecture" (2016). <span class="verify-tag">⚠️VERIFY</span> citations before quoting.</li>
+      <li><strong>Doc:</strong> <a href="https://github.com/facebook/rocksdb/wiki">RocksDB wiki</a> for a real LSM's compaction model.</li>
+      <li><strong>Forward link:</strong> 6.8 (Isar's storage), Phase 5 (the WAL that makes the B+tree crash-safe).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

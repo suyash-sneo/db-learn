@@ -310,6 +310,11 @@ figcaption { font-size: .82rem; color: var(--text-faint); margin-top: .5rem; }
 .dg-accent { fill: var(--accent); }
 .dg-fill-a { fill: var(--accent-soft); }
 .dg-fill-2 { fill: var(--c-stuck-bg); stroke: var(--c-stuck-br); }
+/* tree-diagram helpers (nodes/edges) reused across B+tree and other phases */
+.dg-node       { fill: var(--bg-raise); stroke: var(--border); stroke-width: 1.4; }
+.dg-node-w     { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+.dg-edge       { stroke: var(--border); stroke-width: 1.4; fill: none; }
+.dg-edge-hot   { stroke: var(--accent); stroke-width: 2; fill: none; }
 
 /* ---- Prev / Next ------------------------------------------------------ */
 .pager {

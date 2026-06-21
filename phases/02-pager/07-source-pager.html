@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>2.7 Source dive: SQLite pager.c</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p2:2.7", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 2</a> › 2.7</div>
+  <h1>2.7 — Source dive: SQLite's pager</h1>
+  <div class="goal"><b>Goal:</b> See how a production pager is organized in real code, so the concepts
+  from 2.1–2.6 map onto names you can grep for — and learn how to read this file yourself rather than
+  trusting a summary.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>SQLite's pager lives in <code>src/pager.c</code> with its interface in <code>src/pager.h</code>,
+    in the public-domain SQLite source tree. Read the amalgamation or the canonical repo. The file
+    opens with an extensive comment block describing the pager's job and state machine — start there.
+    <span class="src">[src: <a href="https://www.sqlite.org/src/file/src/pager.c">sqlite.org/src · src/pager.c</a>; design overview at <a href="https://www.sqlite.org/atomiccommit.html">Atomic Commit</a>]</span></p>
+    <p><strong>How to verify any claim below:</strong> open <code>pager.c</code>, search for the symbol
+    in monospace, and read its surrounding comment. SQLite is unusually well-commented; the file's own
+    header comments are the authority, not this page.</p>
+  </div>
+
+  <h2>What the pager module is responsible for</h2>
+  <p>SQLite's own description: the pager implements transactions, page caching, and the rollback
+  journal / WAL on top of the OS file (via the VFS). It hands the B-tree layer above it pages by
+  number and hides everything about how those pages are made durable.
+  <span class="src">[src: <a href="https://www.sqlite.org/arch.html">SQLite architecture — "The Pager"</a>]</span>
+  Notice this is a bigger scope than the Phase 2 pager: SQLite folds journaling into the same module
+  you'll build incrementally across Phases 2 and 5.</p>
+
+  <h2>Concepts → symbols you can grep</h2>
+  <p>These are anchors to <em>look up</em>, each tagged because the exact current name/signature should
+  be confirmed against the file rather than trusted from this page:</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Concept (from 2.1–2.6)</th><th>Look for</th></tr></thead>
+    <tbody>
+      <tr><td>The pager object holding state</td><td><code>struct Pager</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>An in-memory page handle</td><td><code>PgHdr</code> / <code>DbPage</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Fetch a page (our <code>get_page</code>)</td><td><code>sqlite3PagerGet</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Mark a page modified (our "dirty")</td><td><code>sqlite3PagerWrite</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Release a pinned page (our "unpin")</td><td><code>sqlite3PagerUnref</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>The separate page-cache module</td><td><code>src/pcache.c</code> / <code>pcache1.c</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The split between <code>pager.c</code> (transactions/journaling) and <code>pcache.c</code> (the
+  buffer pool itself) mirrors the separation this curriculum draws between 2.5 (cache) and Phase 5
+  (durability). <span class="verify-tag">⚠️VERIFY</span> the file split against the current tree.</p>
+
+  <h2>The state machine is the interesting part</h2>
+  <p>The pager is essentially a state machine over the file's lock and journal state: no transaction →
+  read transaction → write transaction → committing → done. The header comment in <code>pager.c</code>
+  enumerates these states and the legal transitions; this is the single most valuable thing to read,
+  because it shows how caching, locking (Phase 7), and durability (Phase 5) are coordinated by one
+  component. Read it before you design your own — you will recognize the same states emerging in your
+  build.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Read for ideas, not to copy</div>
+    <p>This is a source dive, not a transplant. SQLite's pager is decades of hardening around edge
+    cases (hot journals, super-journals, mmap, WAL) you don't need yet. Extract the <em>shape</em> —
+    page handles, dirty tracking, a documented state machine — and build your own minimal version. The
+    "no solution code" rule applies: you may quote short illustrative snippets from this public-domain
+    file in your notes, but the engine you ship is one you wrote.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why is SQLite's pager scope larger than the Phase 2 pager you'll build?</p>
+      <details><summary>Show answer</summary><div class="answer">It also implements the rollback journal
+      / WAL and transactions, which this curriculum defers to Phase 5; Phase 2 is just paging + cache +
+      sync awareness.</div></details>
+      <p class="q">2. Which file holds the buffer-pool logic separate from the pager, and why split
+      them?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>pcache.c</code> (with
+      <code>pcache1.c</code>) — separating the cache from transaction/journal logic keeps each concern
+      independently testable, mirroring 2.5 vs Phase 5. <span class="verify-tag">⚠️VERIFY</span></div></details>
+      <p class="q">3. What's the most valuable section of <code>pager.c</code> to read first?</p>
+      <details><summary>Show answer</summary><div class="answer">The header comment describing the
+      pager's state machine and legal transitions.</div></details>
+      <p class="q">4. How should you verify a symbol name claimed on this page?</p>
+      <details><summary>Show answer</summary><div class="answer">Open <code>pager.c</code>, search for the
+      symbol, and read its surrounding comment — the file is the authority.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Source:</strong> <a href="https://www.sqlite.org/src/file/src/pager.c">src/pager.c</a>, <a href="https://www.sqlite.org/src/file/src/pcache.c">src/pcache.c</a> (public domain).</li>
+      <li><strong>Doc:</strong> <a href="https://www.sqlite.org/arch.html">SQLite Architecture</a> and <a href="https://www.sqlite.org/atomiccommit.html">Atomic Commit</a> for the pager's role.</li>
+      <li><strong>Forward link:</strong> the build (next) is your own minimal pager; Phase 5 revisits this file for journaling.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

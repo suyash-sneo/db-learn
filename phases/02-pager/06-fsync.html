@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>2.6 Flushing, fsync, the durability gap</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p2:2.6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 2</a> › 2.6</div>
+  <h1>2.6 — Flushing, fsync, and the durability gap</h1>
+  <div class="goal"><b>Goal:</b> Understand the full chain a byte travels from your program to durable
+  storage, where it can be lost at each stage, and what <code>fsync</code> does and does not guarantee
+  — because the entire durability story (Phase 5) is built on getting this exactly right.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>"The database is durable" means: once a transaction is reported committed, its data survives a
+  crash or power loss. Every layer above is pointless if this is wrong. And it is shockingly easy to
+  get wrong, because at least four separate layers each buffer your write and each can lose it. You
+  must know exactly which call pushes data past which layer.</p>
+
+  <h2>The four layers a write passes through</h2>
+  <ol>
+    <li><strong>Your process buffer.</strong> If you wrote through a <code>BufWriter</code> or your own
+    buffer, bytes sit in your program's memory until flushed. A crash loses them; even a clean process
+    exit without flush can lose them. <code>flush()</code> (the <code>Write</code> trait) pushes this
+    buffer to the OS. A raw <code>File</code> isn't buffered, so its <code>flush</code> is essentially
+    a no-op.</li>
+    <li><strong>The OS page cache.</strong> After a successful <code>write</code>/<code>write_all</code>,
+    the bytes are in the kernel's cache, not necessarily on the device. The <code>write</code> call
+    returning success does <em>not</em> mean the data is durable. A power loss here loses the data even
+    though every <code>write</code> returned <code>Ok</code>.</li>
+    <li><strong>The device cache.</strong> Drives have their own volatile write caches. Data can be
+    "on the drive" in this cache yet still lost on power failure unless flushed to the medium.</li>
+    <li><strong>The physical medium.</strong> Only here is the data truly durable.</li>
+  </ol>
+
+  <figure>
+  <svg viewBox="0 0 560 150" role="img" aria-label="A write passes through process buffer, OS cache, device cache, then medium">
+    <rect class="dg-bg" x="0" y="0" width="560" height="150" rx="10"/>
+    <rect class="dg-box" x="14" y="50" width="110" height="50" rx="6"/><text class="dg-txt-s" x="69" y="72" text-anchor="middle">process</text><text class="dg-txt-s" x="69" y="90" text-anchor="middle">buffer</text>
+    <path class="dg-arrow" d="M126,75 L150,75" marker-end="url(#a26)"/><text class="dg-txt-s" x="138" y="42" text-anchor="middle">flush</text>
+    <rect class="dg-box" x="152" y="50" width="110" height="50" rx="6"/><text class="dg-txt-s" x="207" y="72" text-anchor="middle">OS page</text><text class="dg-txt-s" x="207" y="90" text-anchor="middle">cache</text>
+    <path class="dg-arrow" d="M264,75 L288,75" marker-end="url(#a26)"/><text class="dg-txt-s" x="276" y="42" text-anchor="middle">fsync</text>
+    <rect class="dg-box" x="290" y="50" width="110" height="50" rx="6"/><text class="dg-txt-s" x="345" y="72" text-anchor="middle">device</text><text class="dg-txt-s" x="345" y="90" text-anchor="middle">cache</text>
+    <path class="dg-arrow" d="M402,75 L426,75" marker-end="url(#a26)"/><text class="dg-txt-s" x="414" y="42" text-anchor="middle">flush</text>
+    <rect class="dg-box-a" x="428" y="50" width="118" height="50" rx="6"/><text class="dg-txt-s" x="487" y="78" text-anchor="middle">medium (durable)</text>
+    <defs><marker id="a26" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Each arrow is a different push; a crash between any two loses everything to the left.</figcaption>
+  </figure>
+
+  <h2>What <code>fsync</code> / <code>sync_all</code> actually does</h2>
+  <p>Rust's <code>File::sync_all()</code> requests that the OS synchronize the file's <em>content and
+  metadata</em> with the storage device; <code>sync_data()</code> may skip metadata that isn't needed
+  to read the content back (a possible optimization). The standard library deliberately describes these
+  as requests whose final guarantee depends on the OS, filesystem, device, and hardware.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>File::sync_all</code></a> / <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_data"><code>sync_data</code></a>]</span>
+  Under the hood this is <code>fsync</code>/<code>fdatasync</code> on Unix-like systems and the
+  platform equivalent elsewhere.</p>
+  <div class="box warn">
+    <div class="box-title">⚠️ The directory entry needs syncing too</div>
+    <p>Creating, renaming, or deleting a file changes the <em>containing directory</em>, not just the
+    file. After creating a new file (e.g. a journal), you must also sync the directory for the new
+    name to be durable — otherwise a crash can leave the file's data on disk but the directory entry
+    pointing to it lost, or vice versa. SQLite's atomic-commit design treats directory syncing as an
+    explicit step and states its filesystem assumptions rather than assuming one call fixes everything.
+    <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite: Atomic Commit In SQLite</a>]</span></p>
+  </div>
+
+  <h2>The cost, and why you can't just sync constantly</h2>
+  <p>A real <code>fsync</code> can be very slow (milliseconds — many orders of magnitude slower than a
+  buffered write) because it may force the device to flush its cache to the medium. If you synced after
+  every page write, throughput would collapse. The art of durability is syncing as <em>rarely</em> as
+  correctness allows — typically once per transaction commit, with careful ordering — which is exactly
+  what the rollback journal and WAL protocols in Phase 5 are designed to achieve. <span
+  class="verify-tag">⚠️VERIFY</span> any specific latency figure against a benchmark on your own
+  hardware; absolute numbers vary enormously by device.</p>
+
+  <h2>The takeaway for the pager</h2>
+  <ul>
+    <li><code>write_page</code> returning <code>Ok</code> means "handed to the OS," not "durable."</li>
+    <li>Durability requires an explicit <code>sync</code> at a defined point.</li>
+    <li>Ordering matters: in Phase 5 you'll learn you must sync the log <em>before</em> overwriting the
+    real data, or recovery can't work.</li>
+    <li>A correct database never claims a commit succeeded before the relevant sync returns.</li>
+  </ul>
+  <p>For Phase 2's build, your pager exposes a <code>sync</code> method and you reason about when it's
+  called; the full crash-safe protocol is deferred to Phase 5, where it belongs.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Your <code>write_all</code> returned <code>Ok(())</code> and the process is still
+      running fine. Is the data safe across a power cut?</p>
+      <details><summary>Show answer</summary><div class="answer">No — it may be only in the OS page
+      cache (and later the device cache). It's durable only after a successful sync reaches the medium.</div></details>
+      <p class="q">2. What's the difference between <code>flush()</code> and <code>sync_all()</code>?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>flush</code> pushes your process's
+      user-space buffer to the OS; <code>sync_all</code> asks the OS to push the file's content+metadata
+      toward the device. They cross different layers.</div></details>
+      <p class="q">3. Why might you also need to sync a directory?</p>
+      <details><summary>Show answer</summary><div class="answer">File creation/rename/delete updates the
+      containing directory; the new name isn't durable until the directory metadata is synced.</div></details>
+      <p class="q">4. Why not just call <code>fsync</code> after every page write?</p>
+      <details><summary>Show answer</summary><div class="answer">fsync is very expensive (can force a
+      device cache flush); doing it per write destroys throughput. Protocols batch durability to one
+      sync per commit.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/atomiccommit.html">SQLite: Atomic Commit</a> — the canonical, careful statement of the sync/ordering/directory assumptions.</li>
+      <li><strong>Paper/Article:</strong> "Files are hard" / the "fsync gate" literature on how filesystems and devices handle (or mishandle) sync. <span class="verify-tag">⚠️VERIFY</span> a specific source before citing.</li>
+      <li><strong>Doc:</strong> <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>File::sync_all</code></a>.</li>
+      <li><strong>Forward link:</strong> Phase 5 builds the whole durability protocol on this lesson.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

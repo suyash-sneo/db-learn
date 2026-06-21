@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3.1 Why an ordered, disk-oriented index</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:3.1", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.1</div>
+  <h1>3.1 — Why an ordered, disk-oriented index</h1>
+  <div class="goal"><b>Goal:</b> Understand why disk databases need a structure that is both
+  <em>ordered</em> and <em>shallow</em>, and why the cost model on disk is "number of pages touched,"
+  not "number of comparisons."</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Without an index, finding a record means scanning every page — O(pages). With the right index,
+  it's O(height of a very shallow tree). The choice of index structure determines whether your engine
+  is usable on real data. And because disk is slow, the metric that matters is how many <em>pages</em>
+  a lookup reads, not how many CPU comparisons it does.</p>
+
+  <h2>The disk cost model</h2>
+  <p>In RAM, the cost of a search is roughly the number of comparisons. On disk, one access to a page
+  that isn't cached can be many thousands of times slower than a comparison. So the design goal flips:
+  <strong>minimize the number of distinct pages a lookup must read.</strong> A structure with one key
+  per node forces one page read per level; a structure with hundreds of keys per node collapses many
+  levels into one page.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 200" role="img" aria-label="A tall binary tree versus a shallow wide B+tree">
+    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
+    <text class="dg-txt" x="20" y="24" font-weight="700">BST: 1 key/node → tall</text>
+    <circle class="dg-node" cx="80" cy="44" r="10"/><circle class="dg-node" cx="55" cy="74" r="10"/><circle class="dg-node" cx="105" cy="74" r="10"/>
+    <circle class="dg-node" cx="40" cy="104" r="10"/><circle class="dg-node" cx="70" cy="104" r="10"/><circle class="dg-node" cx="120" cy="104" r="10"/>
+    <path class="dg-edge" d="M80,54 L55,64"/><path class="dg-edge" d="M80,54 L105,64"/>
+    <path class="dg-edge" d="M55,84 L40,94"/><path class="dg-edge" d="M55,84 L70,94"/><path class="dg-edge" d="M105,84 L120,94"/>
+    <text class="dg-txt-s" x="40" y="150">many levels = many reads</text>
+    <text class="dg-txt" x="300" y="24" font-weight="700">B+tree: many keys/node → shallow</text>
+    <rect class="dg-node-w" x="330" y="36" width="150" height="20" rx="4"/><text class="dg-txt-s" x="405" y="51" text-anchor="middle">root: k1 k2 k3 …</text>
+    <rect class="dg-node-w" x="300" y="86" width="100" height="20" rx="4"/><text class="dg-txt-s" x="350" y="101" text-anchor="middle">keys …</text>
+    <rect class="dg-node-w" x="410" y="86" width="100" height="20" rx="4"/><text class="dg-txt-s" x="460" y="101" text-anchor="middle">keys …</text>
+    <path class="dg-edge" d="M380,56 L350,82"/><path class="dg-edge" d="M430,56 L460,82"/>
+    <text class="dg-txt-s" x="300" y="150">few levels = few reads</text>
+  </svg>
+  <figcaption>Same key count: the binary tree is deep; the B+tree is wide and shallow.</figcaption>
+  </figure>
+
+  <h2>Why "ordered" matters too</h2>
+  <p>A hash index gives O(1) point lookups but stores keys in no useful order. Many real queries are
+  not point lookups:</p>
+  <ul>
+    <li>Range: "all orders between two dates."</li>
+    <li>Ordering: "list users sorted by name."</li>
+    <li>Prefix: "names starting with 'Sa'."</li>
+    <li>Min/max: "the earliest event."</li>
+  </ul>
+  <p>An ordered index answers all of these by walking a contiguous run of the structure. A hash index
+  cannot, because order is destroyed by hashing. Your engine will need ordered scans for its query
+  layer (Phase 6), so the primary index must be ordered.</p>
+
+  <h2>The two properties an index for your DB must have</h2>
+  <ol>
+    <li><strong>Shallow on disk.</strong> Height grows logarithmically with a very large base (keys
+    per page), so even billions of keys are a few levels deep — few page reads per lookup.</li>
+    <li><strong>Ordered.</strong> Supports range, sort, prefix, and min/max, not just equality.</li>
+  </ol>
+  <p>The B+tree has both. The next lessons build it; the rest of this one is the "why" that justifies
+  the work.</p>
+
+  <div class="box deeper">
+    <div class="box-title">A note on logarithms with a big base</div>
+    <p>Tree height is roughly <code>log<sub>b</sub>(N)</code> where <code>b</code> is the branching
+    factor (keys per node) and <code>N</code> is the number of keys. With <code>b = 2</code> (a binary
+    tree) and a billion keys, height ≈ 30. With <code>b</code> in the hundreds (a page full of keys),
+    height drops to about 3–4. Each level is potentially one page read, so the high branching factor is
+    the whole game. The exact <code>b</code> depends on key size and page size — you'll compute it in
+    3.3. <span class="verify-tag">⚠️VERIFY</span> any specific fanout number against your chosen page
+    and key sizes.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why is "pages touched" the right cost metric on disk, not "comparisons"?</p>
+      <details><summary>Show answer</summary><div class="answer">A non-cached page read can be thousands
+      of times slower than a comparison, so the dominant cost is the number of distinct page reads.</div></details>
+      <p class="q">2. Why does a high branching factor make the tree shallow?</p>
+      <details><summary>Show answer</summary><div class="answer">Height ≈ log base (keys-per-node) of N;
+      a large base shrinks the exponent, so many keys fit in few levels.</div></details>
+      <p class="q">3. Give two queries an ordered index supports that a hash index cannot.</p>
+      <details><summary>Show answer</summary><div class="answer">Any two of: range scans, sorted output,
+      prefix matches, min/max — all rely on key order, which hashing destroys.</div></details>
+      <p class="q">4. Why is a plain in-memory BST a poor on-disk index?</p>
+      <details><summary>Show answer</summary><div class="answer">One key per node makes it deep, so each
+      level is another page read; it wastes the page as the I/O unit.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> <em>Database Internals</em> (Petrov), Ch.2 "B-Tree Basics" — the disk cost argument.</li>
+      <li><strong>Course:</strong> CMU 15-445 "Tree Indexes / B+Trees" lectures. <span class="verify-tag">⚠️VERIFY</span> the exact lecture number before citing.</li>
+      <li><strong>Forward link:</strong> 3.2 (B-tree vs B+tree), 3.3 (fanout from page+key size), Phase 6 (range queries need this order).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>4.2 Slotted pages</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p4:4.2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 4</a> › 4.2</div>
+  <h1>4.2 — Slotted pages</h1>
+  <div class="goal"><b>Goal:</b> Master the slotted-page layout in full: a header, a slot (cell-pointer)
+  array growing from the front, cell content growing from the back, and the operations to insert,
+  read, and delete a variable-length cell.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>The slotted page is the single most reused on-disk structure in your engine: B+tree nodes are
+  slotted pages, and so are the record pages you build here. If you understand it deeply, both the index
+  and the record store fall out of one design.</p>
+
+  <h2>The layout</h2>
+  <p>A slotted page has three regions:</p>
+  <ol>
+    <li><strong>Header</strong> (fixed, at the front): page type, number of cells, the offset where free
+    space begins (end of the slot array), and the offset where cell content begins (the back edge of the
+    used cells). Optionally a pointer to a freed-cell list within the page.</li>
+    <li><strong>Slot array</strong> (grows toward higher offsets, just after the header): one small entry
+    per cell, typically a 2-byte offset (and sometimes a length) pointing to where the cell lives. The
+    slot array is kept in <em>logical order</em> (e.g. sorted by key for a B+tree node).</li>
+    <li><strong>Cell content</strong> (grows toward lower offsets, from the end of the page): the actual
+    variable-length record bytes, placed wherever they fit. Cells need not be in key order physically.</li>
+  </ol>
+  <p>Free space is the gap in the middle between the end of the slot array and the start of cell content.
+  A cell fits if the gap is at least <code>cell_size + slot_size</code>.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 180" role="img" aria-label="Slotted page regions: header, slot array, free gap, cells">
+    <rect class="dg-bg" x="0" y="0" width="560" height="180" rx="10"/>
+    <rect class="dg-box-a" x="20" y="50" width="70" height="60" rx="4"/><text class="dg-txt-s" x="55" y="84" text-anchor="middle">header</text>
+    <rect class="dg-box" x="94" y="50" width="34" height="60" rx="3"/><text class="dg-txt-s" x="111" y="84" text-anchor="middle">s0</text>
+    <rect class="dg-box" x="130" y="50" width="34" height="60" rx="3"/><text class="dg-txt-s" x="147" y="84" text-anchor="middle">s1</text>
+    <rect class="dg-box" x="166" y="50" width="34" height="60" rx="3"/><text class="dg-txt-s" x="183" y="84" text-anchor="middle">s2</text>
+    <rect class="dg-line" x="204" y="50" width="160" height="60" rx="3" style="stroke-dasharray:5 4"/><text class="dg-txt-s" x="284" y="84" text-anchor="middle">free gap</text>
+    <rect class="dg-box" x="368" y="50" width="80" height="60" rx="4"/><text class="dg-txt-s" x="408" y="84" text-anchor="middle">cell 2</text>
+    <rect class="dg-box" x="452" y="50" width="88" height="60" rx="4"/><text class="dg-txt-s" x="496" y="84" text-anchor="middle">cell 0,1</text>
+    <path class="dg-arrow" d="M111,114 C111,140 380,140 408,114" marker-end="url(#a42)"/>
+    <text class="dg-txt-s" x="120" y="160">slot → cell offset (logical order); cells placed physically anywhere</text>
+    <defs><marker id="a42" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Slots grow right, cells grow left, free space is the shrinking gap between them.</figcaption>
+  </figure>
+
+  <h2>The operations</h2>
+  <h3>Insert a cell</h3>
+  <ol>
+    <li>Check the free gap is ≥ <code>cell_size + slot_size</code>. If not, try compaction (4.4); if it
+    still doesn't fit, the page is full → split (B+tree) or move on (record store).</li>
+    <li>Place the cell bytes at <code>cell_content_start − cell_size</code>; update
+    <code>cell_content_start</code>.</li>
+    <li>Insert a slot at the correct logical position (shifting later slots over by one slot width);
+    write the new cell's offset into it; bump the cell count.</li>
+  </ol>
+
+  <h3>Read a cell</h3>
+  <p>Look up the slot by logical index → get the offset (and length) → slice the cell bytes. One
+  indirection, O(1).</p>
+
+  <h3>Delete a cell</h3>
+  <p>Remove its slot (shift later slots down by one) and decrement the count. The cell's bytes are now
+  unreferenced "dead" space. You do <em>not</em> have to move other cells immediately — that's the
+  point of compaction being a separate, deferrable step (4.4). Optionally, thread the freed region onto
+  an in-page freeblock list so a later insert can reuse it without full compaction.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Two offsets, two directions — don't cross them</div>
+    <p>The invariant is <code>slot_array_end ≤ cell_content_start</code> (the gap is non-negative). Every
+    insert must check this <em>before</em> writing, accounting for both the new cell bytes and the new
+    slot. A bug that lets the slot array grow into cell content silently overwrites records. Assert the
+    invariant after every mutation in debug builds.</p>
+  </div>
+
+  <h2>How SQLite names these parts</h2>
+  <p>SQLite's b-tree page is exactly this design: the header records the number of cells, the start of the
+  cell-content area, the first freeblock, and the count of fragmented free bytes; a cell-pointer array
+  follows the header; cell content grows from the end of the page.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6 — "cell pointer array", "cell content area", "freeblocks", "fragmented free bytes"</a>]</span>
+  Reusing this vocabulary makes the source dive (4.6) readable.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li>Read/write the 2-byte slot offsets with <code>u16::from_be_bytes</code>/<code>to_be_bytes</code>
+      over <code>page[a..a+2]</code> slices (same discipline as the header in 2.2).</li>
+      <li>Shifting the slot array is <code>copy_within</code> on the page byte slice — be careful with
+      overlapping ranges; <code>copy_within</code> handles overlap correctly, manual loops may not.</li>
+      <li>Bounds-check every slice into the page; an out-of-range index is corruption, not a panic you
+      want in production — return a <code>Corrupt</code> error.</li>
+    </ul>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why do slots grow from the front and cells from the back?</p>
+      <details><summary>Show answer</summary><div class="answer">So both can grow into a shared middle gap;
+      free space is simply the distance between them, easy to compute and check.</div></details>
+      <p class="q">2. Why can deletion skip moving other cells?</p>
+      <details><summary>Show answer</summary><div class="answer">Removing the slot makes the cell
+      unreferenced "dead" space; reclaiming it is deferred to compaction or an in-page freeblock list.</div></details>
+      <p class="q">3. What invariant must every insert preserve?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>slot_array_end ≤
+      cell_content_start</code> — the free gap must stay non-negative after adding both the cell and its
+      slot.</div></details>
+      <p class="q">4. Why does the slot array stay in logical order while cells don't?</p>
+      <details><summary>Show answer</summary><div class="answer">Logical order (e.g. by key) lets you
+      binary-search slots; physical cell placement is just "wherever it fits," decoupled from order.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6</a> — the canonical slotted page.</li>
+      <li><strong>Doc:</strong> Rust <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.copy_within"><code>slice::copy_within</code></a>.</li>
+      <li><strong>Forward link:</strong> 4.3 (cells too big to fit), 4.4 (reclaiming dead space), the build (slotted record pages).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3.8 Source dive: SQLite btree.c</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:3.8", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.8</div>
+  <h1>3.8 — Source dive: SQLite's B-tree</h1>
+  <div class="goal"><b>Goal:</b> Map the concepts from 3.2–3.6 onto SQLite's real B-tree implementation
+  so you can read it yourself, and see how a production engine structures cells, cursors, and balancing.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>The B-tree layer is <code>src/btree.c</code> (with <code>btree.h</code> and
+    <code>btreeInt.h</code> for internals) in the public-domain SQLite tree. The on-disk layout it
+    produces is specified precisely in the file-format document §1.6.
+    <span class="src">[src: <a href="https://www.sqlite.org/src/file/src/btree.c">sqlite.org/src · src/btree.c</a>; <a href="https://www.sqlite.org/fileformat2.html">file format §1.6 "B-tree Pages"</a>]</span></p>
+    <p><strong>How to verify any claim below:</strong> open the file, search the symbol, read the comment.
+    The §1.6 spec is the authority for byte layout; <code>btreeInt.h</code> is the authority for the data
+    structures.</p>
+  </div>
+
+  <h2>The on-disk facts (these are spec-confirmed)</h2>
+  <ul>
+    <li>Four page types, distinguished by the type byte at offset 0 of the page header: interior index
+    (2), interior table (5), leaf index (10), leaf table (13).
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §1.6</a>]</span></li>
+    <li>The b-tree page header is 8 bytes for leaves and 12 bytes for interior pages (the extra 4 bytes
+    are the right-most child pointer). <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §1.6 header table</a>]</span></li>
+    <li>Cells are stored in a <strong>slotted</strong> arrangement: a cell-pointer array near the front
+    of the page and cell content growing from the end — exactly the layout from 3.3.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §1.6 "cell pointer array" / "cell content area"</a>]</span></li>
+    <li>Cells too large for a page spill to overflow pages.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §1.6</a>]</span></li>
+  </ul>
+
+  <h2>Concepts → symbols to grep (verify each)</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Concept (3.2–3.6)</th><th>Look for</th></tr></thead>
+    <tbody>
+      <tr><td>A position in the tree (search state)</td><td><code>BtCursor</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>In-memory page with parsed cells</td><td><code>MemPage</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Point search / move cursor</td><td><code>sqlite3BtreeMovetoUnpacked</code> / <code>moveToChild</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Insert an entry</td><td><code>sqlite3BtreeInsert</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Split / merge / redistribute</td><td>the <code>balance</code> family (<code>balance_nonroot</code>, <code>balance_deeper</code>, <code>balance_quick</code>) <span class="verify-tag">⚠️VERIFY</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>SQLite's rebalancing is famously consolidated: instead of separate "split" and "merge" routines, a
+  <code>balance</code> routine redistributes cells across a node and its siblings, which can both split
+  (add a page) and merge (remove one). Reading how one routine subsumes both operations from 3.5 and 3.6
+  is the highlight of this dive. <span class="verify-tag">⚠️VERIFY</span> the exact routine names and
+  their division of labor against the current source.</p>
+
+  <h2>What's different from your build (and fine to skip)</h2>
+  <ul>
+    <li><strong>Table vs index b-trees.</strong> SQLite specializes: table b-trees are keyed by integer
+    rowid with data in leaves; index b-trees store keys. Your schemaless engine can use a single
+    id-keyed B+tree, conceptually the table b-tree.</li>
+    <li><strong>The cursor abstraction.</strong> SQLite exposes navigation through cursors that the VDBE
+    (its bytecode VM) drives. You don't need a bytecode VM; a direct API is fine.</li>
+    <li><strong>Decades of edge cases.</strong> Auto-vacuum, incremental vacuum, integer-key
+    optimizations — extract the core, leave these.</li>
+  </ul>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Read for the shape, build your own</div>
+    <p>Per the project rules, this is a source dive, not a copy. You may keep short illustrative snippets
+    from this public-domain file in your own notes, but the B+tree you ship must be code you wrote. The
+    goal here is to recognize your 3.2–3.6 concepts in battle-tested form, and to learn the slotted-cell
+    and balance ideas you'll implement.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. How does SQLite mark a page's type and tell leaf from interior?</p>
+      <details><summary>Show answer</summary><div class="answer">A type byte at offset 0 (2/5/10/13); leaf
+      headers are 8 bytes, interior 12 (extra right-most child pointer).</div></details>
+      <p class="q">2. How does SQLite's <code>balance</code> relate to your split and merge?</p>
+      <details><summary>Show answer</summary><div class="answer">One redistribution routine covers both: it
+      can add a page (split) or remove one (merge) while rebalancing cells across siblings.</div></details>
+      <p class="q">3. Where is the authoritative byte layout, vs the data structures?</p>
+      <details><summary>Show answer</summary><div class="answer">The file-format §1.6 spec for on-disk
+      bytes; <code>btreeInt.h</code> for in-memory structs like <code>MemPage</code>/<code>BtCursor</code>.</div></details>
+      <p class="q">4. Which SQLite-specific features can your build safely omit?</p>
+      <details><summary>Show answer</summary><div class="answer">The bytecode-VM cursor coupling, separate
+      table/index b-tree specialization, and auto/incremental vacuum.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Source:</strong> <a href="https://www.sqlite.org/src/file/src/btree.c">btree.c</a>, <a href="https://www.sqlite.org/src/file/src/btreeInt.h">btreeInt.h</a>.</li>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">file format §1.6</a>.</li>
+      <li><strong>Forward link:</strong> 3.9 (a very different design: copy-on-write B+tree in LMDB), then the build.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

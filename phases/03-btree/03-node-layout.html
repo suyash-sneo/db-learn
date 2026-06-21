@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3.3 Node layout inside a page</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:3.3", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.3</div>
+  <h1>3.3 — Node layout inside a page</h1>
+  <div class="goal"><b>Goal:</b> Decide the exact byte layout of an internal node and a leaf node within
+  one page, including a node header, the entries, and how variable-length keys/values are placed —
+  then estimate fanout.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>A "node" is an abstraction; on disk it's just bytes in a page. The layout you choose determines how
+  many keys fit (fanout, hence tree height), how splits and deletes work, and how scans read entries.
+  This is where the abstract tree meets the concrete page from Phase 2.</p>
+
+  <h2>The node header</h2>
+  <p>Every node page begins with a small fixed header. A reasonable minimal set:</p>
+  <ul>
+    <li><strong>Type byte</strong> — internal vs leaf (3.2).</li>
+    <li><strong>Entry count</strong> — how many keys/cells are stored.</li>
+    <li><strong>Free-space pointer(s)</strong> — where unused space begins (needed for variable-length
+    entries; detailed in Phase 4's slotted-page lesson).</li>
+    <li><strong>Right/next pointer</strong> — for a leaf, the page number of the next leaf (the sibling
+    link); for an internal node, the rightmost child pointer.</li>
+  </ul>
+  <p>SQLite's b-tree page header is 8 bytes for leaf pages and 12 bytes for interior pages (the extra 4
+  bytes hold the right-most child pointer), with fields for the page type, the first freeblock, the cell
+  count, the cell-content start, and fragmented free bytes.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6, "B-tree Page" header table (8-byte leaf / 12-byte interior header)</a>]</span>
+  Your header can be simpler, but the same ingredients appear.</p>
+
+  <h2>Fixed-length vs variable-length entries</h2>
+  <p>If keys and values are all the same size, layout is trivial: an array of fixed-size slots, binary
+  search by index. Real keys (strings, document ids) and values (documents) are variable-length, which
+  is why databases use a <strong>slotted page</strong>: a growing array of small offset "pointers" at
+  the front of the page, and the actual variable-length cells growing from the back. The slot array
+  stays sorted by key even though the cells are placed wherever they fit.</p>
+  <p>This is important enough that Phase 4 is devoted to it. For now, know that a B+tree node is almost
+  always a slotted page, and the "entries" are slots pointing at cells.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 180" role="img" aria-label="Slotted node: header, slot array growing right, cells growing left">
+    <rect class="dg-bg" x="0" y="0" width="560" height="180" rx="10"/>
+    <rect class="dg-box-a" x="20" y="40" width="80" height="60" rx="6"/><text class="dg-txt-s" x="60" y="74" text-anchor="middle">header</text>
+    <rect class="dg-box" x="104" y="40" width="40" height="60" rx="4"/><text class="dg-txt-s" x="124" y="74" text-anchor="middle">s0</text>
+    <rect class="dg-box" x="148" y="40" width="40" height="60" rx="4"/><text class="dg-txt-s" x="168" y="74" text-anchor="middle">s1</text>
+    <rect class="dg-box" x="192" y="40" width="40" height="60" rx="4"/><text class="dg-txt-s" x="212" y="74" text-anchor="middle">s2</text>
+    <text class="dg-txt-s" x="250" y="74">→ free →</text>
+    <rect class="dg-box" x="380" y="40" width="70" height="60" rx="4"/><text class="dg-txt-s" x="415" y="74" text-anchor="middle">cell</text>
+    <rect class="dg-box" x="454" y="40" width="86" height="60" rx="4"/><text class="dg-txt-s" x="497" y="74" text-anchor="middle">cell</text>
+    <text class="dg-txt-s" x="124" y="124">slots grow right (sorted by key)</text>
+    <text class="dg-txt-s" x="380" y="124">cells grow left (placed anywhere)</text>
+  </svg>
+  <figcaption>A slotted node: sorted slot array at the front, variable-length cells at the back.</figcaption>
+  </figure>
+
+  <h2>Internal vs leaf cell contents</h2>
+  <ul>
+    <li><strong>Internal cell:</strong> a separator key + a child page number. (Plus the header's
+    rightmost-child pointer for the "≥ last key" case.)</li>
+    <li><strong>Leaf cell:</strong> a key + the value (or, if the value is large, a pointer to overflow
+    pages — Phase 4). Plus the leaf's next-leaf link in the header.</li>
+  </ul>
+
+  <h2>Estimating fanout (why this drives height)</h2>
+  <p>Fanout = how many children an internal node can hold = how many (separator key + child pointer)
+  cells fit in the usable page space. Roughly:</p>
+  <span class="code-label">approximate fanout</span>
+<pre><code>usable = page_size − node_header − slot_overhead_per_entry × entries
+fanout ≈ usable_for_cells / (avg_key_size + child_pointer_size)</code></pre>
+  <p>With a 4096-byte page, 4-byte child pointers, and small keys, an internal node can route to on the
+  order of a few hundred children, giving a tree only ~3–4 levels deep for millions of keys. The
+  precise number depends on your exact header and key sizes — <span class="verify-tag">⚠️VERIFY</span>
+  by computing it for your chosen layout rather than trusting a round figure.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ A key+value must fit; otherwise you need overflow</div>
+    <p>If a single entry is larger than the page can hold (a big document, a long key), it cannot live
+    inline. Databases handle this with <strong>overflow pages</strong>: store a prefix plus a pointer
+    to a chain of pages holding the rest. SQLite does exactly this for large records.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6 — overflow pages for cells that exceed the page</a>]</span>
+    You'll implement overflow in Phase 4; for the Phase 3 build you can bound key/value sizes so every
+    entry fits inline, and note the limitation.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why is a B+tree node almost always a slotted page?</p>
+      <details><summary>Show answer</summary><div class="answer">Keys/values are variable-length; a sorted
+      slot array plus back-growing cells keeps entries logically sorted without moving the cell bytes.</div></details>
+      <p class="q">2. What does an internal cell contain vs a leaf cell?</p>
+      <details><summary>Show answer</summary><div class="answer">Internal: separator key + child page
+      number. Leaf: key + value (or overflow pointer), with the next-leaf link in the leaf header.</div></details>
+      <p class="q">3. Why does fanout determine tree height?</p>
+      <details><summary>Show answer</summary><div class="answer">Height ≈ log base fanout of N; more
+      cells per internal node → larger base → fewer levels → fewer page reads.</div></details>
+      <p class="q">4. What happens when one entry can't fit in a page?</p>
+      <details><summary>Show answer</summary><div class="answer">It spills to overflow pages: an inline
+      prefix/pointer plus a chain of pages holding the remainder.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6</a> — the b-tree page header and cell formats.</li>
+      <li><strong>Book:</strong> <em>Database Internals</em>, "Page organization / slotted pages."</li>
+      <li><strong>Forward link:</strong> Phase 4.2 (slotted pages in full), 3.4 (binary search over the slot array).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

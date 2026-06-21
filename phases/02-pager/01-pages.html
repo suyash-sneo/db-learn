@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>2.1 Why fixed-size pages</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p2:2.1", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 2</a> › 2.1</div>
+  <h1>2.1 — Why fixed-size pages</h1>
+  <div class="goal"><b>Goal:</b> Understand why disk-oriented databases carve their one file into
+  equal-sized blocks called pages, why the size is a power of two, and what that choice buys and
+  costs you.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>The page is the atom of everything that follows. The B+tree stores one node per page; records
+  live inside pages; the freelist hands out free pages; the WAL ships modified pages. If you pick the
+  page abstraction well, every later layer is simpler. So before writing any code, you need to know
+  exactly <em>why</em> the page exists and why it is a fixed size.</p>
+
+  <h2>The problem: a file is just bytes</h2>
+  <p>An on-disk file is a flat, one-dimensional array of bytes with no structure. A database needs to
+  store many independent things — tree nodes, rows, free-space bookkeeping — and to update one of them
+  without rewriting the whole file. To do that, it needs <em>addressable units</em>: chunks it can
+  point at, read, modify, and write back independently. A page is that unit.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 150" role="img" aria-label="A flat file divided into equal fixed-size pages">
+    <rect class="dg-bg" x="0" y="0" width="560" height="150" rx="10"/>
+    <text class="dg-txt" x="20" y="30" font-weight="700">One file, divided into equal pages</text>
+    <rect class="dg-box" x="20" y="48" width="100" height="60" rx="6"/><text class="dg-txt-s" x="70" y="83" text-anchor="middle">page 1</text>
+    <rect class="dg-box" x="124" y="48" width="100" height="60" rx="6"/><text class="dg-txt-s" x="174" y="83" text-anchor="middle">page 2</text>
+    <rect class="dg-box" x="228" y="48" width="100" height="60" rx="6"/><text class="dg-txt-s" x="278" y="83" text-anchor="middle">page 3</text>
+    <rect class="dg-box" x="332" y="48" width="100" height="60" rx="6"/><text class="dg-txt-s" x="382" y="83" text-anchor="middle">page 4</text>
+    <rect class="dg-box-a" x="436" y="48" width="100" height="60" rx="6"/><text class="dg-txt-s" x="486" y="83" text-anchor="middle">page 5</text>
+    <text class="dg-txt-s" x="20" y="128">byte 0</text>
+    <text class="dg-txt-s" x="486" y="128" text-anchor="middle">each page = same byte count</text>
+  </svg>
+  <figcaption>The pager imposes a grid on the file so anything can be found by page number.</figcaption>
+  </figure>
+
+  <h2>Why <em>fixed</em> size (not variable)?</h2>
+  <p>You could imagine storing variable-length chunks back-to-back. Databases overwhelmingly choose
+  fixed sizes instead, for several concrete reasons:</p>
+  <ul>
+    <li><strong>O(1) addressing.</strong> If every page is the same size <code>S</code>, then page
+    <code>n</code> lives at a byte offset computed by simple arithmetic — no index of "where is each
+    chunk" is needed just to find a page. (You'll derive the exact formula in 2.3.)</li>
+    <li><strong>Simple allocation and reuse.</strong> When a page is freed, any other page can reuse
+    that exact slot because all slots are interchangeable. Variable-length holes cause external
+    fragmentation — a freed 700-byte hole can't cleanly hold an 800-byte chunk. Fixed pages turn the
+    free-space problem into a simple list of free page numbers (Phase 4's freelist).</li>
+    <li><strong>It matches the hardware.</strong> Operating systems and storage devices already move
+    data in fixed-size blocks; aligning the database page to those boundaries avoids extra work
+    (more below).</li>
+    <li><strong>Predictable caching.</strong> A buffer pool of uniform slots (2.5) is far simpler
+    than managing a cache of arbitrary-sized objects.</li>
+  </ul>
+
+  <h2>Why a power of two?</h2>
+  <p>Page sizes are conventionally powers of two (512, 1024, 2048, 4096, 8192, …). The reason is
+  alignment with the layers below the database:</p>
+  <ul>
+    <li>Operating systems manage memory in <strong>virtual-memory pages</strong> — commonly 4096
+    bytes on many platforms (this is an OS/CPU property, not a database constant, and differs across
+    systems). <span class="verify-tag">⚠️VERIFY</span> Treat 4&nbsp;KiB as "typical," not universal;
+    confirm with <code>getconf PAGE_SIZE</code> on your target.</li>
+    <li>Storage devices expose <strong>sectors</strong> (traditionally 512 bytes; many modern drives
+    use 4096-byte physical sectors). Filesystems read and write in <strong>blocks</strong> that are
+    multiples of the sector size.</li>
+  </ul>
+  <p>When the database page size is a power of two that is a multiple of these underlying block
+  sizes, a single page read or write maps cleanly onto whole device blocks, avoiding read-modify-write
+  cycles where the OS must read a block, splice in your partial change, and write it back.</p>
+
+  <h2>What SQLite actually does (your reference point)</h2>
+  <p>SQLite stores the page size as a 2-byte big-endian value at offset 16 of its file header. It must
+  be a power of two between 512 and 32768 inclusive; the value <code>0x0001</code> is the special
+  encoding for 65536, because 65536 does not fit in two bytes.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.3.2, "page size"</a>]</span>
+  Every page in a SQLite database is the same size, and page numbers start at 1.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.2, "Pages"</a>]</span></p>
+  <div class="box deeper">
+    <div class="box-title">Design choice for your engine</div>
+    <p>You'll pick a single fixed page size for your database (a 4096-byte default is a reasonable,
+    common choice) and store it in your own file header so the value travels with the file. This is a
+    <em>design decision you are copying the shape of from SQLite</em>, not a guarantee you inherit
+    from SQLite — your engine only behaves correctly if you implement the offset math and durability
+    yourself.</p>
+  </div>
+
+  <h2>The trade-offs of the size you pick</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>Smaller pages (e.g. 512–1024)</th><th>Larger pages (e.g. 8192–65536)</th></tr></thead>
+    <tbody>
+      <tr><td>Wasted space per page</td><td>Less internal fragmentation for tiny records</td><td>More slack if records are small</td></tr>
+      <tr><td>Tree height</td><td>Fewer keys per node → taller B+tree → more I/O per lookup</td><td>More keys per node → shallower tree → fewer seeks</td></tr>
+      <tr><td>I/O granularity</td><td>Read less to touch one record</td><td>Read more, but fewer operations for scans</td></tr>
+      <tr><td>Cache</td><td>More pages fit in a fixed-size cache</td><td>Each cached page covers more data</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>There's no universally correct answer; it depends on workload. The important property is that the
+  size is fixed and recorded, so the file is self-describing.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why does a fixed page size let you find page <code>n</code> without an index?</p>
+      <details><summary>Show answer</summary><div class="answer">Because every page is the same size,
+      the offset of page <code>n</code> is pure arithmetic on <code>n</code> and the page size — no
+      lookup table mapping page → location is required.</div></details>
+      <p class="q">2. Why are pages typically a power of two and a multiple of the device block size?</p>
+      <details><summary>Show answer</summary><div class="answer">So a page maps cleanly onto whole OS
+      memory pages and device sectors/blocks, avoiding read-modify-write of partial blocks.</div></details>
+      <p class="q">3. You choose a tiny 512-byte page. What happens to a B+tree's height and why does
+      that matter?</p>
+      <details><summary>Show answer</summary><div class="answer">Fewer keys fit per node, so the tree
+      is taller; each extra level is potentially another disk read per lookup, increasing I/O.</div></details>
+      <p class="q">4. Why store the page size inside the file rather than hard-coding it in the engine?</p>
+      <details><summary>Show answer</summary><div class="answer">So the file is self-describing: any
+      version of the engine can open it and compute offsets correctly without external configuration.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">SQLite Database File Format</a>, §1.2–1.3 (pages and the header).</li>
+      <li><strong>Book:</strong> <em>Database Internals</em> (Petrov), Part I, "File formats" — the case for fixed pages and slotted layout.</li>
+      <li><strong>Forward link:</strong> 2.2 (the header), 2.3 (offset math), Phase 4 (records inside pages), Phase 3 (one tree node per page).</li>
+    </ul>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <p>You'll represent a page as a fixed-size byte buffer. <code>[u8; 4096]</code> is a stack array of
+    exactly 4096 bytes; <code>Box&lt;[u8; 4096]&gt;</code> heap-allocates it; <code>Vec&lt;u8&gt;</code>
+    with <code>len() == 4096</code> is the flexible choice. Revisit 0.7 (collections &amp; byte
+    buffers) for the differences.</p>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

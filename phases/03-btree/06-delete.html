@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3.6 Delete, merge, rebalance</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:3.6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.6</div>
+  <h1>3.6 — Delete, merge, rebalance</h1>
+  <div class="goal"><b>Goal:</b> Remove a key from a leaf, and when a node falls below its minimum
+  occupancy, restore the invariant by borrowing from a sibling or merging two nodes — the mirror image
+  of splitting.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Deletion is the operation people most often get wrong or skip. A naive delete leaves nodes too
+  empty, degrading fanout and eventually breaking the tree's guarantees. To keep lookups shallow under
+  churn, you must rebalance on delete just as you split on insert.</p>
+
+  <h2>The occupancy invariant</h2>
+  <p>A B+tree keeps every node (except the root) at least <strong>half full</strong> — this lower bound
+  is what guarantees the tree's logarithmic height. Insert maintains it by splitting full nodes; delete
+  maintains it by fixing under-full nodes. The minimum is usually expressed as ⌈order/2⌉ entries; with
+  variable-length entries it's often a byte threshold (e.g. a node may not drop below a quarter or half
+  of usable bytes). <span class="verify-tag">⚠️VERIFY</span> the exact threshold you choose and apply it
+  consistently.</p>
+
+  <h2>The simple case: leaf still has enough</h2>
+  <p>Descend to the leaf, remove the entry. If the leaf is still at or above minimum occupancy, you're
+  done — no structural change. As with insert, most deletes are this simple.</p>
+
+  <h2>Underflow: borrow, then merge</h2>
+  <p>If removing leaves the node below minimum, restore the invariant in this order:</p>
+  <ol>
+    <li><strong>Borrow (redistribute)</strong> from an adjacent sibling that has more than the minimum:
+    move one entry from the rich sibling into the poor node, and update the parent's separator to match
+    the new boundary. This fixes the underflow without changing the number of nodes.</li>
+    <li><strong>Merge</strong> if neither sibling can spare an entry: combine the under-full node with a
+    sibling into one node (they jointly fit, since both were near the minimum), and remove the now-unused
+    separator and child pointer from the parent.</li>
+  </ol>
+
+  <figure>
+  <svg viewBox="0 0 560 200" role="img" aria-label="An under-full leaf merges with a sibling and the parent separator is removed">
+    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
+    <text class="dg-txt" x="20" y="22" font-weight="700">delete 20 → left leaf underflows → merge</text>
+    <rect class="dg-node-w" x="200" y="34" width="160" height="26" rx="4"/><text class="dg-txt-s" x="280" y="51" text-anchor="middle">parent: [ 30 | 60 ]</text>
+    <path class="dg-edge" d="M225,60 L120,96"/><path class="dg-edge" d="M280,60 L280,96"/><path class="dg-edge" d="M335,60 L440,96"/>
+    <rect class="dg-node" x="40" y="98" width="150" height="30" rx="4"/><text class="dg-txt-s" x="115" y="118" text-anchor="middle">leaf: 10 (under)</text>
+    <rect class="dg-node" x="205" y="98" width="150" height="30" rx="4"/><text class="dg-txt-s" x="280" y="118" text-anchor="middle">leaf: 30, 45</text>
+    <rect class="dg-node" x="370" y="98" width="150" height="30" rx="4"/><text class="dg-txt-s" x="445" y="118" text-anchor="middle">leaf: 60, 80</text>
+    <text class="dg-txt" x="20" y="158" font-weight="700">result: parent loses separator 30</text>
+    <rect class="dg-node-w" x="200" y="166" width="160" height="26" rx="4"/><text class="dg-txt-s" x="280" y="183" text-anchor="middle">parent: [ 60 ] · left merged: 10,30,45</text>
+  </svg>
+  <figcaption>Merge two leaves into one and drop the separator that pointed between them.</figcaption>
+  </figure>
+
+  <h2>The cascade and shrinking the tree</h2>
+  <p>Removing a separator from a parent may push the <em>parent</em> below minimum, so borrow/merge can
+  cascade upward exactly as splits cascade in insert. The terminal case: if the root is an internal node
+  that ends up with a single child (no separators left), delete the root and make that single child the
+  new root — the tree shrinks by one level. This is the only way a B+tree decreases in height, mirroring
+  how root splits are the only way it grows.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Many real databases simplify deletion</div>
+    <p>Full borrow/merge is the textbook algorithm, but production systems often relax it. Some never
+    merge eagerly — they let nodes get sparse and reclaim space lazily (vacuum/compaction). SQLite
+    rebalances on delete via its <code>balance</code> routine but leaves freed space to be reused rather
+    than always shrinking the file. <span class="verify-tag">⚠️VERIFY</span> SQLite's exact delete/balance
+    behavior in <code>btree.c</code> before asserting specifics. For your build, implementing borrow and
+    merge teaches the real invariant; a simpler "delete and tolerate sparse nodes" variant is an
+    acceptable, clearly-documented fallback if time-boxed.</p>
+  </div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Keep the separator and the boundary in sync</div>
+    <p>After borrowing or merging, the parent's separator key must still correctly describe the boundary
+    between its children. A borrow that updates the leaf but not the separator (or vice versa) produces a
+    tree that searches incorrectly without crashing — the worst kind of bug. Re-derive the separator from
+    the children after every redistribution.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What invariant guarantees the tree stays shallow under deletion?</p>
+      <details><summary>Show answer</summary><div class="answer">Every non-root node stays at least
+      ~half full (minimum occupancy), preserving logarithmic height.</div></details>
+      <p class="q">2. In what order do you try to fix an under-full node?</p>
+      <details><summary>Show answer</summary><div class="answer">First borrow/redistribute from a sibling
+      with spare entries; if none can spare one, merge with a sibling.</div></details>
+      <p class="q">3. How does a B+tree shrink in height?</p>
+      <details><summary>Show answer</summary><div class="answer">When the root internal node is reduced to
+      a single child, that child becomes the new root.</div></details>
+      <p class="q">4. Why must you re-derive the parent separator after a borrow/merge?</p>
+      <details><summary>Show answer</summary><div class="answer">The separator must match the new boundary
+      between children; a stale separator silently misroutes searches.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> <em>Database Internals</em>, "Node Merges / Rebalancing on delete."</li>
+      <li><strong>Source:</strong> SQLite <a href="https://www.sqlite.org/src/file/src/btree.c">btree.c</a> <code>balance</code> family (read in 3.8).</li>
+      <li><strong>Forward link:</strong> 3.7 (LSM trees defer deletes differently), Phase 4 (freed pages return to the freelist).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

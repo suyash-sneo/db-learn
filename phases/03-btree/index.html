@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 3 — The index: B+tree</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 3</div>
+  <span class="pill">Phase 3</span>
+  <h1>The index: a disk-oriented B+tree</h1>
+  <p class="lead">The pager gives you pages by number. Now you'll organize those pages into the data
+  structure at the heart of almost every disk database: the B+tree. It keeps keys sorted, stays
+  shallow as it grows so lookups touch few pages, and maps cleanly onto one node per page.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Why a B+tree (and why not a hash map or a plain BST)?</div>
+    <p>An in-memory binary search tree has one key per node and is rebalanced by pointer surgery — fine
+    in RAM, terrible on disk where each pointer hop can be a separate slow read. A B+tree packs many
+    keys into each page-sized node, so a tree holding millions of keys is only a handful of levels deep
+    — meaning a lookup reads only a handful of pages. It also keeps keys in sorted order, which a hash
+    index does not, so it supports range scans (<code>age &gt; 30</code>), ordering, and prefix
+    queries. That ordered-range ability is exactly what a query engine needs later.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 3</div>
+    <p>Explain why B+trees beat BSTs and hashes on disk, lay out internal and leaf nodes inside a page,
+    search the tree, insert with node splits that keep it balanced, delete with merge/rebalance, and
+    weigh B+tree vs LSM trees. You'll build a persistent B+tree on top of your Phase 2 pager.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p3");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

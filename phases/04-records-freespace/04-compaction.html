@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>4.4 Deleting; fragmentation &amp; compaction</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p4:4.4", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 4</a> › 4.4</div>
+  <h1>4.4 — Deletion, fragmentation &amp; compaction</h1>
+  <div class="goal"><b>Goal:</b> Understand how deletes and in-place updates fragment a page's free
+  space, the difference between contiguous free space and total free space, and how compaction
+  reclaims dead space so a page can keep accepting inserts.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Slotted-page deletion (4.2) leaves "dead" bytes behind. Over time a page can have plenty of total
+  free space yet still reject an insert because none of it is <em>contiguous</em>. Compaction is the
+  step that turns scattered holes back into one usable gap. Without it, pages bloat and inserts fail
+  prematurely.</p>
+
+  <h2>How fragmentation happens</h2>
+  <p>Recall the layout: a free gap in the middle, plus possibly dead cells scattered in the cell-content
+  region after deletes. Two kinds of free space arise:</p>
+  <ul>
+    <li><strong>Contiguous free space</strong> — the central gap between the slot array and the start of
+    live cell content. Only this can satisfy a new insert directly.</li>
+    <li><strong>Fragmented free space</strong> — dead bytes left by deleted or shrunk cells, interspersed
+    among live cells. It counts toward total free space but can't host an insert until reclaimed.</li>
+  </ul>
+  <p>SQLite tracks both: its page header records the start of the cell-content area and a count of
+  "fragmented free bytes," and maintains a linked list of larger "freeblocks" within the page.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6 — freeblocks &amp; fragmented free bytes</a>]</span></p>
+
+  <figure>
+  <svg viewBox="0 0 560 180" role="img" aria-label="Before compaction free space is fragmented; after it is one contiguous gap">
+    <rect class="dg-bg" x="0" y="0" width="560" height="180" rx="10"/>
+    <text class="dg-txt" x="20" y="22" font-weight="700">before: holes scattered</text>
+    <rect class="dg-box" x="20" y="32" width="70" height="28" rx="3"/><rect class="dg-line" x="92" y="32" width="40" height="28" rx="3" style="stroke-dasharray:4 3"/><rect class="dg-box" x="134" y="32" width="60" height="28" rx="3"/><rect class="dg-line" x="196" y="32" width="50" height="28" rx="3" style="stroke-dasharray:4 3"/><rect class="dg-box" x="248" y="32" width="60" height="28" rx="3"/>
+    <text class="dg-txt-s" x="55" y="51" text-anchor="middle">live</text><text class="dg-txt-s" x="112" y="51" text-anchor="middle">dead</text><text class="dg-txt-s" x="164" y="51" text-anchor="middle">live</text><text class="dg-txt-s" x="221" y="51" text-anchor="middle">dead</text><text class="dg-txt-s" x="278" y="51" text-anchor="middle">live</text>
+    <text class="dg-txt-s" x="20" y="84">total free is large, but no single gap fits a big cell</text>
+    <text class="dg-txt" x="20" y="118" font-weight="700">after compaction: one gap</text>
+    <rect class="dg-box" x="20" y="128" width="70" height="28" rx="3"/><rect class="dg-box" x="92" y="128" width="60" height="28" rx="3"/><rect class="dg-box" x="154" y="128" width="60" height="28" rx="3"/><rect class="dg-line" x="216" y="128" width="140" height="28" rx="3" style="stroke-dasharray:4 3"/>
+    <text class="dg-txt-s" x="286" y="146" text-anchor="middle">one contiguous gap</text>
+  </svg>
+  <figcaption>Compaction slides live cells together, merging the holes into one usable region.</figcaption>
+  </figure>
+
+  <h2>Compaction: the algorithm</h2>
+  <p>Compaction rebuilds the page so all live cells are packed and free space is contiguous:</p>
+  <ol>
+    <li>Walk the slot array (logical order) and collect each live cell's bytes.</li>
+    <li>Rewrite them packed against the back of the page (or front of content area), in any consistent
+    order — physical order doesn't matter, only that slots are updated to the new offsets.</li>
+    <li>Update each slot's offset to the cell's new location.</li>
+    <li>Reset <code>cell_content_start</code> and the fragmented-bytes counter; the gap is now one block.</li>
+  </ol>
+  <p>This is an O(page) memory shuffle done in a scratch buffer, then written back as one page. It's
+  cheap (one page, RAM-speed) and only triggered when an insert can't otherwise fit.</p>
+
+  <span class="code-label">rust — compaction shape (toy; rebuild into a scratch buffer)</span>
+<pre><code><span class="tok-c">// Pseudocode shape, not engine logic:</span>
+<span class="tok-c">// let mut scratch = vec![0u8; page_size];</span>
+<span class="tok-c">// copy header + slot array into scratch;</span>
+<span class="tok-c">// let mut write_at = page_size;</span>
+<span class="tok-c">// for slot in 0..count {</span>
+<span class="tok-c">//     let cell = live_cell_bytes(page, slot);</span>
+<span class="tok-c">//     write_at -= cell.len();</span>
+<span class="tok-c">//     scratch[write_at..write_at+cell.len()].copy_from_slice(cell);</span>
+<span class="tok-c">//     set_slot_offset(&mut scratch, slot, write_at);</span>
+<span class="tok-c">// }</span>
+<span class="tok-c">// set_cell_content_start(&mut scratch, write_at);</span>
+<span class="tok-c">// page.copy_from_slice(&scratch);</span></code></pre>
+
+  <h2>Updates: the size-change problem</h2>
+  <p>An in-place update is only easy when the new value is the same size or smaller. If a value grows:</p>
+  <ul>
+    <li>If it still fits the page (possibly after compaction), delete the old cell and insert the new one
+    — its slot index can stay the same so external references (e.g. the key→slot mapping) survive.</li>
+    <li>If it no longer fits the page, the record must <strong>relocate</strong> (in a B+tree, this may
+    trigger a split; in a record store, move it to another page and update the index pointer).</li>
+  </ul>
+  <p>This is why a stable logical slot index (not a raw byte offset) is valuable: you can move a cell's
+  bytes around freely as long as the slot keeps pointing at it.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Compaction must be all-or-nothing within the page</div>
+    <p>Build the compacted page in a scratch buffer and write it back in one shot, rather than mutating
+    the live page in place mid-shuffle. A crash partway through an in-place compaction could corrupt the
+    page. Writing a fully-formed page is also what the durability layer (Phase 5) expects — it ships
+    whole pages, not partial edits. (Per-page atomicity against torn writes is itself a Phase 5 concern.)</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why can a page reject an insert despite having lots of free space?</p>
+      <details><summary>Show answer</summary><div class="answer">The free space is fragmented into small
+      dead holes; only contiguous free space can host a new cell until compaction merges the holes.</div></details>
+      <p class="q">2. What does compaction actually do?</p>
+      <details><summary>Show answer</summary><div class="answer">Packs all live cells together and updates
+      their slot offsets, turning scattered free bytes into one contiguous gap.</div></details>
+      <p class="q">3. Why does physical cell order not matter after compaction?</p>
+      <details><summary>Show answer</summary><div class="answer">Logical order lives in the slot array;
+      cells can sit anywhere as long as slots point to their new offsets.</div></details>
+      <p class="q">4. Why prefer a stable slot index over a raw byte offset for external references?</p>
+      <details><summary>Show answer</summary><div class="answer">Cells move during compaction/updates; a
+      stable slot index keeps references valid while the underlying bytes relocate.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6</a> — freeblocks, fragmented bytes, and how SQLite "defragments" a page.</li>
+      <li><strong>Forward link:</strong> 4.5 (whole-page reclamation via the freelist), Phase 5 (writing whole pages durably).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

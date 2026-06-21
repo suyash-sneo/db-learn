@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 2 — The single file &amp; the pager</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 2</div>
+  <span class="pill">Phase 2</span>
+  <h1>The single file &amp; the pager</h1>
+  <p class="lead">Your whole database is going to live in one file. This phase builds the layer that
+  turns that flat stream of bytes into a numbered array of fixed-size <em>pages</em>, caches them in
+  memory, and writes them back. Every higher layer — the B+tree, records, the WAL — is built on top
+  of the pager and never touches the file directly.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Why the pager is the foundation</div>
+    <p>A file is just a one-dimensional array of bytes. A database needs random access to structured
+    chunks that it can read, modify, and write back atomically-ish. The pager is the translation
+    layer: "give me page 42" instead of "seek to byte 172032 and read 4096 bytes." Once it exists,
+    the rest of the engine thinks in <em>page numbers</em>, not byte offsets — which is exactly how
+    SQLite, LMDB, Postgres, and almost every disk-oriented database is organized.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 2</div>
+    <p>Lay out a file header, map page numbers to byte offsets, read and write fixed-size pages
+    through a small abstraction (a "VFS"), cache hot pages in a buffer pool with dirty tracking and
+    eviction, and reason precisely about when written bytes are actually durable. You'll finish by
+    building a real pager in Rust with a failing test suite.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p2");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

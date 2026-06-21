@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Build — a Rust pager</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p2:build", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 2</a> › Build</div>
+  <span class="pill">Build · AI off</span>
+  <h1>Build: a single-file pager with a buffer pool</h1>
+  <div class="goal"><b>Goal:</b> Turn one file into a numbered array of fixed-size pages with a header,
+  a cache that tracks dirty pages and evicts safely, and an explicit <code>sync</code>. Every page
+  above this in the engine will use it.</div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ AI off</div>
+    <p>Use the lessons, the SQLite file-format spec, primary docs, compiler errors, and the hint
+    ladder. This page gives you contracts, stubs, and failing tests — not the implementation. The
+    pager is a core database component, so per the project rules there is no worked solution here.</p>
+  </div>
+
+  <h2>Deliverable</h2>
+  <p>A Rust 2024 package <code>pager</code> exposing a <code>Pager</code> built over a small
+  <code>BlockIo</code> trait, with a file-backed and an in-memory backend, page get/modify/sync, dirty
+  tracking, capacity-bounded caching with safe eviction, and a self-describing header.</p>
+  <span class="code-label">Cargo.toml</span>
+<pre><code>[package]
+name = <span class="tok-s">"pager"</span>
+version = <span class="tok-s">"0.1.0"</span>
+edition = <span class="tok-s">"2024"</span></code></pre>
+
+  <h2>Fixed design decisions</h2>
+  <ul>
+    <li>Page size: a single value stored in the header; default 4096. Page numbers are 1-based; page 0
+    is the reserved null page.</li>
+    <li>Multi-byte header fields are big-endian, written with <code>to_be_bytes</code> (never
+    <code>transmute</code>).</li>
+    <li>Header (kept simple, all big-endian): 16-byte magic <code>"minidb format 1\0"</code>, 2-byte
+    page size, 4-byte page count, 4-byte freelist head (0 = none; unused until Phase 4). The header
+    lives at the start of page 1.</li>
+    <li>Durability is explicit: <code>write_page</code> does not sync; <code>sync</code> does.</li>
+  </ul>
+
+  <h2>Ordered milestones</h2>
+  <ol>
+    <li><strong>M1 — BlockIo.</strong> Define the trait; implement <code>MemBlock</code> (a
+    <code>Vec&lt;u8&gt;</code>) and <code>FileBlock</code> (seek + <code>read_exact</code>/<code>write_all</code>;
+    <code>sync</code> via <code>sync_all</code>).</li>
+    <li><strong>M2 — Header.</strong> <code>Pager::create</code> writes a fresh header;
+    <code>Pager::open</code> reads and validates it (magic, page size). Reject a wrong magic with a
+    typed error.</li>
+    <li><strong>M3 — Offset math + raw page I/O.</strong> Read and write a page by number through the
+    backend using the 1-based formula.</li>
+    <li><strong>M4 — Cache + dirty tracking.</strong> A bounded cache mapping page no → frame;
+    <code>get_page</code> serves hits from memory; modifications mark the page dirty.</li>
+    <li><strong>M5 — Safe eviction.</strong> When full, evict a victim; if it's dirty, write it out
+    first; never evict a pinned page.</li>
+    <li><strong>M6 — sync + allocate.</strong> <code>sync</code> writes all dirty pages then syncs the
+    backend; <code>allocate_page</code> grows the file by one page and updates the header count.</li>
+  </ol>
+
+  <h2>Acceptance criteria</h2>
+  <ul>
+    <li>All Rust tests below pass against <em>both</em> backends.</li>
+    <li>Opening a file written by <code>create</code> round-trips the page size and page count.</li>
+    <li>A wrong-magic file is rejected with the typed error (tested).</li>
+    <li>A written-then-evicted dirty page is not lost: re-reading returns the new bytes (tested).</li>
+    <li>Pinned pages are never chosen as eviction victims (tested).</li>
+    <li>Durability ordering is a documented manual check: <code>write_page</code> alone is not claimed
+    durable; only post-<code>sync</code> state is. (No automated power-cut test in Phase 2; that
+    arrives in Phase 5.)</li>
+  </ul>
+
+  <h2>Stub: <code>src/lib.rs</code></h2>
+  <span class="code-label">src/lib.rs — implement every todo!()</span>
+<pre><code><span class="tok-k">use</span> std::collections::HashMap;
+
+<span class="tok-k">pub const</span> <span class="tok-f">MAGIC</span>: &amp;[<span class="tok-f">u8</span>; 16] = b<span class="tok-s">"minidb format 1\0"</span>;
+<span class="tok-k">pub const</span> <span class="tok-f">DEFAULT_PAGE_SIZE</span>: <span class="tok-f">u16</span> = 4096;
+
+<span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">pub enum</span> <span class="tok-f">PagerError</span> {
+    Io(std::io::Error),
+    BadMagic,
+    BadPageSize(<span class="tok-f">u16</span>),
+    PageOutOfRange(<span class="tok-f">u64</span>),
+}
+<span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;std::io::Error&gt; <span class="tok-k">for</span> <span class="tok-f">PagerError</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: std::io::Error) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">PagerError</span>::<span class="tok-f">Io</span>(e) }
+}
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">PagerError</span>&gt;;
+
+<span class="tok-k">pub trait</span> <span class="tok-f">BlockIo</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">read_at</span>(&amp;<span class="tok-k">mut self</span>, offset: <span class="tok-f">u64</span>, buf: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt;;
+    <span class="tok-k">fn</span> <span class="tok-f">write_at</span>(&amp;<span class="tok-k">mut self</span>, offset: <span class="tok-f">u64</span>, buf: &amp;[<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt;;
+    <span class="tok-k">fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; std::io::Result&lt;()&gt;;
+    <span class="tok-k">fn</span> <span class="tok-f">len</span>(&amp;<span class="tok-k">self</span>) -&gt; std::io::Result&lt;<span class="tok-f">u64</span>&gt;;
+}
+
+<span class="tok-k">pub struct</span> <span class="tok-f">MemBlock</span> { <span class="tok-k">pub</span> data: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; }
+<span class="tok-c">// impl BlockIo for MemBlock { todo!("M1") }</span>
+
+<span class="tok-k">pub struct</span> <span class="tok-f">FileBlock</span> { <span class="tok-k">pub</span> file: std::fs::File }
+<span class="tok-c">// impl BlockIo for FileBlock { todo!("M1: seek + read_exact/write_all; sync_all") }</span>
+
+<span class="tok-k">struct</span> <span class="tok-f">Frame</span> {
+    page_no: <span class="tok-f">u64</span>,
+    bytes: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;,
+    dirty: <span class="tok-f">bool</span>,
+    pinned: <span class="tok-f">bool</span>,
+}
+
+<span class="tok-k">pub struct</span> <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; {
+    io: <span class="tok-f">B</span>,
+    page_size: <span class="tok-f">usize</span>,
+    page_count: <span class="tok-f">u64</span>,
+    capacity: <span class="tok-f">usize</span>,
+    frames: <span class="tok-f">Vec</span>&lt;<span class="tok-f">Frame</span>&gt;,
+    table: HashMap&lt;<span class="tok-f">u64</span>, <span class="tok-f">usize</span>&gt;, <span class="tok-c">// page_no -&gt; frame index</span>
+}
+
+<span class="tok-k">impl</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt; {
+    <span class="tok-k">pub fn</span> <span class="tok-f">create</span>(io: <span class="tok-f">B</span>, page_size: <span class="tok-f">u16</span>, capacity: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: validate page_size is power of two in 512..=32768; write header to page 1; page_count = 1"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(io: <span class="tok-f">B</span>, capacity: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: read header; check MAGIC -&gt; BadMagic; read page_size + page_count"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">offset</span>(&amp;<span class="tok-k">self</span>, page_no: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">u64</span> {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: 1-based; (page_no - 1) * page_size as u64"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">get_page</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">Result</span>&lt;&amp;[<span class="tok-f">u8</span>]&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: hit -&gt; return; miss -&gt; ensure_frame, read_at, insert"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">modify_page</span>&lt;<span class="tok-f">F</span>: <span class="tok-f">FnOnce</span>(&amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>])&gt;(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">u64</span>, f: <span class="tok-f">F</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: bring page in, run f over its bytes, mark dirty"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">evict_one</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">usize</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: choose an UNPINNED victim; if dirty write_at first; free its table entry"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">allocate_page</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">u64</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: page_count += 1; grow file; persist count in header; return new page no"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M6: write_at every dirty frame, clear dirty, then io.sync()"</span>)
+    }
+}</code></pre>
+  <div class="box warn">
+    <div class="box-title">⚠️ The borrow-checker design decision (read before M4)</div>
+    <p>Returning <code>&amp;[u8]</code> from <code>get_page</code> borrows the whole <code>Pager</code>,
+    so you can't get one page and then evict to make room for another in the same expression. This is
+    the real design tension from 2.5. Options, in rough order of simplicity: (a) make
+    <code>modify_page</code> take a closure so the borrow ends when the closure returns (shown above);
+    (b) return a copy of the bytes for reads; (c) hand out a guard/handle that unpins on
+    <code>Drop</code>; (d) interior mutability with <code>RefCell</code>. Pick one and justify it in
+    your notes — this choice is part of the exercise, not an obstacle to route around with
+    <code>unsafe</code>.</p>
+  </div>
+
+  <h2>Failing tests</h2>
+  <span class="code-label">append to src/lib.rs</span>
+<pre><code><span class="tok-m">#[cfg(test)]</span>
+<span class="tok-k">mod</span> tests {
+    <span class="tok-k">use super</span>::*;
+
+    <span class="tok-k">impl</span> <span class="tok-f">MemBlock</span> {
+        <span class="tok-k">fn</span> <span class="tok-f">empty</span>() -&gt; <span class="tok-f">Self</span> { <span class="tok-f">MemBlock</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() } }
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">create_then_open_roundtrips_header</span>() {
+        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, 8).<span class="tok-f">unwrap</span>();
+        <span class="tok-c">// reuse the same backing bytes by moving io back out in your design,</span>
+        <span class="tok-c">// or expose a helper; the point: reopened page_size == 4096.</span>
+        <span class="tok-m">assert_eq!</span>(p.page_size, 4096);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">rejects_bad_magic</span>() {
+        <span class="tok-k">let mut</span> io = <span class="tok-f">MemBlock</span> { data: <span class="tok-f">vec!</span>[0u8; 4096] };
+        io.data[0..4].<span class="tok-f">copy_from_slice</span>(b<span class="tok-s">"nope"</span>);
+        <span class="tok-k">let</span> err = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(io, 8);
+        <span class="tok-m">assert!</span>(<span class="tok-m">matches!</span>(err, <span class="tok-f">Err</span>(<span class="tok-f">PagerError</span>::<span class="tok-f">BadMagic</span>)));
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">dirty_page_survives_eviction</span>() {
+        <span class="tok-k">let mut</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, /* capacity */ 2).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> a = p.<span class="tok-f">allocate_page</span>().<span class="tok-f">unwrap</span>();
+        p.<span class="tok-f">modify_page</span>(a, |b| b[0] = 42).<span class="tok-f">unwrap</span>();
+        <span class="tok-c">// touch enough other pages to force `a` out of a 2-frame cache</span>
+        <span class="tok-k">for</span> _ <span class="tok-k">in</span> 0..4 {
+            <span class="tok-k">let</span> n = p.<span class="tok-f">allocate_page</span>().<span class="tok-f">unwrap</span>();
+            <span class="tok-k">let</span> _ = p.<span class="tok-f">get_page</span>(n).<span class="tok-f">unwrap</span>();
+        }
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">get_page</span>(a).<span class="tok-f">unwrap</span>()[0], 42);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">offset_is_one_based</span>() {
+        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span>::<span class="tok-f">empty</span>(), 4096, 8).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">offset</span>(1), 0);
+        <span class="tok-m">assert_eq!</span>(p.<span class="tok-f">offset</span>(4), 3 * 4096);
+    }
+}</code></pre>
+  <p class="src">Note: <code>create_then_open_roundtrips_header</code> needs your design to expose the
+  backing bytes for reopen (e.g. return <code>io</code> on close, or test <code>MemBlock</code> shared
+  via a handle). Decide the shape; the test asserts the round-trip property, not a specific API.</p>
+
+  <h2>Stuck? — graduated hints</h2>
+  <details><summary>M2: how do I validate the page size?</summary><div class="answer">
+    <strong>Nudge:</strong> The valid set is powers of two in a fixed range.
+    <br><strong>Bigger:</strong> Check <code>512..=32768</code> and <code>v.is_power_of_two()</code>.
+    <br><strong>Source:</strong> the same constraint SQLite enforces at header offset 16
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">fileformat2 §1.3.2</a>]</span>;
+    return <code>BadPageSize</code> otherwise.</div></details>
+
+  <details><summary>M4: get_page won't compile — borrow conflicts</summary><div class="answer">
+    <strong>Nudge:</strong> A returned <code>&amp;[u8]</code> borrows the whole pager for as long as you
+    hold it.
+    <br><strong>Bigger:</strong> Separate "bring the page into a frame" (mutable, may evict) from
+    "hand out a view" (immutable), so eviction never races a live borrow.
+    <br><strong>Technique:</strong> resolve all eviction <em>before</em> taking the final shared borrow,
+    or use the closure-based <code>modify_page</code> so the borrow's scope is the closure.</div></details>
+
+  <details><summary>M5: my eviction sometimes loses data</summary><div class="answer">
+    <strong>Nudge:</strong> What's true of a frame you're about to reuse?
+    <br><strong>Bigger:</strong> If <code>dirty</code>, you must <code>write_at</code> it before
+    overwriting the frame.
+    <br><strong>Technique:</strong> never select a <code>pinned</code> frame; write-back-then-reuse for
+    dirty victims; drop clean victims directly.</div></details>
+
+  <details><summary>M6: when exactly do I sync?</summary><div class="answer">
+    <strong>Nudge:</strong> Per 2.6, <code>write_at</code> ≠ durable.
+    <br><strong>Technique:</strong> flush every dirty frame with <code>write_at</code>, clear their
+    dirty bits, then call <code>io.sync()</code> once. Document that only this point is durable.</div></details>
+
+  <h2>Definition of Done</h2>
+  <ul>
+    <li>☐ All four tests pass against <code>MemBlock</code> (and your <code>FileBlock</code> via a
+    temp-file test you add).</li>
+    <li>☐ Header is big-endian, written field-by-field (no <code>transmute</code>).</li>
+    <li>☐ Eviction never loses a dirty page and never evicts a pinned page.</li>
+    <li>☐ You can state, for any byte, whether it is cached-clean, cached-dirty, written, or synced.</li>
+    <li>☐ You documented your borrow-design choice for <code>get_page</code>/<code>modify_page</code>.</li>
+    <li>☐ <strong>You wrote every implementation line yourself.</strong></li>
+  </ul>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Source anchors</div>
+    <p>Recheck the <a href="https://www.sqlite.org/fileformat2.html">SQLite header layout</a>,
+    <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>sync_all</code></a>,
+    and <a href="https://doc.rust-lang.org/std/primitive.u32.html#method.to_be_bytes">big-endian
+    encoding</a> while implementing.</p>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

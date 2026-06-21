@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>2.4 Reading/writing pages; the VFS</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p2:2.4", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 2</a> › 2.4</div>
+  <h1>2.4 — Reading/writing pages &amp; the VFS abstraction</h1>
+  <div class="goal"><b>Goal:</b> Put a thin abstraction — a "virtual file system" — between the pager
+  and the actual OS file, so the engine talks to one small interface for block I/O and durability, and
+  the backend (real file, memory, test double) can change underneath.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>If the pager calls <code>std::fs::File</code> directly, you can't test it without touching the
+  disk, can't run an in-memory database, and can't port to a platform with different I/O. A VFS is the
+  seam that makes the engine testable and portable. SQLite's portability across operating systems comes
+  almost entirely from this one idea.</p>
+
+  <h2>What a VFS is</h2>
+  <p>A VFS ("virtual file system") is a small interface for the handful of OS operations a database
+  actually needs: open, read at an offset, write at an offset, flush/sync, truncate, and report size.
+  SQLite calls this object an <code>sqlite3_vfs</code> and ships several implementations (unix, win32,
+  in-memory). Swapping the VFS swaps how the database touches storage without changing any engine
+  logic. <span class="src">[src: <a href="https://www.sqlite.org/vfs.html">SQLite: The VFS — "an abstraction layer on the bottom of the SQLite stack"</a>]</span>
+  <span class="verify-tag">⚠️VERIFY</span> the exact method set of <code>sqlite3_vfs</code> against
+  the linked page; treat the list here as the conceptual minimum, not SQLite's exact struct.</p>
+
+  <h2>A minimal block-device trait in Rust</h2>
+  <p>In Rust this maps naturally onto a trait. The pager is generic over "something I can read and
+  write fixed-size blocks to, and ask to become durable."</p>
+  <span class="code-label">rust — the seam (toy trait, not engine logic)</span>
+<pre><code><span class="tok-k">pub trait</span> <span class="tok-f">BlockIo</span> {
+    <span class="tok-c">/// Fill `buf` with `buf.len()` bytes starting at `offset`.</span>
+    <span class="tok-k">fn</span> <span class="tok-f">read_at</span>(&amp;<span class="tok-k">mut self</span>, offset: <span class="tok-f">u64</span>, buf: &amp;<span class="tok-k">mut</span> [<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt;;
+    <span class="tok-c">/// Write all of `buf` starting at `offset`.</span>
+    <span class="tok-k">fn</span> <span class="tok-f">write_at</span>(&amp;<span class="tok-k">mut self</span>, offset: <span class="tok-f">u64</span>, buf: &amp;[<span class="tok-f">u8</span>]) -&gt; std::io::Result&lt;()&gt;;
+    <span class="tok-c">/// Request that previously written bytes reach durable storage.</span>
+    <span class="tok-k">fn</span> <span class="tok-f">sync</span>(&amp;<span class="tok-k">mut self</span>) -&gt; std::io::Result&lt;()&gt;;
+    <span class="tok-k">fn</span> <span class="tok-f">len</span>(&amp;<span class="tok-k">self</span>) -&gt; std::io::Result&lt;<span class="tok-f">u64</span>&gt;;
+}</code></pre>
+  <p>A file-backed implementation is just the 0.8 seek/read/write code behind these methods; an
+  in-memory implementation is a <code>Vec&lt;u8&gt;</code> you index into. The pager never knows which
+  one it has.</p>
+
+  <div class="box rust">
+    <div class="box-title">🦀 read_exact / write_all under the hood</div>
+    <p><code>read_at</code> should loop or use <code>read_exact</code> so a short read is an error, not
+    silent truncation; <code>write_at</code> should use <code>write_all</code>. On Unix,
+    <code>std::os::unix::fs::FileExt</code> offers <code>read_exact_at</code>/<code>write_all_at</code>
+    that take an explicit offset and don't disturb the file's seek cursor — convenient for a block
+    device but platform-specific. <span class="verify-tag">⚠️VERIFY</span> availability per target; the
+    portable fallback is <code>seek</code> + <code>read_exact</code>/<code>write_all</code>.</p>
+  </div>
+
+  <h2>Where durability lives</h2>
+  <p>Crucially, the VFS is where <code>sync</code> lives. The layers above don't call
+  <code>fsync</code>; they call <code>vfs.sync()</code> at the right moments (commit, checkpoint). This
+  keeps all the platform-dependent durability behavior in one place — important because, as you saw in
+  0.8 and will deepen in 2.6, "the bytes were written" and "the bytes are durable" are different
+  claims. <code>File::sync_all()</code> is the OS-level request that backs this method, and its actual
+  guarantee depends on the OS, filesystem, device, and hardware.
+  <span class="src">[src: <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>File::sync_all</code></a>]</span></p>
+
+  <figure>
+  <svg viewBox="0 0 560 200" role="img" aria-label="Engine layers sit above the pager which sits above a VFS interface">
+    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
+    <rect class="dg-box" x="120" y="20" width="320" height="34" rx="6"/><text class="dg-txt-s" x="280" y="42" text-anchor="middle">B+tree / records / WAL (think in page numbers)</text>
+    <path class="dg-arrow" d="M280,56 L280,72" marker-end="url(#a24)"/>
+    <rect class="dg-box-a" x="160" y="74" width="240" height="34" rx="6"/><text class="dg-txt-s" x="280" y="96" text-anchor="middle">Pager: page no ↔ offset, cache, dirty</text>
+    <path class="dg-arrow" d="M280,110 L280,126" marker-end="url(#a24)"/>
+    <rect class="dg-box" x="160" y="128" width="240" height="34" rx="6"/><text class="dg-txt-s" x="280" y="150" text-anchor="middle">VFS / BlockIo: read_at, write_at, sync</text>
+    <path class="dg-arrow" d="M280,164 L280,178" marker-end="url(#a24)"/>
+    <rect class="dg-box" x="160" y="178" width="240" height="20" rx="4"/><text class="dg-txt-s" x="280" y="193" text-anchor="middle">real file · memory · test double</text>
+    <defs><marker id="a24" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>The VFS is the lowest layer; everything above it is storage-backend-agnostic.</figcaption>
+  </figure>
+
+  <h2>Why this pays off</h2>
+  <ul>
+    <li><strong>Tests run in memory.</strong> Unit-test the pager and B+tree against an in-memory
+    <code>BlockIo</code> — fast, deterministic, no temp files.</li>
+    <li><strong>Crash injection.</strong> A test VFS can simulate "the write succeeded but sync never
+    happened" or "only the first half of this page reached disk," which is exactly what you need to
+    test recovery in Phase 5.</li>
+    <li><strong>Portability.</strong> New platform ⇒ new backend, not a rewrite of the engine.</li>
+  </ul>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What problem does putting a VFS trait under the pager solve?</p>
+      <details><summary>Show answer</summary><div class="answer">It decouples engine logic from the
+      storage backend, enabling in-memory testing, crash injection, and portability without changing
+      higher layers.</div></details>
+      <p class="q">2. Why does <code>sync</code> belong in the VFS rather than scattered through the
+      engine?</p>
+      <details><summary>Show answer</summary><div class="answer">Durability is platform-dependent and
+      subtle; centralizing it keeps all OS-specific behavior in one auditable place that higher layers
+      invoke at well-defined commit points.</div></details>
+      <p class="q">3. How does a VFS help you test recovery?</p>
+      <details><summary>Show answer</summary><div class="answer">A test VFS can simulate partial writes
+      or dropped syncs, reproducing crash states deterministically without a real power cut.</div></details>
+      <p class="q">4. Why prefer <code>read_exact</code>/<code>write_all</code> inside the backend?</p>
+      <details><summary>Show answer</summary><div class="answer">They guarantee the full block is
+      transferred or report an error, instead of silently moving fewer bytes than a fixed-size page
+      requires.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Doc:</strong> <a href="https://www.sqlite.org/vfs.html">SQLite VFS</a> — the canonical "pluggable I/O layer" design; skim the method list.</li>
+      <li><strong>Doc:</strong> Rust <a href="https://doc.rust-lang.org/std/os/unix/fs/trait.FileExt.html"><code>FileExt</code></a> (positional I/O, Unix) and <a href="https://doc.rust-lang.org/std/fs/struct.File.html#method.sync_all"><code>sync_all</code></a>.</li>
+      <li><strong>Forward link:</strong> 2.5 (cache above the VFS), 2.6 (what sync really guarantees), Phase 5 (crash injection via a test VFS).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

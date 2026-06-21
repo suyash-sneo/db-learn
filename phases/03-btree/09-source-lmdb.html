@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3.9 Source dive: LMDB/MDBX copy-on-write</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:3.9", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.9</div>
+  <h1>3.9 — Source dive: LMDB / MDBX copy-on-write B+tree</h1>
+  <div class="goal"><b>Goal:</b> See a completely different B+tree durability strategy — copy-on-write
+  with no write-ahead log — and understand precisely what COW does and does <em>not</em> give you for
+  free.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>LMDB (Lightning Memory-Mapped Database, by Howard Chu / Symas) is a compact C B+tree engine; its
+    core is <code>mdb.c</code>. libmdbx is a hardened fork with extended docs. Both are good reads
+    because they are small and document their copy-on-write design.
+    <span class="src">[src: <a href="http://www.lmdb.tech/doc/">LMDB documentation (lmdb.tech)</a>; <a href="https://github.com/erthink/libmdbx">libmdbx repository</a>]</span>
+    <span class="verify-tag">⚠️VERIFY</span> precise LMDB internals against the source/design talk
+    before asserting exact structures; this page teaches the COW idea, which is the transferable part.</p>
+  </div>
+
+  <h2>The big idea: never overwrite a live page</h2>
+  <p>LMDB's B+tree is <strong>copy-on-write</strong> (a.k.a. shadow paging). To modify a page, it does
+  not write in place. Instead it:</p>
+  <ol>
+    <li>Copies the page being modified to a brand-new, currently-free page.</li>
+    <li>Applies the change to the copy.</li>
+    <li>Because the copy has a new page number, its <em>parent</em> must now point to the new page — so
+    the parent is also copied and updated, and so on up to the root.</li>
+    <li>The transaction commits by writing a new root and a new "meta page" that points at it.</li>
+  </ol>
+  <p>The old pages are untouched and still form a complete, consistent older version of the tree until
+  the new root is published.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 200" role="img" aria-label="Copy-on-write copies the path from a changed leaf up to a new root">
+    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
+    <text class="dg-txt" x="20" y="22" font-weight="700">old (kept intact)</text>
+    <rect class="dg-node" x="40" y="32" width="70" height="24" rx="4"/><text class="dg-txt-s" x="75" y="49" text-anchor="middle">root</text>
+    <rect class="dg-node" x="20" y="80" width="60" height="24" rx="4"/><text class="dg-txt-s" x="50" y="97" text-anchor="middle">int</text>
+    <rect class="dg-node" x="20" y="130" width="60" height="24" rx="4"/><text class="dg-txt-s" x="50" y="147" text-anchor="middle">leaf</text>
+    <path class="dg-edge" d="M70,56 L55,78"/><path class="dg-edge" d="M50,104 L50,128"/>
+    <text class="dg-txt" x="330" y="22" font-weight="700">new (copied path)</text>
+    <rect class="dg-node-w" x="350" y="32" width="70" height="24" rx="4"/><text class="dg-txt-s" x="385" y="49" text-anchor="middle">root'</text>
+    <rect class="dg-node-w" x="330" y="80" width="60" height="24" rx="4"/><text class="dg-txt-s" x="360" y="97" text-anchor="middle">int'</text>
+    <rect class="dg-node-w" x="330" y="130" width="60" height="24" rx="4"/><text class="dg-txt-s" x="360" y="147" text-anchor="middle">leaf'</text>
+    <path class="dg-edge-hot" d="M380,56 L365,78"/><path class="dg-edge-hot" d="M360,104 L360,128"/>
+    <text class="dg-txt-s" x="280" y="185" text-anchor="middle">commit = atomically publish the new meta/root pointer</text>
+  </svg>
+  <figcaption>Only the root-to-leaf path is copied; the rest of the tree is shared with the old version.</figcaption>
+  </figure>
+
+  <h2>What COW buys you</h2>
+  <ul>
+    <li><strong>Crash safety without a WAL.</strong> A crash mid-write leaves the old root and all old
+    pages intact; on restart you simply use the last fully-committed meta page. There is no journal to
+    replay.</li>
+    <li><strong>Cheap consistent snapshots / MVCC reads.</strong> A reader that pinned the old root keeps
+    seeing a consistent older version while a writer builds a new one — readers never block writers and
+    vice versa. LMDB uses exactly this for its single-writer, many-reader concurrency.</li>
+  </ul>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ COW does not give you these "for free"</div>
+    <p>This is the lesson's whole point, and a common over-claim. Copy-on-write provides the
+    <em>mechanism</em>, but you still must implement the protocol around it:</p>
+    <ul>
+      <li><strong>Atomic root publication.</strong> Switching to the new root must itself be atomic and
+      correctly ordered with syncs, or a crash mid-publish corrupts everything. LMDB uses two meta pages
+      and writes them alternately, with sync ordering, so one is always valid.
+      <span class="verify-tag">⚠️VERIFY</span> the exact two-meta-page protocol against LMDB docs.</li>
+      <li><strong>Durability still needs fsync.</strong> Publishing a new root is only durable after the
+      relevant sync; COW does not remove the need for the durability ordering from 2.6.</li>
+      <li><strong>Space reclamation.</strong> Old pages from no-longer-referenced versions must be put
+      back on a free list, or the file grows forever. LMDB maintains a free-page list keyed by the
+      transaction that freed them.</li>
+      <li><strong>Write amplification.</strong> Every change rewrites the whole root-to-leaf path, not
+      one page — a real cost for deep trees or tiny updates.</li>
+    </ul>
+  </div>
+
+  <h2>COW vs WAL (and why this project uses WAL)</h2>
+  <p>COW (shadow paging) and write-ahead logging are two answers to the same question — "how do I make
+  an in-place B+tree crash-safe?" COW keeps old pages and atomically switches roots; WAL (Phase 5) logs
+  changes before applying them and replays on recovery. Both are valid. This curriculum builds a WAL
+  because it generalizes more directly to incremental durability and is the design SQLite uses, but COW
+  is a legitimate (and in some ways simpler) alternative you should understand. A future v2 of your
+  engine could adopt COW for snapshot isolation.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. In copy-on-write, why does changing one leaf also copy its ancestors?</p>
+      <details><summary>Show answer</summary><div class="answer">The copied leaf has a new page number, so
+      its parent must point to the new page; that re-points cascades up to a new root.</div></details>
+      <p class="q">2. How does COW give crash safety without a journal?</p>
+      <details><summary>Show answer</summary><div class="answer">Old pages and the old root stay intact;
+      a crash before publishing the new root just leaves the last committed version usable.</div></details>
+      <p class="q">3. Name two things COW does <em>not</em> provide automatically.</p>
+      <details><summary>Show answer</summary><div class="answer">Any two of: atomic+ordered root
+      publication, fsync durability, free-page reclamation, low write amplification.</div></details>
+      <p class="q">4. Why might COW give cheap snapshots?</p>
+      <details><summary>Show answer</summary><div class="answer">A reader holding an old root sees a
+      complete, immutable older version while writers build new pages elsewhere.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Docs/Source:</strong> <a href="http://www.lmdb.tech/doc/">LMDB docs</a>, <a href="https://github.com/erthink/libmdbx">libmdbx</a> (design notes are extensive).</li>
+      <li><strong>Talk:</strong> Howard Chu's LMDB talks explain the two-meta-page commit. <span class="verify-tag">⚠️VERIFY</span> a specific talk/timestamp before citing.</li>
+      <li><strong>Forward link:</strong> Phase 5 builds the WAL alternative; Phase 7 revisits MVCC, which COW enables.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

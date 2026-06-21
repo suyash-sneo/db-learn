@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3.5 Insert &amp; node splits</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p3:3.5", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 3</a> › 3.5</div>
+  <h1>3.5 — Insert &amp; node splits</h1>
+  <div class="goal"><b>Goal:</b> Insert a key/value into the correct leaf, and when a node overflows,
+  split it and push a separator up — recursively, possibly growing the tree by a new root — so the tree
+  stays balanced.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Insertion is where the B+tree earns its "balanced" property. Done right, every leaf stays at the
+  same depth and the tree never degenerates. Splitting is the single trickiest algorithm in the whole
+  index; understanding it precisely is the core of this phase.</p>
+
+  <h2>The happy path: leaf has room</h2>
+  <p>Descend (3.4) to the leaf where the key belongs. If the leaf has free space, insert the (key,
+  value) entry in sorted position and you're done. Most inserts are this simple.</p>
+
+  <h2>The split: leaf is full</h2>
+  <p>If the target leaf has no room for the new entry:</p>
+  <ol>
+    <li>Conceptually add the new entry to the full leaf's entries, giving an over-full set.</li>
+    <li>Allocate a new leaf page (via the pager).</li>
+    <li>Split the entries roughly in half: lower half stays in the original leaf, upper half moves to
+    the new leaf.</li>
+    <li>Fix the sibling links: the new leaf's next-pointer becomes the old leaf's old next, and the old
+    leaf now points to the new leaf.</li>
+    <li><strong>Copy</strong> the first key of the new (right) leaf up into the parent as a separator,
+    pointing at the new leaf. (For leaves, the separator is a <em>copy</em> — the key still exists in the
+    leaf, because all data lives in leaves.)</li>
+  </ol>
+
+  <figure>
+  <svg viewBox="0 0 560 210" role="img" aria-label="A full leaf splits into two and pushes a separator key into the parent">
+    <rect class="dg-bg" x="0" y="0" width="560" height="210" rx="10"/>
+    <text class="dg-txt" x="20" y="22" font-weight="700">before: leaf full (insert 25)</text>
+    <rect class="dg-node" x="20" y="32" width="220" height="34" rx="4"/><text class="dg-txt-s" x="130" y="53" text-anchor="middle">leaf: 10, 20, 30, 40 (full)</text>
+    <text class="dg-txt" x="20" y="100" font-weight="700">after: split + push separator up</text>
+    <rect class="dg-node-w" x="180" y="110" width="120" height="26" rx="4"/><text class="dg-txt-s" x="240" y="127" text-anchor="middle">parent: [ 30 ]</text>
+    <path class="dg-edge" d="M210,136 L120,166"/><path class="dg-edge" d="M270,136 L370,166"/>
+    <rect class="dg-node" x="40" y="168" width="160" height="30" rx="4"/><text class="dg-txt-s" x="120" y="188" text-anchor="middle">leaf: 10, 20, 25</text>
+    <rect class="dg-node" x="300" y="168" width="160" height="30" rx="4"/><text class="dg-txt-s" x="380" y="188" text-anchor="middle">leaf: 30, 40</text>
+    <path class="dg-arrow" d="M200,183 L300,183" marker-end="url(#a35)"/>
+    <defs><marker id="a35" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>30 (first key of the right leaf) is copied up as the parent's separator.</figcaption>
+  </figure>
+
+  <h2>Internal splits and the recursive cascade</h2>
+  <p>Pushing a separator into the parent may overflow the <em>parent</em>. An internal node splits
+  similarly, but with one crucial difference: when an internal node splits, the middle separator is
+  <strong>moved up</strong> (not copied), because internal separators are pure routers — the moved key
+  is represented below it by the child pointers, not duplicated as data. The left half keeps the
+  separators below the median; the right half gets those above it; the median rises to the grandparent.</p>
+  <p>This can cascade all the way to the root. If the root itself splits, you allocate a brand-new root
+  whose single separator is the median and whose two children are the two halves. <strong>This is the
+  only way a B+tree grows in height</strong>, and it grows from the top, which is why all leaves stay at
+  the same depth — the balance property.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Leaf split copies up; internal split moves up</div>
+    <p>This asymmetry is the most common B+tree bug. Leaf separator = a <em>copy</em> of the right leaf's
+    first key (the key still lives in the leaf). Internal separator = the median key <em>removed</em>
+    from the node and promoted (it must not remain, or you'd route to it as if it were a real key with a
+    child on both sides). Mixing these up either loses keys or creates phantom routes.</p>
+  </div>
+
+  <h2>Top-down vs bottom-up splitting</h2>
+  <p>Two implementation strategies:</p>
+  <ul>
+    <li><strong>Bottom-up (insert then split):</strong> descend to the leaf, insert, and if it
+    overflows, split and propagate upward, repeating at each ancestor. Needs the path back to the root
+    (a stack of visited pages).</li>
+    <li><strong>Top-down (pre-emptive split):</strong> on the way down, proactively split any full node
+    you pass through, guaranteeing the parent always has room for a promoted key. Avoids the back-up
+    pass but may split nodes unnecessarily.</li>
+  </ul>
+  <p>Bottom-up is the more common teaching approach and is fine for your build. Either way, record the
+  root-to-leaf path so you can update parents. <span class="verify-tag">⚠️VERIFY</span> which strategy a
+  given source (e.g. SQLite) uses before claiming it; this curriculum's build uses bottom-up.</p>
+
+  <h2>Choosing the split point</h2>
+  <p>Splitting "roughly in half" by count is the simple default. With variable-length entries you may
+  split by <em>bytes</em> (balance space, not count) so both halves have similar free space. The only
+  hard requirement: after the split, both nodes are at least minimally full (no node below its minimum
+  occupancy) and the new entry fits. Bound your key/value sizes in the build so a single split always
+  suffices.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. When a leaf splits, is the separator pushed up a copy or a move? Why?</p>
+      <details><summary>Show answer</summary><div class="answer">A copy — all data lives in leaves, so the
+      key must remain in the leaf while a copy routes to it from the parent.</div></details>
+      <p class="q">2. When an internal node splits, is the median a copy or a move? Why?</p>
+      <details><summary>Show answer</summary><div class="answer">A move — internal separators are pure
+      routers; leaving it behind would create a duplicate route with no real key.</div></details>
+      <p class="q">3. How does a B+tree increase in height, and why does that keep it balanced?</p>
+      <details><summary>Show answer</summary><div class="answer">Only by the root splitting into a new
+      root above it; growth at the top keeps every leaf at equal depth.</div></details>
+      <p class="q">4. Why does bottom-up splitting need the root-to-leaf path?</p>
+      <details><summary>Show answer</summary><div class="answer">To insert promoted separators into each
+      parent in turn as splits propagate upward.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Book:</strong> <em>Database Internals</em>, "B-Tree Node Splits and Merges" — the copy-up/move-up distinction in detail.</li>
+      <li><strong>Course:</strong> CMU 15-445 B+tree lecture covers split visually. <span class="verify-tag">⚠️VERIFY</span> the lecture/timestamp.</li>
+      <li><strong>Forward link:</strong> 3.6 (the inverse: delete/merge), 3.8 (how SQLite's balance routine handles this).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

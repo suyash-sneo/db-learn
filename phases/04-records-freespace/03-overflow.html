@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>4.3 Cell formats &amp; overflow pages</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p4:4.3", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 4</a> › 4.3</div>
+  <h1>4.3 — Cell formats &amp; overflow pages</h1>
+  <div class="goal"><b>Goal:</b> Define what's inside a cell, and handle records too large to fit in a
+  page by spilling the tail to a chain of overflow pages — removing the bounded-size restriction from
+  Phase 3.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>A document can be larger than your page. Without overflow handling, your engine simply can't store
+  it — a fatal limitation for a document database. Overflow pages are how every page-based engine stores
+  arbitrarily large values while keeping fixed-size pages.</p>
+
+  <h2>What's in a cell</h2>
+  <p>A cell is the unit a slot points at. Its contents depend on the page type (3.3), but the recurring
+  fields are:</p>
+  <ul>
+    <li>A <strong>length</strong> (or it's derivable from the slot) — how many payload bytes.</li>
+    <li>The <strong>key</strong> (for ordered pages) — used by binary search.</li>
+    <li>The <strong>payload</strong> — the value/record bytes, possibly only a prefix if the rest
+    overflows.</li>
+    <li>An optional <strong>overflow pointer</strong> — the page number of the first overflow page, when
+    the payload didn't fit inline.</li>
+    <li>For internal B+tree cells, a <strong>child page number</strong> instead of a payload.</li>
+  </ul>
+
+  <h2>The overflow decision</h2>
+  <p>When a record is too large to fit inline (it would consume too much of the page, hurting fanout),
+  the engine stores an inline prefix plus a pointer, and writes the remainder into a linked list of
+  overflow pages:</p>
+  <ol>
+    <li>Keep up to some threshold of payload inline in the cell.</li>
+    <li>Allocate an overflow page; write the next <code>page_size − overflow_header</code> bytes of
+    payload into it; its first bytes are a "next overflow page" pointer (0 = end).</li>
+    <li>Repeat, chaining pages, until all payload is written.</li>
+    <li>Store the first overflow page number in the cell.</li>
+  </ol>
+  <p>Reading reverses this: read the inline prefix, then follow the chain, concatenating each page's
+  payload until the next-pointer is 0.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 160" role="img" aria-label="A cell with inline prefix points to a chain of overflow pages">
+    <rect class="dg-bg" x="0" y="0" width="560" height="160" rx="10"/>
+    <rect class="dg-box-a" x="20" y="50" width="140" height="50" rx="6"/><text class="dg-txt-s" x="90" y="72" text-anchor="middle">cell: key + prefix</text><text class="dg-txt-s" x="90" y="90" text-anchor="middle">+ overflow ptr →</text>
+    <path class="dg-arrow" d="M162,75 L196,75" marker-end="url(#a43)"/>
+    <rect class="dg-box" x="200" y="50" width="100" height="50" rx="6"/><text class="dg-txt-s" x="250" y="72" text-anchor="middle">ovf page 1</text><text class="dg-txt-s" x="250" y="90" text-anchor="middle">next →</text>
+    <path class="dg-arrow" d="M302,75 L336,75" marker-end="url(#a43)"/>
+    <rect class="dg-box" x="340" y="50" width="100" height="50" rx="6"/><text class="dg-txt-s" x="390" y="72" text-anchor="middle">ovf page 2</text><text class="dg-txt-s" x="390" y="90" text-anchor="middle">next = 0</text>
+    <text class="dg-txt-s" x="20" y="130">read: inline prefix ++ page1 ++ page2 (stop at next = 0)</text>
+    <defs><marker id="a43" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Inline prefix + a singly-linked chain of overflow pages holds an arbitrarily large value.</figcaption>
+  </figure>
+
+  <h2>How SQLite does it (your reference)</h2>
+  <p>SQLite stores large cell payloads partly inline and spills the rest to a linked list of overflow
+  pages; each overflow page begins with a 4-byte big-endian pointer to the next overflow page (zero on
+  the last), followed by payload bytes.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6 "Cell payload overflow pages"</a>]</span>
+  SQLite computes how much stays inline from the page size and usable size to balance fanout against
+  overflow I/O; the exact thresholds are spelled out in §1.6. <span class="verify-tag">⚠️VERIFY</span>
+  the precise inline-payload formula against §1.6 before copying numbers — it is subtle and version-stable
+  but easy to misquote.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Overflow pages must be freed too</div>
+    <p>When a record is deleted or shrunk, its overflow chain must be returned to the freelist (4.5), or
+    you leak pages. Conversely, allocating overflow pages draws from the freelist first. Overflow and the
+    freelist are two halves of the same space-management story.</p>
+  </div>
+
+  <h2>Keeping it tractable in your build</h2>
+  <p>A simple, correct policy for your engine: choose a fixed inline threshold (e.g. keep the cell within
+  ¼ of usable page space); if the value exceeds it, store a small inline prefix (or none) plus a 4-byte
+  first-overflow-page pointer, and chain the rest. Document the threshold. This is enough to store
+  documents of any size while keeping nodes high-fanout.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why store a value partly inline instead of always fully overflowing?</p>
+      <details><summary>Show answer</summary><div class="answer">A small inline prefix avoids an extra page
+      read for short-ish values and keeps the cell self-locating, while still bounding inline size to
+      protect fanout.</div></details>
+      <p class="q">2. How is an arbitrarily large value reassembled on read?</p>
+      <details><summary>Show answer</summary><div class="answer">Read the inline prefix, then follow the
+      overflow-page chain, concatenating each page's payload until the next-pointer is 0.</div></details>
+      <p class="q">3. What must happen to overflow pages when a record is deleted?</p>
+      <details><summary>Show answer</summary><div class="answer">The whole chain must be returned to the
+      freelist, or those pages leak.</div></details>
+      <p class="q">4. Why bound how much payload stays inline?</p>
+      <details><summary>Show answer</summary><div class="answer">Large inline cells reduce how many cells
+      fit per page, lowering fanout and deepening the tree.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §1.6</a> — cell formats and overflow pages.</li>
+      <li><strong>Forward link:</strong> 4.5 (freelist supplies/reclaims overflow pages), Phase 6 (large documents use overflow).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>
