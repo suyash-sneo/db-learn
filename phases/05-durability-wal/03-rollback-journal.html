@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>5.3 The rollback journal</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p5:5.3", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › 5.3</div>
+  <h1>5.3 — The rollback journal (undo logging)</h1>
+  <div class="goal"><b>Goal:</b> Understand the first classic atomicity mechanism: before changing a page,
+  save its <em>original</em> content to a side file, then modify the database in place. A crash mid-write
+  is repaired by copying the originals back — rolling the database <em>back</em> to before the transaction.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>The rollback journal is the simpler of the two mechanisms and the one SQLite used by default for
+  years. Even though your build will target a WAL, understanding the rollback journal first makes the WAL
+  obvious by contrast: same problem, opposite direction (undo vs redo).</p>
+
+  <h2>The idea: keep an undo copy, modify in place</h2>
+  <p>The main database file always holds the "real" pages. To change them atomically:</p>
+  <ol>
+    <li>For every page you're about to modify, first write its <strong>original</strong> bytes into a
+    separate <em>rollback journal</em> file.</li>
+    <li><strong>Barrier:</strong> fsync the journal so the originals are durable.</li>
+    <li>Now write the modified pages into the main database file in place.</li>
+    <li><strong>Barrier:</strong> fsync the database file.</li>
+    <li>Delete the journal. <em>This deletion is the commit point.</em></li>
+  </ol>
+  <p>SQLite's atomic-commit write describes exactly this sequence, and names the journal deletion as "the
+  instant where the transaction commits."
+  <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §3.10 — "the rollback journal file is deleted. This is the instant where the transaction commits."</a>]</span></p>
+
+  <figure>
+  <svg viewBox="0 0 560 200" role="img" aria-label="Rollback journal timeline: copy originals, fsync, modify db, fsync, delete journal">
+    <rect class="dg-bg" x="0" y="0" width="560" height="200" rx="10"/>
+    <rect class="dg-box" x="20" y="30" width="120" height="44" rx="6"/><text class="dg-txt-s" x="80" y="50" text-anchor="middle">copy originals</text><text class="dg-txt-s" x="80" y="66" text-anchor="middle">→ journal</text>
+    <rect class="dg-box-a" x="160" y="30" width="80" height="44" rx="6"/><text class="dg-txt-s" x="200" y="56" text-anchor="middle">fsync ◼</text>
+    <rect class="dg-box" x="260" y="30" width="120" height="44" rx="6"/><text class="dg-txt-s" x="320" y="50" text-anchor="middle">write new pages</text><text class="dg-txt-s" x="320" y="66" text-anchor="middle">→ db in place</text>
+    <rect class="dg-box-a" x="400" y="30" width="80" height="44" rx="6"/><text class="dg-txt-s" x="440" y="56" text-anchor="middle">fsync ◼</text>
+    <rect class="dg-fill-2" x="20" y="110" width="180" height="44" rx="6"/><text class="dg-txt-s" x="110" y="136" text-anchor="middle">delete journal = COMMIT</text>
+    <path class="dg-arrow" d="M140,52 L158,52" marker-end="url(#a53)"/>
+    <path class="dg-arrow" d="M240,52 L258,52" marker-end="url(#a53)"/>
+    <path class="dg-arrow" d="M380,52 L398,52" marker-end="url(#a53)"/>
+    <text class="dg-txt-s" x="20" y="184">crash before delete → roll back from journal · crash after delete → changes are in the db</text>
+    <defs><marker id="a53" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="dg-accent"/></marker></defs>
+  </svg>
+  <figcaption>Undo logging: originals saved first; the journal's existence is what triggers rollback.</figcaption>
+  </figure>
+
+  <h2>Why this ordering is crash-safe</h2>
+  <p>Consider where a crash can strike:</p>
+  <ul>
+    <li><strong>Before the journal is fully synced:</strong> the database hasn't been touched yet; the
+    partial journal is discarded. No change — correct.</li>
+    <li><strong>After journal sync, during the in-place db writes:</strong> the database may be torn, but
+    the complete originals are durably in the journal. Recovery copies them back, undoing the partial
+    write — back to the start state. Correct (atomic: none applied).</li>
+    <li><strong>After the db is synced but before journal deletion:</strong> the new data is fully in the
+    db, but the journal still exists, so recovery would roll back. To avoid losing a real commit, the
+    deletion/zeroing of the journal header is the single act that flips the outcome — done after the db is
+    durable. Correct.</li>
+    <li><strong>After journal deletion:</strong> no journal, nothing to recover; the committed state
+    stands. Correct (atomic: all applied).</li>
+  </ul>
+
+  <h2>The journal header and the torn-write defense</h2>
+  <p>The journal starts with a header recording the original database size (so recovery can truncate back)
+  and a count of how many page records follow. SQLite writes the page count into the header
+  <em>after</em> the page records are synced; combined with the "sectors are linear" assumption, a journal
+  whose header reads as zero/garbage is treated as not committed and ignored.
+  <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §3.5–§3.7, §4.2 — journal header, original db size, page-count written last</a>]</span></p>
+
+  <h2>The cost: write amplification</h2>
+  <p>Every changed page is written twice to stable storage — once as an original into the journal, once as
+  the new value into the database — with two fsync barriers per transaction. That double write and the
+  in-place modification of the main file (which forces an exclusive lock during the write) are the two
+  drawbacks the WAL was designed to fix.
+  <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL docs — "writing the content once (versus twice for rollback-journal transactions)"</a>]</span></p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ The commit point is a single durable act</div>
+    <p>Atomicity hinges on one operation flipping the system from "not committed" to "committed" — here,
+    making the journal stop looking valid (delete it, truncate it, or zero its header) <em>after</em> the
+    database is durable. If you blur that — e.g. start deleting the journal before the db sync completes —
+    you open a window where a crash loses a committed transaction. One barrier-ordered flip, no ambiguity.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What does the rollback journal store, and in which direction does it recover?</p>
+      <details><summary>Show answer</summary><div class="answer">The original (pre-change) content of pages.
+      Recovery rolls <em>back</em> by copying originals into the db — undo logging.</div></details>
+      <p class="q">2. Where are the two fsync barriers, and what does each protect?</p>
+      <details><summary>Show answer</summary><div class="answer">One after writing the journal (so originals
+      survive before the db is touched), one after writing the db (so changes are durable before the
+      journal is removed).</div></details>
+      <p class="q">3. What single act is the commit point?</p>
+      <details><summary>Show answer</summary><div class="answer">Deleting (or zeroing/truncating) the
+      journal, performed after the database file is synced.</div></details>
+      <p class="q">4. Why is the rollback journal said to write data twice?</p>
+      <details><summary>Show answer</summary><div class="answer">Each changed page goes to disk as an
+      original in the journal and again as the new value in the db — double writes plus two syncs per
+      transaction.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit"</a> §3 (the steps), §4 (rollback), §5 (multi-file).</li>
+      <li><strong>Contrast:</strong> 5.4 (WAL) does the opposite — keep the db untouched, append the new pages.</li>
+      <li><strong>Forward link:</strong> 5.6 turns "crash before delete → roll back" into a concrete recovery routine.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

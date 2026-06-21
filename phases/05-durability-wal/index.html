@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 5 — Durability: journal, WAL, recovery</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p5", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 5</div>
+  <span class="pill">Phase 5</span>
+  <h1>Durability: journal, WAL, recovery</h1>
+  <p class="lead">Everything so far assumed writes land cleanly. They don't. A power cut mid-write can leave
+  a page half-updated, a freelist pointing at a live page, a tree split applied on one side only. This
+  phase closes the gap between "I called write" and "the data is safe and consistent after a crash."
+  You'll build the two classic mechanisms — the rollback journal and the write-ahead log — understand
+  the crash model they defend against, and write a recovery routine that runs on every open.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Why this comes after records &amp; free space</div>
+    <p>You now have a multi-page engine where one logical change (an insert that splits a node, allocates an
+    overflow page, and pops the freelist) touches several pages. That is exactly the situation durability
+    must protect: a change is only safe if <em>all</em> of its pages survive a crash together, or
+    <em>none</em> do. You couldn't feel that need until you had multi-page operations.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 5</div>
+    <p>Reason precisely about what a crash can and cannot do to a file; implement a write-ahead log that
+    makes multi-page transactions atomic and durable; checkpoint the log back into the main file; and run
+    a recovery pass on open that leaves the database in a consistent state regardless of when the crash
+    happened.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p5");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

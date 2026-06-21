@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>5.8 Source dive: SQLite wal.c &amp; the WAL format</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p5:5.8", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › 5.8</div>
+  <h1>5.8 — Source dive: SQLite's WAL format &amp; <code>wal.c</code></h1>
+  <div class="goal"><b>Goal:</b> Collect the exact on-disk WAL byte layout from the file-format spec (the
+  authoritative contract) and the code routines in <code>wal.c</code> that implement append, checksum,
+  recovery, and checkpoint — so your build can mirror a faithful (if simplified) version.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>The <strong>file-format spec §4</strong> defines the WAL bytes; <code>src/wal.c</code> implements
+    the read/append/recover/checkpoint logic.
+    <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">file format §4 "The Write-Ahead Log"</a>; <a href="https://www.sqlite.org/src/file/src/wal.c">src/wal.c</a>]</span></p>
+  </div>
+
+  <h2>WAL header — 32 bytes (big-endian)</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Offset</th><th>Size</th><th>Field</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td>4</td><td>Magic: <code>0x377f0682</code> or <code>0x377f0683</code> (low bit = checksums are big-endian)</td></tr>
+      <tr><td>4</td><td>4</td><td>File format version (currently <code>3007000</code>)</td></tr>
+      <tr><td>8</td><td>4</td><td>Database page size</td></tr>
+      <tr><td>12</td><td>4</td><td>Checkpoint sequence number</td></tr>
+      <tr><td>16</td><td>4</td><td>Salt-1 (random, incremented each checkpoint)</td></tr>
+      <tr><td>20</td><td>4</td><td>Salt-2 (random)</td></tr>
+      <tr><td>24</td><td>4</td><td>Checksum-1 (of the first 24 bytes)</td></tr>
+      <tr><td>28</td><td>4</td><td>Checksum-2</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §4.1 — WAL header layout</a>]</p>
+
+  <h2>WAL frame header — 24 bytes, then one page of data</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Offset</th><th>Size</th><th>Field</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td>4</td><td>Page number</td></tr>
+      <tr><td>4</td><td>4</td><td>For commit records, size of the database file in pages after the commit; <strong>0 for non-commit frames</strong></td></tr>
+      <tr><td>8</td><td>4</td><td>Salt-1 (copied from the WAL header — must match to be valid)</td></tr>
+      <tr><td>12</td><td>4</td><td>Salt-2</td></tr>
+      <tr><td>16</td><td>4</td><td>Checksum-1 (cumulative, includes this frame's header+data)</td></tr>
+      <tr><td>20</td><td>4</td><td>Checksum-2</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §4.2 — WAL frame header; non-zero db-size ⇒ commit frame</a>]</p>
+
+  <h2>The checksum algorithm</h2>
+  <p>SQLite's WAL checksum is a pair of 32-bit values computed over the bytes as an array of 32-bit
+  integers, with a Fibonacci-style weighting; it is computed big-endian if the header magic is
+  <code>0x377f0683</code> and little-endian if <code>0x377f0682</code>. Each frame's checksum is
+  <em>cumulative</em> — it includes the prior checksum — so a single corrupt or torn frame invalidates the
+  rest of the chain, which is exactly what recovery uses to find the valid tail.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §4.2 — checksum algorithm, endianness from magic, cumulative chaining</a>]</span></p>
+
+  <span class="code-label">checksum shape (spec algorithm; verify exact constants in source)</span>
+<pre><code><span class="tok-c">// s0, s1 carry from the previous frame (or header for frame 1)</span>
+<span class="tok-c">// for each pair of 32-bit words (x0, x1) in the buffer:</span>
+<span class="tok-c">//   s0 += x0 + s1;</span>
+<span class="tok-c">//   s1 += x1 + s0;</span>
+<span class="tok-c">// (interpret words big- or little-endian per the magic's low bit)</span></code></pre>
+
+  <h2>Code routines to grep (verify each name &amp; signature)</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Concept</th><th>Look for in wal.c</th></tr></thead>
+    <tbody>
+      <tr><td>Compute frame/header checksum</td><td><code>walChecksumBytes</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Append a frame to the WAL</td><td><code>walWriteOneFrame</code> / <code>walFrames</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Recover/scan the WAL on open</td><td><code>walIndexRecover</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Run a checkpoint</td><td><code>walCheckpoint</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>Find a page's newest frame (read path)</td><td><code>walFindFrame</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+      <tr><td>The wal-index in shared memory</td><td><code>walIndexHash</code> / <code>WalIndexHdr</code> <span class="verify-tag">⚠️VERIFY</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Source dive discipline</div>
+    <p>The byte offsets and the magic/version constants above come from the <em>spec</em> and are the
+    contract — cite §4.1/§4.2 for them. The function names carry ⚠️VERIFY because the exact current symbol
+    and signature must be confirmed against the file; treat them as search anchors, not facts.</p>
+  </div>
+
+  <h2>What to mirror in your build vs simplify</h2>
+  <ul>
+    <li><strong>Mirror:</strong> a fixed-size WAL header, per-frame header with page number + commit
+    marker, and per-frame checksums chained cumulatively. These are what make recovery correct.</li>
+    <li><strong>Simplify:</strong> the shared-memory wal-index becomes an in-memory hash map rebuilt on
+    open (single process); salt rotation can be minimal; you can checkpoint eagerly rather than at 1000
+    pages.</li>
+  </ul>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. How big is the WAL header, and how big is each frame header?</p>
+      <details><summary>Show answer</summary><div class="answer">32-byte WAL header; 24-byte frame header,
+      each frame header followed by one page of data.</div></details>
+      <p class="q">2. Which frame-header field identifies a commit frame, and what value?</p>
+      <details><summary>Show answer</summary><div class="answer">The "database size in pages after commit"
+      field at offset 4 — non-zero on a commit frame, zero otherwise.</div></details>
+      <p class="q">3. Why does one torn frame invalidate the rest of the WAL chain?</p>
+      <details><summary>Show answer</summary><div class="answer">Checksums are cumulative (each includes the
+      previous), so a break in the chain fails every subsequent frame — recovery stops at the last valid
+      one.</div></details>
+      <p class="q">4. For Phase 5 byte layouts, is the code or the spec the authority?</p>
+      <details><summary>Show answer</summary><div class="answer">The file-format spec §4; the code
+      implements it. Cite §4.1/§4.2 for offsets and constants.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/fileformat2.html">file format §4</a> (WAL layout) — authoritative.</li>
+      <li><strong>Source:</strong> <a href="https://www.sqlite.org/src/file/src/wal.c">wal.c</a> — append/recover/checkpoint logic.</li>
+      <li><strong>Forward link:</strong> the build assembles header + frames + checksums + recovery + checkpoint into a working WAL with a crash test.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

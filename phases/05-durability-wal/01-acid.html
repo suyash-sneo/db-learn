@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>5.1 ACID at the storage layer</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p5:5.1", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › 5.1</div>
+  <h1>5.1 — ACID at the storage layer</h1>
+  <div class="goal"><b>Goal:</b> Pin down what the four ACID properties actually demand of a storage
+  engine, which of them this phase delivers (atomicity + durability), and which depend on Phase 7
+  (isolation), so you know exactly what "a transaction committed" must guarantee.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>"ACID" is thrown around loosely. To build correctly you need the engineering version: each letter is
+  a concrete obligation on bytes and fsyncs, not a slogan. This phase is responsible for two of the four
+  letters; getting clear on which two keeps you from over- or under-building.</p>
+
+  <h2>The four properties, as obligations</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Property</th><th>What it demands of the engine</th><th>Delivered by</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Atomicity</strong></td><td>A transaction's changes are all applied or none are —
+        no partial transaction is ever visible, even after a crash mid-write.</td><td>This phase (journal / WAL)</td></tr>
+      <tr><td><strong>Consistency</strong></td><td>A committed transaction takes the database from one
+        valid state to another (invariants like "every overflow chain terminates" hold).</td><td>Your code + atomicity; not a single mechanism</td></tr>
+      <tr><td><strong>Isolation</strong></td><td>Concurrent transactions don't see each other's
+        uncommitted state; the result is as if they ran in some serial order.</td><td>Phase 7 (locking / MVCC)</td></tr>
+      <tr><td><strong>Durability</strong></td><td>Once commit returns success, the change survives a
+        crash or power loss.</td><td>This phase (fsync of the log before commit)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The classic ACID definition originates with Haerder &amp; Reuter's 1983 survey, which formalized
+  the transaction guarantees databases are expected to provide.
+  <span class="src">[src: <a href="https://dl.acm.org/doi/10.1145/289.291">Haerder &amp; Reuter, "Principles of Transaction-Oriented Database Recovery", ACM Computing Surveys 15(4), 1983</a>]</span></p>
+
+  <h2>Atomicity and durability are a pair</h2>
+  <p>These two are what a crash-recovery mechanism provides, and they only mean something together:</p>
+  <ul>
+    <li><strong>Durability without atomicity</strong> would let a half-finished transaction be the thing
+    that durably survives — useless.</li>
+    <li><strong>Atomicity without durability</strong> would correctly apply all-or-nothing in memory but
+    lose the commit on power failure — also useless.</li>
+  </ul>
+  <p>So the commit protocol must make the <em>whole</em> change recoverable <em>before</em> it reports
+  success. That ordering — log the change durably first, declare victory second — is the heart of every
+  mechanism in this phase.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ "Write returned" is not "committed"</div>
+    <p>From Phase 2 you already know <code>write()</code> only hands bytes to the OS page cache, and even
+    <code>sync_all</code> is a <em>request</em> to the OS/hardware to flush. Durability rests on the
+    barrier actually being honored end-to-end. This phase builds the protocol assuming fsync works; the
+    caveat that some hardware lies about fsync is real and is why SQLite documents fsync reliability as an
+    assumption. <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite, "Atomic Commit In SQLite" §3.7 — fsync as a critical step / assumption</a>]</span></p>
+  </div>
+
+  <h2>What "a transaction" means here</h2>
+  <p>For this engine a transaction is a batch of page mutations that must become visible together. Even a
+  single logical insert can be multi-page (a B+tree split writes two leaves plus a parent; an overflow
+  record writes a cell plus chain pages plus a freelist update). Atomicity is therefore not a luxury for
+  "explicit transactions" — it's required for any operation that touches more than one page, which is
+  almost all of them.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Which two ACID properties does this phase deliver, and which is deferred to Phase 7?</p>
+      <details><summary>Show answer</summary><div class="answer">Atomicity and durability here; isolation
+      is Phase 7 (concurrency). Consistency emerges from atomicity plus your own invariant checks.</div></details>
+      <p class="q">2. Why are atomicity and durability useless without each other?</p>
+      <details><summary>Show answer</summary><div class="answer">Durable-but-not-atomic could persist a
+      half transaction; atomic-but-not-durable could lose a committed one on power loss. Commit must make
+      the whole change recoverable before returning success.</div></details>
+      <p class="q">3. Why does even a single insert need atomicity in this engine?</p>
+      <details><summary>Show answer</summary><div class="answer">One logical insert can touch several
+      pages (split, overflow chain, freelist). All must land together or none — that's a multi-page
+      atomic change.</div></details>
+      <p class="q">4. Why is "write() returned" not enough for durability?</p>
+      <details><summary>Show answer</summary><div class="answer">write() only reaches the OS cache; durability
+      needs the data flushed to stable storage (fsync) — and even that is a request the hardware must honor.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Foundational:</strong> <a href="https://dl.acm.org/doi/10.1145/289.291">Haerder &amp; Reuter 1983</a> — origin of the ACID framing.</li>
+      <li><strong>Practical:</strong> <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit"</a> — how one engine actually delivers atomicity + durability.</li>
+      <li><strong>Forward link:</strong> 5.2 makes the crash model precise; 5.3–5.4 build the two mechanisms; Phase 7 adds isolation.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

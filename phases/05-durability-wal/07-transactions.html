@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>5.7 Transactions at the engine level</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p5:5.7", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › 5.7</div>
+  <h1>5.7 — Transactions at the engine level</h1>
+  <div class="goal"><b>Goal:</b> Wrap the WAL mechanism in a clean <code>begin / commit / rollback</code>
+  API so the rest of the engine (B+tree, record store) gets atomicity "for free" — every page mutation
+  routes through the transaction, and the durability barrier lives in exactly one place.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>The mechanisms in 5.3–5.6 are plumbing. The rest of your engine shouldn't know about WAL frames — it
+  should just say "begin, do a bunch of page edits, commit." This lesson defines that seam so atomicity is
+  structural, not something every caller must remember to do.</p>
+
+  <h2>The transaction as the unit of atomicity</h2>
+  <p>A transaction collects a set of page mutations and makes them visible together. The contract:</p>
+  <ul>
+    <li><code>begin()</code> — start buffering changes; reads see the committed state (db + already-committed
+    WAL frames).</li>
+    <li>page edits — instead of writing the db directly, dirty pages are recorded in the transaction (and
+    staged as WAL frames or held until commit).</li>
+    <li><code>commit()</code> — append all dirty pages as WAL frames, write the commit frame,
+    <strong>one fsync barrier</strong>, then return success. Now durable.</li>
+    <li><code>rollback()</code> — discard the buffered/staged frames without writing a commit frame; nothing
+    becomes visible. (On a crash this is automatic: no commit frame ⇒ recovery ignores the tail.)</li>
+  </ul>
+
+  <h2>Routing page writes through the transaction</h2>
+  <p>The key refactor: the pager's <code>modify_page</code> from Phase 2 no longer writes the db file
+  directly during a transaction. Instead it records the page as dirty in the active transaction. At
+  <code>commit</code>, those dirty pages are flushed to the WAL. Reads consult the WAL-index first (newest
+  frame for the page), then the db file — the same merge logic as 5.4.</p>
+
+  <span class="code-label">rust — the seam (shape only; you implement it in the build)</span>
+<pre><code><span class="tok-c">// pub fn begin(&amp;mut self) -&gt; Txn&lt;'_, B&gt;</span>
+<span class="tok-c">// impl Txn {</span>
+<span class="tok-c">//   fn modify_page(&amp;mut self, pno: u64, f: impl FnOnce(&amp;mut [u8]));  // marks dirty</span>
+<span class="tok-c">//   fn read_page(&amp;mut self, pno: u64) -&gt; &amp;[u8];  // wal-index newest, else db</span>
+<span class="tok-c">//   fn commit(self) -&gt; Result&lt;()&gt;;  // append frames + commit frame + ONE fsync</span>
+<span class="tok-c">//   fn rollback(self);             // drop staged frames; nothing committed</span>
+<span class="tok-c">// }</span></code></pre>
+
+  <h2>One barrier, one commit point</h2>
+  <p>This design concentrates the entire durability story into <code>commit()</code>: the fsync of the WAL
+  after the commit frame is <em>the</em> moment the transaction becomes durable, mirroring the rollback
+  journal's "delete the journal" commit point but cheaper (one sequential append + one sync). Everywhere
+  else in the engine is free of durability concerns.</p>
+
+  <h2>Grouping and the durability/throughput trade-off</h2>
+  <p>fsync is expensive, so the number of commits dominates write throughput. Two standard levers:</p>
+  <ul>
+    <li><strong>Batch logical work into fewer transactions</strong> — one commit's fsync covers many page
+    edits.</li>
+    <li><strong>Relax the sync</strong> — like SQLite's <code>PRAGMA synchronous=NORMAL</code> in WAL mode,
+    you may skip the per-commit WAL fsync, trading a window of durability (a crash can lose the last few
+    commits) for speed; the database remains <em>consistent</em>, just not maximally durable.
+    <span class="src">[src: <a href="https://www.sqlite.org/wal.html">SQLite WAL — FULL syncs WAL each commit; NORMAL "omit this sync", sacrificing durability on power loss but not integrity</a>]</span></li>
+  </ul>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Consistency ≠ durability when you relax sync</div>
+    <p>Skipping the per-commit fsync (NORMAL-style) does <strong>not</strong> risk corruption — recovery
+    still only replays whole, checksum-valid, commit-bounded frames — but it does mean a power loss can
+    lose recently "committed" transactions. Be explicit in your API about which mode a caller chose;
+    silently dropping durability is a footgun. Default to the safe (FULL) mode and make relaxation opt-in.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What four operations make up the engine-level transaction API?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>begin</code>, page edits (dirty
+      tracking), <code>commit</code> (append frames + commit frame + one fsync), <code>rollback</code>
+      (discard staged frames).</div></details>
+      <p class="q">2. How does <code>modify_page</code> change once transactions exist?</p>
+      <details><summary>Show answer</summary><div class="answer">It no longer writes the db file directly; it
+      records the page as dirty in the active transaction, flushed to the WAL at commit.</div></details>
+      <p class="q">3. Where is the single durability barrier, and why concentrate it there?</p>
+      <details><summary>Show answer</summary><div class="answer">In <code>commit()</code>, the fsync after
+      the commit frame. Concentrating it keeps the rest of the engine free of durability logic and gives
+      one unambiguous commit point.</div></details>
+      <p class="q">4. What does relaxing the per-commit sync risk, and what does it not?</p>
+      <details><summary>Show answer</summary><div class="answer">It risks losing recently committed
+      transactions on power loss (durability), but not corruption/consistency — recovery still replays only
+      whole, valid, commit-bounded frames.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Practical:</strong> <a href="https://www.sqlite.org/pragma.html#pragma_synchronous">SQLite <code>PRAGMA synchronous</code></a> — the FULL/NORMAL/OFF durability levels you're emulating.</li>
+      <li><strong>Forward link:</strong> Phase 7 adds isolation (multiple transactions at once); this phase only guarantees one writer's atomicity + durability. The build implements this API over your WAL.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

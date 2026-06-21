@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>5.6 Recovery on open</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p5:5.6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › 5.6</div>
+  <h1>5.6 — Recovery on open</h1>
+  <div class="goal"><b>Goal:</b> Turn the mechanisms into a concrete routine that runs every time the
+  database is opened: detect an unclean shutdown, decide what's committed, and bring the file to a
+  consistent state — roll back (journal) or roll forward (WAL) — before any normal access is allowed.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Durability is only real if recovery actually runs and is correct. The recovery routine is the payoff
+  of everything in this phase: it's the code that makes "committed" survive a crash. Crucially, it must run
+  <em>before</em> the first read, and must be safe to run repeatedly (a crash <em>during</em> recovery must
+  leave recovery still correct on the next attempt).</p>
+
+  <h2>Recovery for a rollback journal</h2>
+  <p>On open, check for a <strong>hot journal</strong> — a journal that needs replaying because a writer
+  crashed mid-commit. SQLite's exact conditions: the journal exists, is non-empty, has no reserved lock on
+  the db, has a well-formed (non-zeroed) header, and either names no super-journal or its super-journal
+  exists. <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §4.2 — "A rollback journal is a 'hot' journal if all of the following are true…"</a>]</span>
+  If hot, recovery:</p>
+  <ol>
+    <li>Takes an exclusive lock on the db.</li>
+    <li>Copies each original page from the journal back to its location in the db (undo).</li>
+    <li>Truncates the db to the original size recorded in the journal header.</li>
+    <li><strong>Barrier:</strong> fsync the db.</li>
+    <li>Deletes the journal.</li>
+  </ol>
+  <p>Result: the interrupted transaction is undone; the db is back to its pre-transaction state.</p>
+
+  <h2>Recovery for a WAL (your build)</h2>
+  <p>WAL recovery is roll-<em>forward</em> (redo). On open, scan the WAL from the start, validating each
+  frame's checksums, and find the position of the last valid <strong>commit frame</strong> — frames after
+  it (an interrupted, uncommitted transaction) are ignored. Everything up to and including the last commit
+  frame is the committed content.</p>
+  <ol>
+    <li>Read the WAL header; if absent/invalid, there's nothing to recover.</li>
+    <li>Walk frames, verifying each frame's checksum against the running checksum; stop trusting frames at
+    the first checksum failure (a torn tail).</li>
+    <li>Record the latest frame for each page, up to the last valid commit frame. (Build the in-memory
+    wal-index here.)</li>
+    <li>Either leave the WAL in place (reads will merge it) or immediately checkpoint it into the db (5.5)
+    and reset it.</li>
+  </ol>
+  <p>The checksum-validated, commit-frame-bounded scan is what lets WAL recovery distinguish a fully
+  committed transaction from a torn write at the end of the log.
+  <span class="src">[src: <a href="https://www.sqlite.org/fileformat2.html">SQLite file format §4 (WAL) — per-frame checksums; commit frame = non-zero db-size field</a>]</span></p>
+
+  <figure>
+  <svg viewBox="0 0 560 170" role="img" aria-label="WAL recovery: scan frames, last valid commit frame is the cutoff, ignore torn tail">
+    <rect class="dg-bg" x="0" y="0" width="560" height="170" rx="10"/>
+    <rect class="dg-box" x="20" y="40" width="70" height="44" rx="4"/><text class="dg-txt-s" x="55" y="66" text-anchor="middle">frame</text>
+    <rect class="dg-fill-2" x="96" y="40" width="80" height="44" rx="4"/><text class="dg-txt-s" x="136" y="60" text-anchor="middle">commit</text><text class="dg-txt-s" x="136" y="76" text-anchor="middle">✓</text>
+    <rect class="dg-box" x="182" y="40" width="70" height="44" rx="4"/><text class="dg-txt-s" x="217" y="66" text-anchor="middle">frame</text>
+    <rect class="dg-fill-2" x="258" y="40" width="80" height="44" rx="4"/><text class="dg-txt-s" x="298" y="60" text-anchor="middle">commit</text><text class="dg-txt-s" x="298" y="76" text-anchor="middle">✓ ← cutoff</text>
+    <rect class="dg-box" x="344" y="40" width="70" height="44" rx="4" style="stroke-dasharray:4 3"/><text class="dg-txt-s" x="379" y="66" text-anchor="middle">frame</text>
+    <rect class="dg-box" x="420" y="40" width="90" height="44" rx="4" style="stroke-dasharray:4 3"/><text class="dg-txt-s" x="465" y="60" text-anchor="middle">torn ✗</text><text class="dg-txt-s" x="465" y="76" text-anchor="middle">ignored</text>
+    <text class="dg-txt-s" x="20" y="120">recover up to the last valid commit frame; discard the uncommitted/torn tail</text>
+  </svg>
+  <figcaption>WAL recovery replays forward up to the last checksum-valid commit frame, dropping the tail.</figcaption>
+  </figure>
+
+  <h2>Recovery must be idempotent</h2>
+  <p>A crash can happen <em>during</em> recovery. Both schemes survive this because recovery is
+  re-runnable: redoing the same WAL frames produces the same db pages; re-applying the same journal
+  originals produces the same rollback. As long as you don't remove the log (delete journal / reset WAL)
+  until after the db's recovering writes are synced, a crash mid-recovery just means recovery runs again —
+  same result.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Recovery runs before the first byte of normal access</div>
+    <p>If you let a read or write touch the db before recovery completes, you can read half-applied state or
+    overwrite the log you still needed. Open must be: detect → recover (with its barrier) → only then admit
+    normal operations. In your build, fold this into <code>open()</code> so it's impossible to skip.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Journal recovery rolls which direction; WAL recovery rolls which direction?</p>
+      <details><summary>Show answer</summary><div class="answer">Journal = roll back (undo originals); WAL =
+      roll forward (redo committed frames).</div></details>
+      <p class="q">2. In WAL recovery, what is the cutoff between recovered and discarded data?</p>
+      <details><summary>Show answer</summary><div class="answer">The last checksum-valid commit frame.
+      Frames after it (uncommitted or torn) are ignored.</div></details>
+      <p class="q">3. Why must recovery be idempotent?</p>
+      <details><summary>Show answer</summary><div class="answer">A crash can interrupt recovery itself;
+      re-running must yield the same consistent result, which holds as long as the log isn't removed before
+      the recovering db writes are synced.</div></details>
+      <p class="q">4. Where in the engine should recovery live, and why?</p>
+      <details><summary>Show answer</summary><div class="answer">Inside <code>open()</code>, before any read
+      or write, so half-applied state can never be observed and the log isn't clobbered prematurely.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §4</a> (hot-journal rollback) and <a href="https://www.sqlite.org/fileformat2.html">file format §4</a> (WAL frames/checksums for roll-forward).</li>
+      <li><strong>Forward link:</strong> 5.7 wraps these into an engine-level transaction API; the build implements WAL recovery end-to-end with a crash test.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

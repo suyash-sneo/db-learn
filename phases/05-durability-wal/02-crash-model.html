@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>5.2 The crash model</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p5:5.2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › 5.2</div>
+  <h1>5.2 — The crash model</h1>
+  <div class="goal"><b>Goal:</b> State precisely what a crash is allowed to do to your file — reordered
+  writes, lost cache contents, torn (partial) sector writes — so that the journal and WAL you build defend
+  against the <em>actual</em> failure modes, not imagined ones.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>You can't prove a recovery scheme correct without an enemy model: exactly what the crash may have
+  done. Build against too weak a model and recovery has real holes; too strong a model and you pay for
+  protection you don't need. The model below is the standard one storage engines assume.</p>
+
+  <h2>What a crash can do</h2>
+  <ol>
+    <li><strong>Lose everything in volatile caches.</strong> Any bytes still in the OS page cache (or a
+    disk's volatile write cache) that were never flushed are gone. Only data that reached stable storage
+    via a successful fsync is guaranteed present.</li>
+    <li><strong>Reorder writes.</strong> Without an explicit barrier, the OS and device may commit writes
+    to stable storage in a different order than you issued them. So "I wrote A then B" does <em>not</em>
+    guarantee that if B survived, A did too — unless an fsync separated them.</li>
+    <li><strong>Tear a multi-sector write.</strong> A single <code>write()</code> of a 4&nbsp;KiB page is
+    not atomic at the hardware level: a crash can leave some sectors of the page updated and others
+    holding old bytes — a <em>torn write</em>.</li>
+  </ol>
+
+  <h2>The sector assumption</h2>
+  <p>The standard simplifying assumption is about a single hardware sector. SQLite states it directly: it
+  does <em>not</em> assume a sector write is atomic, but it does assume a sector write is
+  <em>linear</em> — the hardware writes a sector byte-by-byte from one end to the other, so an interrupted
+  sector write leaves a known-direction partial result rather than random garbage.
+  <span class="src">[src: <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §2.2 — "a sector write is not atomic … SQLite does always assume that a sector write is linear"</a>]</span>
+  This is why recovery can detect an incomplete journal: the page-count field is written last, so a torn
+  journal header reads as "0 pages" and is treated as not-yet-committed.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 150" role="img" aria-label="A 4KiB page write torn by a crash: some sectors new, some old">
+    <rect class="dg-bg" x="0" y="0" width="560" height="150" rx="10"/>
+    <text class="dg-txt" x="20" y="26" font-weight="700">one logical 4 KiB write = 8 sectors</text>
+    <rect class="dg-fill-a" x="20" y="44" width="60" height="40" rx="3"/><rect class="dg-fill-a" x="82" y="44" width="60" height="40" rx="3"/><rect class="dg-fill-a" x="144" y="44" width="60" height="40" rx="3"/>
+    <rect class="dg-box" x="206" y="44" width="60" height="40" rx="3"/><rect class="dg-box" x="268" y="44" width="60" height="40" rx="3"/><rect class="dg-box" x="330" y="44" width="60" height="40" rx="3"/><rect class="dg-box" x="392" y="44" width="60" height="40" rx="3"/><rect class="dg-box" x="454" y="44" width="60" height="40" rx="3"/>
+    <text class="dg-txt-s" x="112" y="104">new bytes</text>
+    <text class="dg-txt-s" x="360" y="104">old bytes (crash hit here)</text>
+    <text class="dg-txt-s" x="20" y="134">after the crash the page is internally inconsistent — neither old nor new</text>
+  </svg>
+  <figcaption>A torn write: the page is half-updated. Recovery must restore a whole, consistent page.</figcaption>
+  </figure>
+
+  <h2>What a crash is assumed <em>not</em> to do</h2>
+  <ul>
+    <li>It does not corrupt bytes that were never written in this session and were already durably on disk
+    (we assume the media is otherwise reliable; bit-rot detection is a separate concern, handled by
+    checksums — see 5.4/5.8).</li>
+    <li>It does not silently mis-direct a write to the wrong location (again, checksums catch the cases
+    that matter).</li>
+    <li>fsync, when it returns, is assumed to mean the data is durable. This is an assumption, not a
+    theorem — some hardware has historically lied — but every mechanism here is built on it.
+    <span class="verify-tag">⚠️VERIFY</span> the fsync behavior of your target platform/filesystem if
+    durability is safety-critical.</li>
+  </ul>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ The barrier is the whole game</div>
+    <p>Because writes can be reordered and caches can vanish, the only tool that gives ordering is the
+    durability barrier (<code>sync_all</code> / fsync). Every correct commit protocol is fundamentally a
+    sequence of "write these bytes, <strong>barrier</strong>, then write those bytes, <strong>barrier</strong>."
+    Remove a barrier and you reintroduce a crash window. Memorize where the barriers go — that's what 5.3
+    and 5.4 are really teaching.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What three things can a crash do to your file in this model?</p>
+      <details><summary>Show answer</summary><div class="answer">Lose unflushed cache contents, reorder
+      writes that weren't separated by a barrier, and tear a multi-sector write (partial page).</div></details>
+      <p class="q">2. What does "a sector write is linear but not atomic" let recovery do?</p>
+      <details><summary>Show answer</summary><div class="answer">Detect an incomplete write: if a
+      written-last field (e.g. journal page count) is torn, it reads as not-yet-committed, so the partial
+      record is ignored.</div></details>
+      <p class="q">3. What is the only mechanism that gives you ordering guarantees across a crash?</p>
+      <details><summary>Show answer</summary><div class="answer">The durability barrier (fsync /
+      <code>sync_all</code>). Writes between barriers may be reordered or lost.</div></details>
+      <p class="q">4. Why is "fsync means durable" called an assumption?</p>
+      <details><summary>Show answer</summary><div class="answer">Because some hardware/firmware has
+      historically acknowledged fsync before data was truly on stable media; correctness depends on the
+      stack honoring the barrier.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Spec:</strong> <a href="https://www.sqlite.org/atomiccommit.html">SQLite "Atomic Commit" §2</a> — the hardware assumptions (sectors, atomicity, ordering).</li>
+      <li><strong>Background:</strong> the "Files are hard" / fsync-reliability literature — useful but verify specifics before quoting. <span class="verify-tag">⚠️VERIFY</span></li>
+      <li><strong>Forward link:</strong> 5.3 (journal places barriers to roll back), 5.4 (WAL places barriers to roll forward).</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

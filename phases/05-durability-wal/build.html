@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Build — WAL + recovery + crash test</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p5:build", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 5</a> › Build</div>
+  <span class="pill">Build · AI off</span>
+  <h1>Build: a write-ahead log with recovery &amp; a crash test</h1>
+  <div class="goal"><b>Goal:</b> Add atomic, durable transactions to your pager via a WAL: append dirty
+  pages as checksummed frames, commit with one fsync, merge WAL over the db on reads, recover on open up to
+  the last valid commit frame, and checkpoint the WAL back into the db — then prove it with a simulated
+  crash test.</div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ AI off</div>
+    <p>The WAL, recovery, and checkpoint are the safety-critical core of the engine — no worked
+    implementation here, only contracts, stubs, failing tests, and graduated hints. Cite the SQLite WAL
+    file-format spec (§4) for the frame layout and checksum; write the code yourself.</p>
+  </div>
+
+  <h2>Deliverable</h2>
+  <p>A Rust 2024 module <code>wal</code> layered on the Phase 2 <code>pager</code>, plus a
+  <code>Txn</code> handle. Writes go through a transaction; <code>commit</code> appends frames + a commit
+  frame and fsyncs once; reads merge the WAL over the db; <code>open</code> runs recovery; a
+  <code>checkpoint</code> folds the WAL into the db with the correct barrier ordering.</p>
+
+  <h2>Fixed design decisions</h2>
+  <ul>
+    <li>WAL header (simplified): 4-byte magic, 4-byte page size, 4-byte salt; big-endian. Document any
+    extra fields you add.</li>
+    <li>Frame = 24-byte header (page number u64, <em>db-size-after-commit</em> u32 [0 = non-commit], salt
+    u32, checksum [u32,u32]) + one page of data. Non-zero db-size marks a commit frame, mirroring SQLite
+    §4.2.</li>
+    <li>Checksums are <strong>cumulative</strong> (each frame's checksum chains from the previous), so a
+    torn tail invalidates everything after the break.</li>
+    <li>wal-index = an in-memory <code>HashMap&lt;u64, u64&gt;</code> (page → byte offset of newest frame),
+    rebuilt by scanning the WAL on open. Not persisted.</li>
+    <li>Durability default = FULL: <code>commit</code> fsyncs the WAL after the commit frame. A
+    <code>sync: bool</code> knob may relax it (NORMAL-style) but defaults to true.</li>
+    <li>Recovery on <code>open</code> scans frames, validates checksums, stops at the last valid commit
+    frame, builds the wal-index. Runs before any read/write.</li>
+    <li>Checkpoint ordering: sync WAL → copy newest frame of each page into db → sync db → reset WAL.</li>
+  </ul>
+
+  <h2>Ordered milestones</h2>
+  <ol>
+    <li><strong>M1 — Frame I/O + checksum.</strong> Serialize/parse a frame; compute and verify the
+    cumulative checksum.</li>
+    <li><strong>M2 — Append &amp; commit.</strong> <code>Txn</code> buffers dirty pages;
+    <code>commit</code> appends frames, writes the commit frame, fsyncs once.</li>
+    <li><strong>M3 — Read merge.</strong> <code>read_page</code> returns the newest WAL frame for a page
+    (via the wal-index) or falls back to the db.</li>
+    <li><strong>M4 — Recovery.</strong> <code>open</code> scans the WAL, validates checksums, recovers to
+    the last commit frame, rebuilds the wal-index; ignores an uncommitted/torn tail.</li>
+    <li><strong>M5 — Checkpoint.</strong> Fold the WAL into the db with the correct barrier order; reset
+    the WAL only after the db sync.</li>
+  </ol>
+
+  <h2>Acceptance criteria</h2>
+  <ul>
+    <li>All Rust tests below pass.</li>
+    <li>A committed transaction is readable after reopen (durability).</li>
+    <li>An <em>uncommitted</em> transaction (frames appended, no commit frame) is invisible after reopen
+    (atomicity / rollback of the tail).</li>
+    <li>A truncated/torn WAL tail is ignored; everything up to the last valid commit frame survives.</li>
+    <li>After a checkpoint, the db file alone (empty WAL) reflects all committed data.</li>
+    <li>A crash <em>during</em> checkpoint (simulated: stop after copying some pages but before resetting
+    the WAL) still recovers all committed data on reopen.</li>
+  </ul>
+
+  <h2>Stub: <code>src/wal.rs</code></h2>
+  <span class="code-label">src/wal.rs — implement every todo!()</span>
+<pre><code><span class="tok-k">use</span> pager::{Pager, BlockIo};
+<span class="tok-k">use</span> std::collections::HashMap;
+
+<span class="tok-m">#[derive(Debug)]</span>
+<span class="tok-k">pub enum</span> <span class="tok-f">WalError</span> {
+    Pager(pager::PagerError),
+    BadFrame,
+    BadChecksum,
+}
+<span class="tok-k">impl</span> <span class="tok-f">From</span>&lt;pager::PagerError&gt; <span class="tok-k">for</span> <span class="tok-f">WalError</span> {
+    <span class="tok-k">fn</span> <span class="tok-f">from</span>(e: pager::PagerError) -&gt; <span class="tok-f">Self</span> { <span class="tok-f">WalError</span>::<span class="tok-f">Pager</span>(e) }
+}
+<span class="tok-k">pub type</span> <span class="tok-f">Result</span>&lt;<span class="tok-f">T</span>&gt; = std::result::Result&lt;<span class="tok-f">T</span>, <span class="tok-f">WalError</span>&gt;;
+
+<span class="tok-c">// One WAL frame parsed from disk.</span>
+<span class="tok-k">struct</span> <span class="tok-f">Frame</span> { page_no: <span class="tok-f">u64</span>, db_size_after: <span class="tok-f">u32</span>, data: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt; }
+
+<span class="tok-k">pub struct</span> <span class="tok-f">Wal</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; {
+    pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;,        <span class="tok-c">// the main db</span>
+    wal: <span class="tok-f">B</span>,                  <span class="tok-c">// the WAL file/block backend</span>
+    index: HashMap&lt;<span class="tok-f">u64</span>, <span class="tok-f">u64</span>&gt;, <span class="tok-c">// page_no -&gt; byte offset of newest frame</span>
+    sync: <span class="tok-f">bool</span>,
+}
+
+<span class="tok-k">impl</span>&lt;<span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; <span class="tok-f">Wal</span>&lt;<span class="tok-f">B</span>&gt; {
+    <span class="tok-c">// ---- M1: frames + checksum ----</span>
+    <span class="tok-k">fn</span> <span class="tok-f">checksum</span>(seed: (<span class="tok-f">u32</span>, <span class="tok-f">u32</span>), bytes: &amp;[<span class="tok-f">u8</span>]) -&gt; (<span class="tok-f">u32</span>, <span class="tok-f">u32</span>) {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: cumulative Fibonacci-weighted 32-bit-pair checksum over bytes (spec §4.2)"</span>)
+    }
+    <span class="tok-k">fn</span> <span class="tok-f">parse_frame</span>(&amp;<span class="tok-k">self</span>, at: <span class="tok-f">u64</span>, prev: (<span class="tok-f">u32</span>, <span class="tok-f">u32</span>)) -&gt; <span class="tok-f">Result</span>&lt;(<span class="tok-f">Frame</span>, (<span class="tok-f">u32</span>, <span class="tok-f">u32</span>))&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M1: read 24-byte header + page; verify checksum chains from prev; return frame + new running sum"</span>)
+    }
+
+    <span class="tok-c">// ---- M4: open + recovery (runs before any access) ----</span>
+    <span class="tok-k">pub fn</span> <span class="tok-f">open</span>(pager: <span class="tok-f">Pager</span>&lt;<span class="tok-f">B</span>&gt;, wal: <span class="tok-f">B</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Self</span>&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M4: read WAL header; scan frames, validate checksums; index up to last commit frame; ignore torn tail"</span>)
+    }
+
+    <span class="tok-c">// ---- M3: read merge ----</span>
+    <span class="tok-k">pub fn</span> <span class="tok-f">read_page</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">u64</span>) -&gt; <span class="tok-f">Result</span>&lt;<span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M3: if index has page_no, read that frame's data; else pager.get_page"</span>)
+    }
+
+    <span class="tok-c">// ---- M2: transactions ----</span>
+    <span class="tok-k">pub fn</span> <span class="tok-f">begin</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Txn</span>&lt;<span class="tok-k">'_</span>, <span class="tok-f">B</span>&gt; {
+        <span class="tok-f">Txn</span> { wal: <span class="tok-k">self</span>, dirty: HashMap::<span class="tok-f">new</span>() }
+    }
+
+    <span class="tok-c">// ---- M5: checkpoint ----</span>
+    <span class="tok-k">pub fn</span> <span class="tok-f">checkpoint</span>(&amp;<span class="tok-k">mut self</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M5: sync WAL; copy newest frame of each page into pager; sync db; ONLY THEN reset WAL + clear index"</span>)
+    }
+}
+
+<span class="tok-k">pub struct</span> <span class="tok-f">Txn</span>&lt;<span class="tok-k">'a</span>, <span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; {
+    wal: &amp;<span class="tok-k">'a mut</span> <span class="tok-f">Wal</span>&lt;<span class="tok-f">B</span>&gt;,
+    dirty: HashMap&lt;<span class="tok-f">u64</span>, <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;&gt;,
+}
+<span class="tok-k">impl</span>&lt;<span class="tok-k">'a</span>, <span class="tok-f">B</span>: <span class="tok-f">BlockIo</span>&gt; <span class="tok-f">Txn</span>&lt;<span class="tok-k">'a</span>, <span class="tok-f">B</span>&gt; {
+    <span class="tok-k">pub fn</span> <span class="tok-f">write_page</span>(&amp;<span class="tok-k">mut self</span>, page_no: <span class="tok-f">u64</span>, data: <span class="tok-f">Vec</span>&lt;<span class="tok-f">u8</span>&gt;) {
+        <span class="tok-k">self</span>.dirty.<span class="tok-f">insert</span>(page_no, data);
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">commit</span>(<span class="tok-k">self</span>) -&gt; <span class="tok-f">Result</span>&lt;()&gt; {
+        <span class="tok-m">todo!</span>(<span class="tok-s">"M2: append a frame per dirty page; last frame is a commit frame (db_size_after &gt; 0); ONE fsync if sync; update index"</span>)
+    }
+    <span class="tok-k">pub fn</span> <span class="tok-f">rollback</span>(<span class="tok-k">self</span>) { <span class="tok-c">/* drop dirty; nothing was appended yet, or no commit frame written */</span> }
+}</code></pre>
+
+  <h2>Failing tests</h2>
+  <span class="code-label">append to src/wal.rs (uses pager::MemBlock; clone the WAL bytes to simulate crashes)</span>
+<pre><code><span class="tok-m">#[cfg(test)]</span>
+<span class="tok-k">mod</span> tests {
+    <span class="tok-k">use super</span>::*;
+    <span class="tok-k">use</span> pager::{Pager, MemBlock};
+
+    <span class="tok-k">fn</span> <span class="tok-f">fresh</span>() -&gt; <span class="tok-f">Wal</span>&lt;<span class="tok-f">MemBlock</span>&gt; {
+        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">create</span>(<span class="tok-f">MemBlock</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() }, 4096, 64).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> wal = <span class="tok-f">MemBlock</span> { data: <span class="tok-f">Vec</span>::<span class="tok-f">new</span>() };
+        <span class="tok-f">Wal</span>::<span class="tok-f">open</span>(p, wal).<span class="tok-f">unwrap</span>()
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">committed_survives_reopen</span>() {
+        <span class="tok-k">let mut</span> w = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let mut</span> t = w.<span class="tok-f">begin</span>();
+        t.<span class="tok-f">write_page</span>(2, <span class="tok-f">vec!</span>[0xAB; 4096]);
+        t.<span class="tok-f">commit</span>().<span class="tok-f">unwrap</span>();
+        <span class="tok-c">// simulate reopen: rebuild Wal from the same db + wal bytes</span>
+        <span class="tok-k">let</span> (pager_block, wal_block) = w.<span class="tok-f">into_blocks</span>(); <span class="tok-c">// you add this accessor</span>
+        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(pager_block).<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let mut</span> w2 = <span class="tok-f">Wal</span>::<span class="tok-f">open</span>(p, wal_block).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(w2.<span class="tok-f">read_page</span>(2).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[0xAB; 4096]);
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">uncommitted_tail_is_invisible</span>() {
+        <span class="tok-k">let mut</span> w = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let mut</span> t = w.<span class="tok-f">begin</span>();
+        t.<span class="tok-f">write_page</span>(3, <span class="tok-f">vec!</span>[0x11; 4096]);
+        t.<span class="tok-f">commit</span>().<span class="tok-f">unwrap</span>();
+        <span class="tok-c">// append frames WITHOUT a commit frame, then crash:</span>
+        w.<span class="tok-f">append_uncommitted_for_test</span>(5, &amp;<span class="tok-f">vec!</span>[0x22; 4096]); <span class="tok-c">// test helper: no commit frame</span>
+        <span class="tok-k">let</span> (pb, wb) = w.<span class="tok-f">into_blocks</span>();
+        <span class="tok-k">let mut</span> w2 = <span class="tok-f">Wal</span>::<span class="tok-f">open</span>(<span class="tok-f">Pager</span>::<span class="tok-f">open</span>(pb).<span class="tok-f">unwrap</span>(), wb).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(w2.<span class="tok-f">read_page</span>(3).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[0x11; 4096]); <span class="tok-c">// committed visible</span>
+        <span class="tok-m">assert_ne!</span>(w2.<span class="tok-f">read_page</span>(5).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[0x22; 4096]); <span class="tok-c">// uncommitted gone</span>
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">torn_tail_is_ignored</span>() {
+        <span class="tok-k">let mut</span> w = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let mut</span> t = w.<span class="tok-f">begin</span>();
+        t.<span class="tok-f">write_page</span>(2, <span class="tok-f">vec!</span>[0x33; 4096]);
+        t.<span class="tok-f">commit</span>().<span class="tok-f">unwrap</span>();
+        <span class="tok-k">let</span> (pb, <span class="tok-k">mut</span> wb) = w.<span class="tok-f">into_blocks</span>();
+        wb.data.<span class="tok-f">truncate</span>(wb.data.<span class="tok-f">len</span>() - 17); <span class="tok-c">// chop the tail: torn last frame</span>
+        <span class="tok-k">let mut</span> w2 = <span class="tok-f">Wal</span>::<span class="tok-f">open</span>(<span class="tok-f">Pager</span>::<span class="tok-f">open</span>(pb).<span class="tok-f">unwrap</span>(), wb).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(w2.<span class="tok-f">read_page</span>(2).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[0x33; 4096]); <span class="tok-c">// prior commit intact</span>
+    }
+
+    <span class="tok-m">#[test]</span>
+    <span class="tok-k">fn</span> <span class="tok-f">checkpoint_then_empty_wal</span>() {
+        <span class="tok-k">let mut</span> w = <span class="tok-f">fresh</span>();
+        <span class="tok-k">let mut</span> t = w.<span class="tok-f">begin</span>();
+        t.<span class="tok-f">write_page</span>(2, <span class="tok-f">vec!</span>[0x44; 4096]);
+        t.<span class="tok-f">commit</span>().<span class="tok-f">unwrap</span>();
+        w.<span class="tok-f">checkpoint</span>().<span class="tok-f">unwrap</span>();
+        <span class="tok-c">// after checkpoint the db alone holds the data; reopen with an empty WAL</span>
+        <span class="tok-k">let</span> (pb, _wb) = w.<span class="tok-f">into_blocks</span>();
+        <span class="tok-k">let</span> p = <span class="tok-f">Pager</span>::<span class="tok-f">open</span>(pb).<span class="tok-f">unwrap</span>();
+        <span class="tok-m">assert_eq!</span>(p.get_page(2).<span class="tok-f">unwrap</span>(), <span class="tok-f">vec!</span>[0x44; 4096]);
+    }
+}</code></pre>
+  <p class="src">The tests need a couple of test-only accessors (<code>into_blocks</code>,
+  <code>append_uncommitted_for_test</code>) — add them behind <code>#[cfg(test)]</code>. They encode the
+  four properties: durability, atomicity (uncommitted tail), torn-tail tolerance, and checkpoint
+  correctness.</p>
+
+  <h2>Stuck? — graduated hints</h2>
+  <details><summary>M1: my checksum doesn't match across frames</summary><div class="answer">
+    <strong>Nudge:</strong> The checksum is <em>cumulative</em>, not per-frame-independent.
+    <br><strong>Technique:</strong> seed frame N's checksum with frame N−1's result (frame 1 seeds from the
+    header). Process the buffer as 32-bit word pairs; pick endianness from the magic's low bit (spec §4.2).</div></details>
+
+  <details><summary>M2: how do I know which frame is the commit?</summary><div class="answer">
+    <strong>Nudge:</strong> The commit marker lives in the frame header, not a separate record.
+    <br><strong>Technique:</strong> write <code>db_size_after = 0</code> for every dirty page except the
+    last, which gets the post-commit page count (&gt; 0). Recovery treats a non-zero value as "transaction
+    ends here, committed."</div></details>
+
+  <details><summary>M4: recovery includes a half-written transaction</summary><div class="answer">
+    <strong>Nudge:</strong> You must stop at the last <em>valid commit</em> frame, not the last frame.
+    <br><strong>Technique:</strong> while scanning, remember the index state as of the most recent commit
+    frame; if the scan later hits a checksum failure or EOF mid-transaction, roll the index back to that
+    remembered commit point.</div></details>
+
+  <details><summary>M5: a crash during checkpoint loses data</summary><div class="answer">
+    <strong>Nudge:</strong> Ordering. The WAL is your safety net <em>until</em> the db is durable.
+    <br><strong>Technique:</strong> sync WAL → copy frames → <strong>sync db</strong> → only then reset the
+    WAL. If you reset before the db sync, a crash leaves the db torn and the WAL gone. Re-running recovery
+    after a mid-checkpoint crash must reproduce the same committed state.</div></details>
+
+  <h2>Definition of Done</h2>
+  <ul>
+    <li>☐ All four tests pass (add a temp-file integration test with real fsync if you can).</li>
+    <li>☐ Committed transactions survive reopen; uncommitted/torn tails are dropped at the last valid
+    commit frame.</li>
+    <li>☐ Reads merge WAL over db via the rebuilt wal-index.</li>
+    <li>☐ Checkpoint folds the WAL into the db with sync-WAL → copy → sync-db → reset ordering, and is
+    crash-safe if interrupted.</li>
+    <li>☐ The commit fsync is the single durability barrier; the relaxed mode is opt-in and documented.</li>
+    <li>☐ You cited the WAL file-format spec (§4.1/§4.2) for the frame layout and checksum.</li>
+    <li>☐ <strong>You wrote every implementation line yourself.</strong></li>
+  </ul>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Source anchors</div>
+    <p>Recheck <a href="https://www.sqlite.org/fileformat2.html">file format §4 (WAL header, frame header,
+    checksum)</a> and <a href="https://www.sqlite.org/wal.html">the WAL overview</a> (checkpoint ordering,
+    commit-frame semantics) while implementing.</p>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>
