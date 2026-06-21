@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>8.7 Packaging for iOS/Android</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p8:8.7", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.7</div>
+  <h1>8.7 — Packaging for iOS/Android</h1>
+  <div class="goal"><b>Goal:</b> Understand how the compiled Rust library actually ships inside a Flutter
+  app on both mobile platforms — the FFI plugin structure, the per-platform native build, and the
+  library-loading and signing details that differ by target — so the binding from 8.5 has something to
+  load at runtime.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>Flutter documents native packaging under "developing packages &amp; plugins" (FFI plugins) and the
+    platform interop guides. Packaging mechanics evolve across Flutter versions, so confirm specifics
+    against the docs for your version.
+    <span class="src">[src: <a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">docs.flutter.dev — developing packages</a>]</span></p>
+  </div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>An FFI binding is useless if the operating system can't find and load the native library. Each platform
+  has its own build system, library format, loading rule, and signing requirement. Flutter's FFI plugin
+  packaging exists to automate this — but you still need to understand what it produces, because
+  cross-compiling a Rust library for ARM phones and bundling it correctly is where "works on my laptop"
+  meets reality.</p>
+
+  <h2>FFI plugins: the packaging vehicle</h2>
+  <p>An FFI package is "a specialized Dart package that enables calling native code using
+  <code>dart:ffi</code>," created with a Flutter FFI plugin/package template. The defining difference from a
+  regular plugin: FFI plugins "do not use method channels" — they call native code directly through
+  <code>dart:ffi</code>.
+  <span class="src">[src: <a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">docs.flutter.dev</a>]</span>
+  The package bundles native code compiled per platform; a typical layout has the Dart API in
+  <code>lib/</code>, the native source in <code>src/</code>, and a build hook that compiles it.
+  <span class="verify-tag">⚠️VERIFY</span> the exact template name, directory layout, and build-hook
+  mechanism against the Flutter version you target — these have changed across releases (e.g. the native
+  build-hook/native-assets approach is newer).</p>
+
+  <h2>Per-platform native build</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Platform</th><th>Build system</th><th>Library form (typical)</th></tr></thead>
+    <tbody>
+      <tr><td>Android</td><td>"compiled using CMake and integrated with Gradle"</td><td>shared <code>.so</code> per ABI (arm64-v8a, armeabi-v7a, x86_64)</td></tr>
+      <tr><td>iOS</td><td>"compiled using the CocoaPods dependency system"</td><td>static lib or <code>.framework</code> linked into the app</td></tr>
+    </tbody>
+  </table></div>
+  <p class="src">[src: <a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">docs.flutter.dev — FFI plugin native compilation</a>]</p>
+  <p>For a Rust engine, the native build cross-compiles the crate for each target triple (e.g.
+  <code>aarch64-linux-android</code>, <code>aarch64-apple-ios</code>) and produces the platform's library
+  form. The plugin's build hook wires that into Gradle/CocoaPods so a normal <code>flutter build</code>
+  picks it up.</p>
+
+  <h2>Loading differs by platform</h2>
+  <p>From 8.5, the Dart side opens the library — but how depends on the target:</p>
+  <ul>
+    <li><strong>Android:</strong> a separate <code>.so</code> is shipped in the APK/AAB;
+    <code>DynamicLibrary.open('libminidb.so')</code> loads it by name.</li>
+    <li><strong>iOS:</strong> symbols are commonly statically linked into the app binary; you then use
+    <code>DynamicLibrary.process()</code> (or <code>.executable()</code>) to look up symbols already in the
+    process rather than opening a separate file. <span class="verify-tag">⚠️VERIFY</span> the exact
+    open/process choice for your linkage and Flutter version.</li>
+    <li><strong>Library naming differs everywhere:</strong> <code>lib*.so</code> (Linux/Android),
+    <code>*.dylib</code>/framework (Apple), <code>*.dll</code> (Windows). Don't hard-code one name for all
+    targets — branch on the platform.</li>
+  </ul>
+  <p>This is exactly AGENTS's warning that platform assumptions must be stated: "C ABIs, symbol display,
+  dynamic-library names, linking, <code>fsync</code> behavior, and Flutter packaging differ by target."
+  <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span></p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Signing, stripping, and ABI coverage will bite you</div>
+    <ul>
+      <li><strong>Code signing (iOS):</strong> all native code in an app must be signed; an unsigned or
+      improperly embedded library fails at install/launch, not at build. Let the CocoaPods/Xcode flow embed
+      and sign it.</li>
+      <li><strong>16 KB page sizes / ABI coverage (Android):</strong> you must ship a <code>.so</code> for
+      every ABI you support, built with the right toolchain/NDK; a missing ABI means the app crashes on
+      those devices only. <span class="verify-tag">⚠️VERIFY</span> current Android ABI and page-size
+      requirements for your target API level.</li>
+      <li><strong>Symbol survival:</strong> aggressive stripping/LTO can remove your exported symbols if the
+      linker thinks they're unused. Keep them exported (the <code>#[unsafe(no_mangle)]</code> + prefix from
+      8.1) and verify they're present in the shipped binary.</li>
+      <li><strong>Size:</strong> a Rust static can be large; strip debug info for release and measure the
+      added app size.</li>
+    </ul>
+  </div>
+
+  <h2>Verify the whole chain, not just the build</h2>
+  <p>"It compiled" is not "it loads and runs on a device." The end-to-end check: cross-compile for the
+  device's ABI → bundle via the plugin → install on a real device (or device-accurate simulator) →
+  <code>DynamicLibrary</code> opens → a symbol lookup succeeds → a real <code>minidb_open</code>/insert/find
+  round-trips. Each arrow is a place it can silently fail, and on mobile the failure often appears only at
+  runtime on hardware.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. How does an FFI plugin differ from a regular Flutter plugin?</p>
+      <details><summary>Show answer</summary><div class="answer">An FFI plugin calls native code directly via
+      <code>dart:ffi</code> and bundles per-platform compiled native code; it does not use method channels.</div></details>
+      <p class="q">2. Which build systems compile the native code on Android and iOS?</p>
+      <details><summary>Show answer</summary><div class="answer">Android uses CMake integrated with Gradle; iOS
+      uses CocoaPods. The Rust crate is cross-compiled per target triple and wired in via the plugin's build
+      hook.</div></details>
+      <p class="q">3. Why might library loading use <code>DynamicLibrary.open</code> on Android but <code>DynamicLibrary.process</code> on iOS?</p>
+      <details><summary>Show answer</summary><div class="answer">Android ships a separate <code>.so</code> opened
+      by name; iOS commonly links the library statically into the app binary, so symbols are looked up in the
+      already-loaded process rather than a separate file.</div></details>
+      <p class="q">4. Name two packaging failures that appear only at runtime on a device.</p>
+      <details><summary>Show answer</summary><div class="answer">Any two of: missing/unsigned native library
+      (iOS signing), a missing ABI <code>.so</code> (Android), or stripped-away exported symbols — none of
+      which necessarily fail the build.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Docs:</strong> <a href="https://docs.flutter.dev/packages-and-plugins/developing-packages">developing packages</a>, <a href="https://dart.dev/interop/c-interop">dart:ffi</a>, <a href="https://api.dart.dev/dart-ffi/DynamicLibrary-class.html">DynamicLibrary API</a>.</li>
+      <li><strong>Rust:</strong> <a href="https://doc.rust-lang.org/cargo/reference/build-scripts.html">Cargo build scripts</a> and cross-compilation target triples (<code>rustup target add …</code>).</li>
+      <li><strong>Forward link:</strong> the build wires the C ABI into a minimal Dart binding and round-trips one call.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

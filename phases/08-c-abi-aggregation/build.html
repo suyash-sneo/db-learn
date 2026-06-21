@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Build — the real C ABI + Dart binding</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p8:build", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › Build</div>
+  <span class="pill">Build · AI off</span>
+  <h1>Build: a real C ABI + a Dart binding</h1>
+  <div class="goal"><b>Goal:</b> Wrap your Phase 6 document store in a stable, panic-safe C ABI
+  (opaque handle, byte buffers, error codes, cursor, a small aggregation pipeline), generate a C header
+  with cbindgen, prove it with a C smoke test, and call it from a minimal Dart binding.</div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ AI off</div>
+    <p>This page gives the ABI contract, milestones, failing tests, and <code>todo!()</code> stubs only —
+    no worked boundary logic. The FFI boundary is where memory-safety bugs become process crashes;
+    implement the pointer handling, ownership, panic wrapping, and cursor logic yourself, following the
+    rules in 8.1–8.5.</p>
+  </div>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ What the in-process tests do and do not prove</div>
+    <p>The Rust tests below call the <code>extern "C"</code> functions in the same process through raw
+    pointers. They validate the <em>boundary logic</em> — null/empty handling, ownership round-trips, error
+    codes, cursor iteration. They do <strong>not</strong> prove cross-language ABI correctness, header
+    accuracy, symbol export, or on-device loading. Those require the <strong>mandatory manual checks</strong>
+    in the acceptance criteria: generate the header with <code>--lang c</code>, inspect it, compile and run a
+    C smoke test against the built <code>cdylib</code>, and round-trip one call from Dart.</p>
+  </div>
+
+  <h2>Deliverable</h2>
+  <p>A Rust 2024 crate <code>minidb_capi</code> with <code>crate-type = ["cdylib", "rlib"]</code>, wrapping
+  the Phase 6 <code>docstore</code> (and optionally the Phase 7 <code>lockmgr</code>). It exposes opaque
+  <code>Db</code> and <code>Cursor</code> handles and a small set of prefixed, unmangled functions. Every
+  exported function is wrapped in <code>catch_unwind</code> and returns an <code>i32</code> status. A
+  <code>cbindgen.toml</code> with <code>language = "C"</code> generates <code>minidb.h</code>; a C smoke
+  test and a Dart binding consume it.</p>
+
+  <h2>The ABI surface</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Function</th><th>Contract</th></tr></thead>
+    <tbody>
+      <tr><td><code>minidb_abi_version() -&gt; u32</code></td><td>Non-zero ABI version; bump on incompatible change.</td></tr>
+      <tr><td><code>minidb_open(path, *mut *mut Db) -&gt; i32</code></td><td>Allocates a handle; caller must <code>minidb_close</code> it.</td></tr>
+      <tr><td><code>minidb_close(*mut Db)</code></td><td>Frees the handle; null is a no-op.</td></tr>
+      <tr><td><code>minidb_insert(db, *const u8, usize, *mut i64) -&gt; i32</code></td><td>Borrowed doc bytes; writes new <code>_id</code>.</td></tr>
+      <tr><td><code>minidb_find(db, *const u8, usize, *mut *mut u8, *mut usize) -&gt; i32</code></td><td>Engine-allocated result bytes; free with <code>minidb_free_buf</code>.</td></tr>
+      <tr><td><code>minidb_aggregate(db, *const u8, usize, *mut *mut u8, *mut usize) -&gt; i32</code></td><td>Serialized pipeline in, serialized docs out.</td></tr>
+      <tr><td><code>minidb_find_cursor / _cursor_next / _cursor_close</code></td><td>Streaming results (8.3); cursor valid only while its <code>Db</code> is open.</td></tr>
+      <tr><td><code>minidb_free_buf(*mut u8, usize)</code></td><td>Frees an engine buffer using the exact (ptr,len) issued.</td></tr>
+      <tr><td><code>minidb_last_error() -&gt; *const c_char</code></td><td>Thread-local detail for the most recent failure.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Ordered milestones</h2>
+  <ol>
+    <li><strong>M1 — handle lifecycle.</strong> <code>minidb_open</code>/<code>minidb_close</code> with
+    correct <code>Box</code> ownership; <code>minidb_abi_version</code>.</li>
+    <li><strong>M2 — byte-buffer CRUD.</strong> <code>minidb_insert</code> (borrowed input, the
+    <code>(NULL,0)</code>/<code>(NULL,nonzero)</code> rules) and <code>minidb_find</code> + matching
+    <code>minidb_free_buf</code> (the <code>Box&lt;[u8]&gt;</code> round-trip; empty = <code>(NULL,0)</code>).</li>
+    <li><strong>M3 — error + panic safety.</strong> Stable error codes; wrap every export in
+    <code>catch_unwind</code>; populate a thread-local <code>minidb_last_error</code>; ensure a caught panic
+    leaves committed state intact (transactional mutation, Phase 5).</li>
+    <li><strong>M4 — cursor.</strong> <code>find_cursor</code>/<code>cursor_next</code> (three-valued
+    return)/<code>cursor_close</code>, with the documented lifetime &amp; invalidation policy.</li>
+    <li><strong>M5 — aggregation subset.</strong> <code>minidb_aggregate</code> running a small stage chain
+    (<code>$match</code> via your evaluator, plus <code>$sort</code>/<code>$limit</code>), documented as a
+    subset.</li>
+    <li><strong>M6 — header + bindings.</strong> cbindgen (<code>--lang c</code>) → inspect → C smoke test →
+    minimal Dart binding that round-trips one open/insert/find.</li>
+  </ol>
+
+  <h2>Acceptance criteria</h2>
+  <ul>
+    <li>All supplied Rust tests pass unchanged.</li>
+    <li>Inputs honor the borrowed-buffer contract; <code>(NULL,0)</code> is empty, <code>(NULL,nonzero)</code>
+    is rejected.</li>
+    <li>Output buffers round-trip exactly and are freed only via <code>minidb_free_buf</code>.</li>
+    <li>No code path can let a panic unwind past <code>extern "C"</code>; a forced internal panic returns
+    <code>MINIDB_ERR_PANIC</code> and leaves committed data intact.</li>
+    <li>A cursor iterates all matches then signals end; using it after its <code>Db</code> is closed is
+    documented as forbidden.</li>
+    <li><strong>Mandatory manual:</strong> <code>cbindgen --lang c</code> produces <code>minidb.h</code>;
+    you inspected it (opaque handles forward-declared, buffer params correct); a C smoke test compiles,
+    links the <code>cdylib</code>, and round-trips a call.</li>
+    <li><strong>Mandatory manual:</strong> a Dart program <code>DynamicLibrary.open</code>s the library,
+    looks up the symbols, and round-trips open/insert/find; freeing uses <code>minidb_free_buf</code>.</li>
+    <li><strong>Note the platform caveats</strong> (8.7): library naming, signing, ABI coverage — state what
+    you did and did not test on real devices.</li>
+  </ul>
+
+  <h2>Stub: <code>src/lib.rs</code></h2>
+  <span class="code-label">src/lib.rs — implement every todo!()</span>
+<pre><code><span class="tok-k">use</span> std::ffi::{c_char, c_void};
+<span class="tok-k">use</span> std::panic::catch_unwind;
+
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_OK</span>: <span class="tok-f">i32</span> = 0;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_NOT_FOUND</span>: <span class="tok-f">i32</span> = -1;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_BAD_DOC</span>: <span class="tok-f">i32</span> = -2;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_IO</span>: <span class="tok-f">i32</span> = -3;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_NULL_ARG</span>: <span class="tok-f">i32</span> = -4;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_PANIC</span>: <span class="tok-f">i32</span> = -99;
+
+<span class="tok-c">// Opaque to C: only ever handed back as a pointer.</span>
+<span class="tok-k">pub struct</span> <span class="tok-f">Db</span> { <span class="tok-c">/* private: your Phase 6 DocStore (+ Phase 7 lockmgr) */</span> }
+<span class="tok-k">pub struct</span> <span class="tok-f">Cursor</span> { <span class="tok-c">/* private: result iterator borrowing Db */</span> }
+
+<span class="tok-c">// Map a borrowed C buffer to &[u8] per the 8.2 rules.</span>
+<span class="tok-k">unsafe fn</span> <span class="tok-f">as_slice</span><span class="tok-k">&lt;'a&gt;</span>(ptr: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Option</span><span class="tok-k">&lt;</span>&amp;<span class="tok-k">'a</span> [<span class="tok-f">u8</span>]<span class="tok-k">&gt;</span> {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: (NULL,0)->&[]; (NULL,nonzero)->None; else from_raw_parts"</span>)
+}
+
+<span class="tok-c">// Hand owned bytes to the caller as (ptr,len); empty -> (NULL,0).</span>
+<span class="tok-k">unsafe fn</span> <span class="tok-f">export_bytes</span>(bytes: <span class="tok-f">Vec</span><span class="tok-k">&lt;</span><span class="tok-f">u8</span><span class="tok-k">&gt;</span>, out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) {
+    <span class="tok-m">todo!</span>(<span class="tok-s">"M2: into_boxed_slice + Box::into_raw; write ptr/len; empty -> NULL,0"</span>)
+}
+
+<span class="tok-c">// Run a closure under catch_unwind and flatten to an i32 status.</span>
+<span class="tok-k">fn</span> <span class="tok-f">guard</span><span class="tok-k">&lt;F: FnOnce() -&gt; i32 + std::panic::UnwindSafe&gt;</span>(f: <span class="tok-f">F</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">match</span> <span class="tok-f">catch_unwind</span>(f) {
+        <span class="tok-f">Ok</span>(code) =&gt; code,
+        <span class="tok-f">Err</span>(_) =&gt; { <span class="tok-c">/* set last_error */</span> <span class="tok-f">MINIDB_ERR_PANIC</span> }
+    }
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_abi_version</span>() -&gt; <span class="tok-f">u32</span> { <span class="tok-m">todo!</span>(<span class="tok-s">"M1: a non-zero version constant"</span>) }
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_open</span>(path: *<span class="tok-k">const</span> <span class="tok-f">c_char</span>, out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-f">guard</span>(|| <span class="tok-m">todo!</span>(<span class="tok-s">"M1: read path; open DocStore; Box::into_raw into *out; return MINIDB_OK"</span>))
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_close</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>) {
+    <span class="tok-k">if</span> db.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span>; }
+    <span class="tok-k">unsafe</span> { <span class="tok-k">let</span> _ = <span class="tok-f">Box</span>::<span class="tok-f">from_raw</span>(db); } <span class="tok-c">// reclaim and drop</span>
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_insert</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, doc: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>, out_id: *<span class="tok-k">mut</span> <span class="tok-f">i64</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-f">guard</span>(|| <span class="tok-m">todo!</span>(<span class="tok-s">"M2: null-check db/out_id; as_slice(doc,len); docstore.insert; write id"</span>))
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_find</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, filter: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>,
+                              out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-f">guard</span>(|| <span class="tok-m">todo!</span>(<span class="tok-s">"M2: parse filter bytes; run Phase 6 find; serialize results; export_bytes"</span>))
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_free_buf</span>(ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>) {
+    <span class="tok-k">if</span> ptr.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span>; }
+    <span class="tok-k">unsafe</span> { <span class="tok-k">let</span> _ = <span class="tok-f">Box</span>::<span class="tok-f">from_raw</span>(std::ptr::<span class="tok-f">slice_from_raw_parts_mut</span>(ptr, len)); }
+}
+
+<span class="tok-c">// M4 cursor + M5 aggregate: same shape — opaque handle / serialized in &amp; out.</span>
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_cursor_next</span>(cur: *<span class="tok-k">mut</span> <span class="tok-f">Cursor</span>, out: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-f">guard</span>(|| <span class="tok-m">todo!</span>(<span class="tok-s">"M4: 0=produced doc, 1=end, &lt;0=error"</span>))
+}</code></pre>
+
+  <h2>Failing tests</h2>
+  <span class="code-label">tests/capi.rs — call the extern fns in-process (boundary logic only)</span>
+<pre><code><span class="tok-k">use</span> minidb_capi::*;
+<span class="tok-k">use</span> std::ptr;
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">abi_version_is_nonzero</span>() {
+    <span class="tok-m">assert!</span>(<span class="tok-f">minidb_abi_version</span>() &gt; 0);
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">open_insert_find_roundtrip</span>() {
+    <span class="tok-k">let mut</span> db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span> = ptr::<span class="tok-f">null_mut</span>();
+    <span class="tok-k">let</span> path = std::ffi::<span class="tok-f">CString</span>::<span class="tok-f">new</span>(<span class="tok-s">":memory:"</span>).<span class="tok-f">unwrap</span>();
+    <span class="tok-m">assert_eq!</span>(<span class="tok-f">minidb_open</span>(path.<span class="tok-f">as_ptr</span>(), &amp;<span class="tok-k">mut</span> db), <span class="tok-f">MINIDB_OK</span>);
+
+    <span class="tok-k">let</span> doc = <span class="tok-s">br#"{"city":"London"}"#</span>;
+    <span class="tok-k">let mut</span> id: <span class="tok-f">i64</span> = 0;
+    <span class="tok-m">assert_eq!</span>(<span class="tok-f">minidb_insert</span>(db, doc.<span class="tok-f">as_ptr</span>(), doc.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> id), <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert!</span>(id &gt; 0);
+
+    <span class="tok-k">let</span> filter = <span class="tok-s">br#"{"city":"London"}"#</span>;
+    <span class="tok-k">let mut</span> out: *<span class="tok-k">mut</span> <span class="tok-f">u8</span> = ptr::<span class="tok-f">null_mut</span>();
+    <span class="tok-k">let mut</span> out_len: <span class="tok-f">usize</span> = 0;
+    <span class="tok-m">assert_eq!</span>(<span class="tok-f">minidb_find</span>(db, filter.<span class="tok-f">as_ptr</span>(), filter.<span class="tok-f">len</span>(), &amp;<span class="tok-k">mut</span> out, &amp;<span class="tok-k">mut</span> out_len), <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-m">assert!</span>(out_len &gt; 0 &amp;&amp; !out.<span class="tok-f">is_null</span>());
+    <span class="tok-f">minidb_free_buf</span>(out, out_len);
+    <span class="tok-f">minidb_close</span>(db);
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">null_nonzero_input_is_rejected</span>() {
+    <span class="tok-k">let mut</span> db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span> = ptr::<span class="tok-f">null_mut</span>();
+    <span class="tok-k">let</span> path = std::ffi::<span class="tok-f">CString</span>::<span class="tok-f">new</span>(<span class="tok-s">":memory:"</span>).<span class="tok-f">unwrap</span>();
+    <span class="tok-f">minidb_open</span>(path.<span class="tok-f">as_ptr</span>(), &amp;<span class="tok-k">mut</span> db);
+    <span class="tok-k">let mut</span> id: <span class="tok-f">i64</span> = 0;
+    <span class="tok-c">// (NULL, nonzero) must not be treated as a valid empty buffer</span>
+    <span class="tok-m">assert_ne!</span>(<span class="tok-f">minidb_insert</span>(db, ptr::<span class="tok-f">null</span>(), 5, &amp;<span class="tok-k">mut</span> id), <span class="tok-f">MINIDB_OK</span>);
+    <span class="tok-f">minidb_close</span>(db);
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">free_buf_handles_null_and_empty</span>() {
+    <span class="tok-f">minidb_free_buf</span>(ptr::<span class="tok-f">null_mut</span>(), 0); <span class="tok-c">// no-op, must not crash</span>
+}
+
+<span class="tok-m">#[test]</span>
+<span class="tok-k">fn</span> <span class="tok-f">forced_panic_becomes_error_not_abort</span>() {
+    <span class="tok-c">// Provide a #[cfg(test)] hook that panics inside a guarded fn; assert it returns</span>
+    <span class="tok-c">// MINIDB_ERR_PANIC rather than aborting the process.</span>
+    <span class="tok-m">assert_eq!</span>(<span class="tok-f">minidb_panic_for_test</span>(), <span class="tok-f">MINIDB_ERR_PANIC</span>);
+}</code></pre>
+
+  <h2>Stuck? — graduated hints</h2>
+  <details><summary>Box ownership for the handle confuses me</summary><div class="answer">
+    <strong>Nudge:</strong> <code>open</code> leaks, <code>close</code> reclaims.
+    <br><strong>Bigger:</strong> <code>Box::into_raw(Box::new(db))</code> gives the caller a pointer;
+    <code>Box::from_raw</code> in <code>close</code> turns it back into an owned <code>Box</code> that drops.
+    <br><strong>Technique:</strong> never hand out a pointer to a stack value or a <code>&amp;mut</code>; the
+    handle must outlive the call, so it must be heap-owned via <code>Box</code>.</div></details>
+  <details><summary>The output buffer crashes on free</summary><div class="answer">
+    <strong>Nudge:</strong> The free must see the same length you issued.
+    <br><strong>Technique:</strong> build the buffer with <code>Vec::into_boxed_slice</code> +
+    <code>Box::into_raw</code>, and reclaim with <code>slice_from_raw_parts_mut(ptr, len)</code> +
+    <code>Box::from_raw</code> using the identical <code>len</code>. A mismatched length is UB.</div></details>
+  <details><summary>How do I test panic safety without aborting?</summary><div class="answer">
+    <strong>Nudge:</strong> Only an <em>unwinding</em> panic that reaches <code>extern "C"</code> aborts.
+    <br><strong>Technique:</strong> wrap the body in <code>catch_unwind</code> so the panic is caught and
+    mapped to a code; add a <code>#[cfg(test)]</code> function that deliberately panics inside the guard and
+    assert it returns <code>MINIDB_ERR_PANIC</code>. (Don't build with <code>panic = "abort"</code>, which
+    <code>catch_unwind</code> can't catch.)</div></details>
+  <details><summary>cbindgen emitted C++ / weird types</summary><div class="answer">
+    <strong>Nudge:</strong> Default language is C++.
+    <br><strong>Technique:</strong> set <code>language = "C"</code> in <code>cbindgen.toml</code> (or
+    <code>--lang c</code>), regenerate, and read the header: opaque handles should be forward-declared
+    structs, buffers should be <code>uint8_t*</code> + <code>size_t</code>. Then compile a C file that
+    includes it and links the cdylib.</div></details>
+
+  <h2>Definition of Done</h2>
+  <ul>
+    <li>☐ All supplied Rust tests pass unchanged.</li>
+    <li>☐ Every export is panic-guarded; a forced panic returns a code and leaves committed data intact.</li>
+    <li>☐ Input/output buffer contracts (8.2) are upheld exactly; only <code>minidb_free_buf</code> frees
+    engine memory.</li>
+    <li>☐ Cursor + a documented invalidation policy; aggregation runs a documented stage subset.</li>
+    <li>☐ <code>cbindgen --lang c</code> header generated, inspected, and exercised by a compiled C smoke
+    test linking the cdylib.</li>
+    <li>☐ A Dart binding opens the library and round-trips open/insert/find, freeing via
+    <code>minidb_free_buf</code>.</li>
+    <li>☐ Platform caveats (8.7) written down, with what was and wasn't tested on device.</li>
+  </ul>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Reference:</strong> <a href="https://doc.rust-lang.org/nomicon/ffi.html">Rustonomicon — FFI</a>, <a href="https://doc.rust-lang.org/cargo/reference/cargo-targets.html#library">Cargo crate types</a>.</li>
+      <li><strong>Tools:</strong> <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">cbindgen</a>, <a href="https://pub.dev/packages/ffigen">ffigen</a>, <a href="https://pub.dev/packages/ffi">package:ffi</a>.</li>
+      <li><strong>Capstone:</strong> this is the last build — you now have a durable, indexed, queryable,
+      embeddable document database callable from Dart.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

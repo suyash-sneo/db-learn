@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 8 — Real C ABI + aggregation</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p8", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › Phase 8</div>
+  <span class="pill">Phase 8</span>
+  <h1>Real C ABI + aggregation</h1>
+  <p class="lead">Phase 1 proved one byte buffer could cross from Rust to Dart. This phase turns that
+  spike into a real, stable public interface: an opaque-handle C ABI for open/CRUD/query/cursor, with
+  disciplined ownership, error reporting, and versioning; a generated C header and a Dart binding that
+  consumes it; an aggregation pipeline layered on the Phase 6 query engine; and the packaging that ships
+  the native library inside a Flutter app for iOS and Android. This is where the engine stops being a Rust
+  crate and becomes a database other code can depend on.</p>
+
+  <div class="box deeper">
+    <div class="box-title">Why the C ABI comes last</div>
+    <p>A public ABI is a promise: once code depends on your symbols, types, and ownership rules, you cannot
+    casually change them. You only want to make that promise once the thing behind it is real — a durable,
+    indexed, queryable document store (Phases 2–7). Designing the boundary now means freezing a surface
+    over machinery you actually trust, and aggregation is added here because it is a feature built
+    <em>on</em> the query engine rather than a new storage layer.</p>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">What you'll be able to do after Phase 8</div>
+    <p>Design an ABI-stable C surface using opaque handles and byte buffers; specify and uphold ownership,
+    lifetime, and panic contracts at the boundary; iterate query results across the FFI with a cursor;
+    report errors and version the ABI without breaking callers; generate a C header with cbindgen and call
+    it from Dart; implement a small aggregation pipeline on top of your evaluator; and package the native
+    library into a Flutter app for both mobile platforms.</p>
+  </div>
+
+  <div class="cardgrid" id="cards"></div>
+</main>
+<script src="../../assets/app.js"></script>
+<script>
+(function () {
+  const p = PHASES.find(x => x.id === "p8");
+  let html = "";
+  p.lessons.forEach(l => {
+    const isBuild = l[0] === "build";
+    html += '<a class="card" href="' + l[2] + '">' +
+      '<span class="ph">' + (isBuild ? "Build" : "Lesson " + l[0]) + '</span>' +
+      '<h3>' + l[1] + '</h3></a>';
+  });
+  document.getElementById("cards").innerHTML = html;
+})();
+</script>
+</body>
+</html>

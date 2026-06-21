@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>8.4 Error reporting, versioning, ABI stability</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p8:8.4", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.4</div>
+  <h1>8.4 — Error reporting, versioning, ABI stability</h1>
+  <div class="goal"><b>Goal:</b> Make failures, panics, and change all <em>safe</em> at the boundary:
+  report errors as codes plus optional detail, stop Rust panics from crossing into C as undefined behavior,
+  and version the ABI so you can evolve the library without breaking existing callers.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>The previous lessons defined the happy path. This one defines what happens when things go wrong or
+  change — which is where FFIs actually break. A panic that escapes can abort the host app; an error with no
+  detail is undebuggable; a careless signature change silently corrupts every caller compiled against the
+  old header. Each needs an explicit, conservative policy.</p>
+
+  <h2>Error reporting: codes + retrievable detail</h2>
+  <p>Every fallible function returns an <code>i32</code>: <code>0</code> for success, negative values for
+  specific error categories (a small stable enum: not-found, bad-document, io, busy, …). Codes are stable
+  and language-neutral. For human-readable detail, the common pattern is a <strong>last-error</strong>
+  accessor the caller can query after a failure:</p>
+  <pre><code><span class="tok-c">// Stable numeric categories — never renumber these once shipped.</span>
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_OK</span>: <span class="tok-f">i32</span> = 0;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_NOT_FOUND</span>: <span class="tok-f">i32</span> = -1;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_BAD_DOC</span>: <span class="tok-f">i32</span> = -2;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_IO</span>: <span class="tok-f">i32</span> = -3;
+<span class="tok-k">pub const</span> <span class="tok-f">MINIDB_ERR_PANIC</span>: <span class="tok-f">i32</span> = -99;
+
+<span class="tok-c">// Detail for the most recent failure on this thread; borrowed, valid until the next call.</span>
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_last_error</span>() -&gt; *<span class="tok-k">const</span> <span class="tok-f">c_char</span> { <span class="tok-c">/* thread-local CString ptr */</span> }</code></pre>
+  <p>Keep the detail string thread-local so two threads don't clobber each other's last error, and document
+  its lifetime (valid until the next call on that thread). The numeric codes — not the strings — are the
+  stable contract; never reuse or renumber a shipped code.</p>
+
+  <h2>Panics must not cross the boundary</h2>
+  <p>This is the highest-stakes rule. The precise behaviors (all from the curriculum's FFI baseline):</p>
+  <ul>
+    <li>"If an unwinding Rust panic reaches non-unwinding <code>extern "C"</code>, Rust aborts the
+    process." So an unguarded panic in your ABI function kills the host app.</li>
+    <li>"<code>extern "C-unwind"</code> permits unwinding" — a different ABI you opt into deliberately, not
+    the default.</li>
+    <li>"A foreign exception entering a non-unwind Rust ABI is undefined behavior."</li>
+    <li>"<code>catch_unwind</code> catches only unwinding Rust panics, not <code>panic = "abort"</code> or
+    arbitrary crashes."</li>
+  </ul>
+  <p class="src">[src: AGENTS.md — Rust/FFI panic baseline]</p>
+  <p>The practical pattern: wrap each <code>extern "C"</code> body in <code>catch_unwind</code>, convert a
+  caught panic into <code>MINIDB_ERR_PANIC</code>, and return normally — so an internal bug becomes an
+  error code instead of a process abort.</p>
+  <pre><code><span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_insert</span>(db: *<span class="tok-k">mut</span> <span class="tok-f">Db</span>, doc: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>, out_id: *<span class="tok-k">mut</span> <span class="tok-f">i64</span>) -&gt; <span class="tok-f">i32</span> {
+    <span class="tok-k">let</span> r = std::panic::<span class="tok-f">catch_unwind</span>(|| {
+        <span class="tok-c">// ... real work; may return Err(code) ...</span>
+    });
+    <span class="tok-k">match</span> r {
+        <span class="tok-f">Ok</span>(<span class="tok-f">Ok</span>(())) =&gt; <span class="tok-f">MINIDB_OK</span>,
+        <span class="tok-f">Ok</span>(<span class="tok-f">Err</span>(code)) =&gt; code,
+        <span class="tok-f">Err</span>(_panic) =&gt; <span class="tok-f">MINIDB_ERR_PANIC</span>, <span class="tok-c">// caught — do NOT let it unwind into C</span>
+    }
+}</code></pre>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Catching a panic ≠ a still-valid handle</div>
+    <p>"Catching a panic does not prove a database handle remains logically valid." A panic mid-mutation may
+    leave the engine half-updated. After a caught panic, don't pretend nothing happened: "Publish state only
+    after successful work, use transactional mutation, or poison the handle after a caught panic."
+    <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span> The cleanest fit with your Phase 5/7 work
+    is transactional mutation: a caught panic means the transaction did not commit, so committed state is
+    untouched. If you can't guarantee that, mark the handle poisoned and reject further calls.</p>
+  </div>
+
+  <h2>ABI versioning: change without breaking</h2>
+  <p>Once callers link against your symbols and header, the binary interface is a contract. Classify
+  changes:</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Change</th><th>Compatible?</th></tr></thead>
+    <tbody>
+      <tr><td>Add a new function</td><td>Yes — additive; old callers keep working.</td></tr>
+      <tr><td>Add a new error code</td><td>Mostly — only if callers treat "any negative" as failure, which you should document.</td></tr>
+      <tr><td>Change a function's signature/parameters</td><td>No — breaks every caller compiled against the old header.</td></tr>
+      <tr><td>Change a <code>#[repr(C)]</code> struct's layout</td><td>No — silent memory misinterpretation.</td></tr>
+      <tr><td>Reuse/renumber an existing error code</td><td>No — changes the meaning of a shipped value.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Practical discipline:</p>
+  <ul>
+    <li>Expose a version: <code>minidb_abi_version() -&gt; u32</code> and/or
+    <code>minidb_version_string()</code>, so a caller can check what it loaded at runtime.</li>
+    <li>Follow semantic versioning for the library: bump major on any incompatible ABI change.</li>
+    <li>Prefer additive evolution; pass extensible data as serialized bytes (8.2) so new fields don't touch
+    the ABI.</li>
+    <li>Keep the exported symbol set minimal and prefixed (8.1) — fewer promises to keep.</li>
+  </ul>
+
+  <h2>Symbol &amp; layout stability</h2>
+  <p>The ABI is the exact set of symbol names, their signatures, and the memory layout of any
+  <code>#[repr(C)]</code> type that crosses it. <code>#[unsafe(no_mangle)]</code> fixes the names; the
+  prefix keeps them unique; opaque handles (8.1) keep layouts private so most of the engine can change
+  freely. The only layouts you must keep stable are the few <code>repr(C)</code> types you deliberately
+  expose — keep that set as small as possible.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What happens if an unwinding Rust panic reaches a default <code>extern "C"</code> boundary?</p>
+      <details><summary>Show answer</summary><div class="answer">Rust aborts the process. You must catch panics
+      at the boundary (<code>catch_unwind</code>) and convert them to an error code instead.</div></details>
+      <p class="q">2. After catching a panic, why can't you just return and keep using the handle?</p>
+      <details><summary>Show answer</summary><div class="answer">The handle may be logically inconsistent
+      (half-updated). Use transactional mutation so an uncommitted change is discarded, publish state only on
+      success, or poison the handle and reject further calls.</div></details>
+      <p class="q">3. Which of these is an ABI-compatible change: adding a function, or changing a struct's layout?</p>
+      <details><summary>Show answer</summary><div class="answer">Adding a function is additive and compatible.
+      Changing a <code>repr(C)</code> struct's layout breaks callers via silent memory misinterpretation.</div></details>
+      <p class="q">4. Why keep error <em>codes</em> stable but allow the detail <em>strings</em> to change?</p>
+      <details><summary>Show answer</summary><div class="answer">Codes are the machine-readable contract callers
+      branch on, so renumbering changes meaning. Strings are human-facing detail, not part of the programmatic
+      contract.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Reference:</strong> <a href="https://doc.rust-lang.org/std/panic/fn.catch_unwind.html">std::panic::catch_unwind</a>; <a href="https://doc.rust-lang.org/nomicon/ffi.html#ffi-and-unwinding">Rustonomicon — FFI and unwinding</a>; <a href="https://doc.rust-lang.org/reference/items/external-blocks.html">Rust Reference — <code>C-unwind</code></a>.</li>
+      <li><strong>Concept:</strong> <a href="https://semver.org/">Semantic Versioning</a> for the library version policy.</li>
+      <li><strong>Forward link:</strong> 8.5 generates the header from these signatures and binds it in Dart.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

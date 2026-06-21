@@ -109,14 +109,14 @@ const PHASES = [
     ] },
   { id: "p8", num: "8", title: "Real C ABI + aggregation", dir: "phases/08-c-abi-aggregation",
     lessons: [
-      ["8.1","Designing a stable public C API","01-public-api.html","soon"],
-      ["8.2","The full API with byte buffers","02-full-api.html","soon"],
-      ["8.3","Cursors / iteration across FFI","03-cursors.html","soon"],
-      ["8.4","Error reporting, versioning, ABI stability","04-versioning.html","soon"],
-      ["8.5","cbindgen header + Dart binding","05-binding.html","soon"],
-      ["8.6","Aggregation (v2): the pipeline","06-aggregation.html","soon"],
-      ["8.7","Packaging for iOS/Android","07-packaging.html","soon"],
-      ["build","Build: the real C ABI + Dart binding","build.html","soon"],
+      ["8.1","Designing a stable public C API","01-public-api.html","done"],
+      ["8.2","The full API with byte buffers","02-full-api.html","done"],
+      ["8.3","Cursors / iteration across FFI","03-cursors.html","done"],
+      ["8.4","Error reporting, versioning, ABI stability","04-versioning.html","done"],
+      ["8.5","cbindgen header + Dart binding","05-binding.html","done"],
+      ["8.6","Aggregation (v2): the pipeline","06-aggregation.html","done"],
+      ["8.7","Packaging for iOS/Android","07-packaging.html","done"],
+      ["build","Build: the real C ABI + Dart binding","build.html","done"],
     ] },
 ];
 

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>8.6 Aggregation (v2): the pipeline</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p8:8.6", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.6</div>
+  <h1>8.6 — Aggregation (v2): the pipeline</h1>
+  <div class="goal"><b>Goal:</b> Understand the aggregation pipeline as a sequence of stages that transform
+  a stream of documents — filter, group, sort, reshape — and see how it layers on the Phase 6 query
+  engine rather than replacing it, using MongoDB's pipeline as the reference model.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>MongoDB's aggregation pipeline is the reference. Quotes below are from its manual.
+    <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Manual — Aggregation Pipeline</a>]</span></p>
+  </div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Phase 6 gave you <code>find</code>: a filter that selects documents. Real applications also need to
+  <em>summarize</em> — count per category, average per group, top-N by a field. The aggregation pipeline is
+  the general mechanism for that: a list of <strong>stages</strong>, each transforming the stream of
+  documents flowing through it. Crucially, it is built <em>on</em> your existing evaluator, not beside it —
+  the first stage is usually just the filter you already have.</p>
+
+  <h2>A pipeline is a sequence of stages</h2>
+  <p>An aggregation pipeline is "one or more stages that process documents." "Each stage performs an
+  operation on the input documents" and "the documents that a stage outputs are then passed to the next
+  stage." A key property: "A stage does not need to output one document for every input document. Some
+  stages produce new documents or filter documents out."
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Manual — Aggregation Pipeline</a>]</span></p>
+
+  <figure>
+  <svg viewBox="0 0 560 130" role="img" aria-label="Documents flow through match, group, sort stages">
+    <rect class="dg-bg" x="0" y="0" width="560" height="130" rx="10"/>
+    <text class="dg-txt-s" x="30" y="40" text-anchor="middle">docs</text>
+    <line class="dg-edge" x1="50" y1="60" x2="90" y2="60"/><polygon class="dg-arrow" points="92,60 84,56 84,64"/>
+    <rect class="dg-fill-a" x="94" y="44" width="92" height="32" rx="4"/><text class="dg-txt-s" x="140" y="64" text-anchor="middle">$match</text>
+    <line class="dg-edge" x1="186" y1="60" x2="214" y2="60"/><polygon class="dg-arrow" points="216,60 208,56 208,64"/>
+    <rect class="dg-box" x="218" y="44" width="92" height="32" rx="4"/><text class="dg-txt-s" x="264" y="64" text-anchor="middle">$group</text>
+    <line class="dg-edge" x1="310" y1="60" x2="338" y2="60"/><polygon class="dg-arrow" points="340,60 332,56 332,64"/>
+    <rect class="dg-box" x="342" y="44" width="92" height="32" rx="4"/><text class="dg-txt-s" x="388" y="64" text-anchor="middle">$sort</text>
+    <line class="dg-edge-hot" x1="434" y1="60" x2="470" y2="60"/><polygon class="dg-arrow" points="472,60 464,56 464,64"/>
+    <text class="dg-txt-s" x="510" y="64" text-anchor="middle">result</text>
+    <text class="dg-txt-s" x="280" y="106" text-anchor="middle">filter early → fewer docs to group and sort</text>
+  </svg>
+  <figcaption>Each stage consumes the previous stage's output; cardinality can shrink (<code>$match</code>),
+  collapse (<code>$group</code>), or stay the same (<code>$sort</code>).</figcaption>
+  </figure>
+
+  <h2>The common stages</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Stage</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>$match</code></td><td>Filter documents by a condition (your Phase 6 filter).</td></tr>
+      <tr><td><code>$group</code></td><td>Group documents and compute aggregate values (sum, avg, count, …).</td></tr>
+      <tr><td><code>$sort</code></td><td>Order documents ascending/descending.</td></tr>
+      <tr><td><code>$project</code></td><td>Reshape: include/exclude/compute fields.</td></tr>
+      <tr><td><code>$limit</code> / <code>$skip</code></td><td>Cap the count / skip a prefix.</td></tr>
+      <tr><td><code>$count</code></td><td>Count the documents reaching the stage.</td></tr>
+      <tr><td><code>$unwind</code></td><td>Deconstruct an array field into one document per element.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Manual — common stages</a>]</p>
+  <p>Two precise rules worth copying: a stage "can appear multiple times in a pipeline" (with a few
+  documented exceptions like <code>$out</code>/<code>$merge</code>), and an
+  <code>aggregate()</code> pipeline "do[es] not modify documents in a collection" unless it contains a
+  <code>$merge</code> or <code>$out</code> stage — i.e. aggregation is read-only by default.
+  <span class="src">[src: <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Manual — Aggregation Pipeline</a>]</span></p>
+
+  <h2>How it layers on Phase 6</h2>
+  <p>Model a pipeline as a chain of iterators over documents — exactly the cursor idea from 8.3 with a
+  transformation per stage:</p>
+  <ul>
+    <li><code>$match</code> is your existing evaluator (6.6) used as a streaming filter.</li>
+    <li><code>$sort</code>, <code>$group</code>, <code>$count</code> are <em>blocking</em> stages: they must
+    consume their entire input before producing output (you can't sort a stream without seeing all of it).</li>
+    <li><code>$limit</code>, <code>$skip</code>, <code>$project</code>, <code>$unwind</code> are
+    <em>streaming</em>: they transform documents one at a time.</li>
+  </ul>
+  <p>So aggregation reuses the planner/evaluator and adds stage operators on top. It is a feature built on
+  the query engine, which is why it belongs in this phase rather than Phase 6.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ Put <code>$match</code> first, and reuse the index path</div>
+    <p>A pipeline's cost is dominated by how many documents flow through the expensive (blocking) stages.
+    Filtering early — <code>$match</code> as the first stage — means <code>$group</code>/<code>$sort</code>
+    see far fewer documents, and a leading <code>$match</code> can use a secondary index via your Phase 6
+    planner (6.7) instead of a full scan. A <code>$match</code> buried after a <code>$group</code> has lost
+    that opportunity. This is the aggregation version of "selective access path first." Treat ordering as a
+    correctness-preserving optimization: reordering must not change results (the same rule as 6.7).</p>
+  </div>
+
+  <h2>Honest scope for your engine</h2>
+  <p>You are not building MongoDB's full operator set or its query optimizer. A credible v2 implements a
+  handful of stages — <code>$match</code>, <code>$project</code>, <code>$sort</code>, <code>$limit</code>,
+  and a simple <code>$group</code> with count/sum — composed as a stage chain, with <code>$match</code>
+  delegating to your evaluator. Say so explicitly, and list which stages and accumulators you support, so a
+  reader isn't misled into expecting parity with MongoDB.</p>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What is an aggregation pipeline, in one sentence?</p>
+      <details><summary>Show answer</summary><div class="answer">An ordered sequence of stages, each
+      transforming the stream of documents and passing its output to the next stage.</div></details>
+      <p class="q">2. Why is "a stage need not output one document per input" important?</p>
+      <details><summary>Show answer</summary><div class="answer">Stages change cardinality:
+      <code>$match</code> drops documents, <code>$group</code> collapses many into few, <code>$unwind</code>
+      expands one into many. The stream's length is not fixed.</div></details>
+      <p class="q">3. Which stages are blocking vs. streaming, and why does it matter?</p>
+      <details><summary>Show answer</summary><div class="answer">Blocking stages (<code>$sort</code>,
+      <code>$group</code>, <code>$count</code>) must see all input before emitting; streaming stages
+      (<code>$match</code>, <code>$project</code>, <code>$limit</code>, <code>$unwind</code>) act per
+      document. Blocking stages bound memory/latency, so feed them fewer documents.</div></details>
+      <p class="q">4. Why put <code>$match</code> first?</p>
+      <details><summary>Show answer</summary><div class="answer">It shrinks the stream before expensive stages
+      and lets the planner use a secondary index for the filter; a late <code>$match</code> loses both
+      benefits. Reordering must not change the result.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Docs:</strong> <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline/">Aggregation Pipeline</a>, <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation-pipeline/">stage reference</a>, <a href="https://www.mongodb.com/docs/manual/core/aggregation-pipeline-optimization/">pipeline optimization</a>.</li>
+      <li><strong>Back-link:</strong> <a href="../06-document-layer/06-query-model.html">6.6 evaluator</a> and <a href="../06-document-layer/07-planning.html">6.7 planning</a> — what <code>$match</code> reuses.</li>
+      <li><strong>Forward link:</strong> the build exposes a small pipeline through the C ABI.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>8.2 The full API with byte buffers</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p8:8.2", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.2</div>
+  <h1>8.2 — The full API with byte buffers</h1>
+  <div class="goal"><b>Goal:</b> Nail the pointer-plus-length contract used to move documents and queries
+  across the boundary in both directions — including the exact rules for empty buffers, null pointers, and
+  who frees engine-allocated output — so the surface is safe to call from C and Dart.</div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>Documents are variable-length serialized bytes (Phase 6). You can't pass a Rust <code>Vec&lt;u8&gt;</code>
+  across the ABI, and inventing a C struct per document type would freeze the schema into the ABI. The
+  answer is uniform: <strong>everything variable is a (pointer, length) pair of bytes.</strong> Inputs are
+  buffers the caller owns; outputs are buffers the engine allocates and the caller later returns for
+  freeing. Get this contract exactly right and the rest of the API is just functions over byte buffers.</p>
+
+  <h2>Input buffers: borrowed, caller-owned</h2>
+  <p>An input is a <code>*const u8</code> plus a <code>usize</code> length. The engine reads it during the
+  call and must not retain the pointer afterward (the caller may free it the instant the call returns).
+  Converting it to a slice has a precise precondition: <code>slice::from_raw_parts</code> "requires a
+  non-null aligned pointer even for length zero."
+  <span class="src">[src: AGENTS.md — "<code>slice::from_raw_parts</code> requires a non-null aligned pointer even for length zero"]</span></p>
+  <pre><code><span class="tok-c">// Map a borrowed C buffer to &[u8], honoring the (NULL, 0) special case.</span>
+<span class="tok-k">unsafe fn</span> <span class="tok-f">as_slice</span><span class="tok-k">&lt;'a&gt;</span>(ptr: *<span class="tok-k">const</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>) -&gt; <span class="tok-f">Option</span><span class="tok-k">&lt;</span>&amp;<span class="tok-k">'a</span> [<span class="tok-f">u8</span>]<span class="tok-k">&gt;</span> {
+    <span class="tok-k">match</span> (ptr.<span class="tok-f">is_null</span>(), len) {
+        (<span class="tok-k">true</span>, 0)  =&gt; <span class="tok-f">Some</span>(&amp;[]),                 <span class="tok-c">// empty input allowed as (NULL, 0)</span>
+        (<span class="tok-k">true</span>, _)  =&gt; <span class="tok-f">None</span>,                      <span class="tok-c">// (NULL, nonzero) is a caller bug → reject</span>
+        (<span class="tok-k">false</span>, _) =&gt; <span class="tok-f">Some</span>(<span class="tok-k">unsafe</span> { std::slice::<span class="tok-f">from_raw_parts</span>(ptr, len) }),
+    }
+}</code></pre>
+  <p>This is the AGENTS rule made concrete: "If the ABI permits <code>(NULL, 0)</code>, branch first and
+  map it to <code>&amp;[]</code>; reject <code>(NULL, nonzero)</code>."
+  <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span></p>
+
+  <h2>Output buffers: engine-allocated, caller-returned</h2>
+  <p>For results (a found document, a query's serialized rows), the engine allocates. The curriculum's
+  fixed convention: back the output with a <code>Box&lt;[u8]&gt;</code>, hand out a (pointer, length)
+  pair, and reclaim "the unchanged pair" later. "Represent empty output as <code>(NULL, 0)</code>."
+  <span class="src">[src: AGENTS.md — "prefer pointer + length backed by <code>Box&lt;[u8]&gt;</code> … reclaim the unchanged pair … Represent empty output as <code>(NULL, 0)</code>"]</span></p>
+  <pre><code><span class="tok-c">// Hand ownership of bytes to the caller as (ptr, len).</span>
+<span class="tok-k">fn</span> <span class="tok-f">export_bytes</span>(bytes: <span class="tok-f">Vec</span><span class="tok-k">&lt;</span><span class="tok-f">u8</span><span class="tok-k">&gt;</span>, out_ptr: *<span class="tok-k">mut</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, out_len: *<span class="tok-k">mut</span> <span class="tok-f">usize</span>) {
+    <span class="tok-k">if</span> bytes.<span class="tok-f">is_empty</span>() { <span class="tok-c">/* write NULL, 0 */</span> <span class="tok-k">return</span>; }
+    <span class="tok-k">let</span> boxed: <span class="tok-f">Box</span><span class="tok-k">&lt;</span>[<span class="tok-f">u8</span>]<span class="tok-k">&gt;</span> = bytes.<span class="tok-f">into_boxed_slice</span>();
+    <span class="tok-k">let</span> len = boxed.<span class="tok-f">len</span>();
+    <span class="tok-k">let</span> raw = <span class="tok-f">Box</span>::<span class="tok-f">into_raw</span>(boxed) <span class="tok-k">as</span> *<span class="tok-k">mut</span> <span class="tok-f">u8</span>; <span class="tok-c">// leak it to the caller</span>
+    <span class="tok-c">// write raw, len through the out-params</span>
+}
+
+<span class="tok-m">#[unsafe(no_mangle)]</span>
+<span class="tok-k">pub extern</span> <span class="tok-s">"C"</span> <span class="tok-k">fn</span> <span class="tok-f">minidb_free_buf</span>(ptr: *<span class="tok-k">mut</span> <span class="tok-f">u8</span>, len: <span class="tok-f">usize</span>) {
+    <span class="tok-k">if</span> ptr.<span class="tok-f">is_null</span>() { <span class="tok-k">return</span>; }
+    <span class="tok-c">// reconstruct the SAME pair and drop it</span>
+    <span class="tok-k">unsafe</span> { <span class="tok-k">let</span> _ = <span class="tok-f">Box</span>::<span class="tok-f">from_raw</span>(std::ptr::<span class="tok-f">slice_from_raw_parts_mut</span>(ptr, len)); }
+}</code></pre>
+  <p>The pair must come back <em>unchanged</em>: the same pointer and the same length you handed out.
+  Reconstructing a <code>Box&lt;[u8]&gt;</code> from a different length is undefined behavior. This is why
+  the length is part of the free call, not re-derived.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 160" role="img" aria-label="Input borrowed by caller, output allocated by engine and freed via minidb_free_buf">
+    <rect class="dg-bg" x="0" y="0" width="560" height="160" rx="10"/>
+    <text class="dg-txt" x="20" y="26" font-weight="700">input (caller owns)</text>
+    <rect class="dg-box" x="20" y="36" width="200" height="34" rx="4"/><text class="dg-txt-s" x="120" y="57" text-anchor="middle">*const u8 + len → borrowed</text>
+    <line class="dg-edge" x1="120" y1="70" x2="120" y2="92"/><polygon class="dg-arrow" points="120,100 116,90 124,90"/>
+    <text class="dg-txt-s" x="120" y="120" text-anchor="middle">engine reads, does not retain</text>
+
+    <text class="dg-txt" x="340" y="26" font-weight="700">output (engine owns → caller)</text>
+    <rect class="dg-fill-2" x="340" y="36" width="200" height="34" rx="4"/><text class="dg-txt-s" x="440" y="57" text-anchor="middle">*mut u8 + len → Box::into_raw</text>
+    <line class="dg-edge-hot" x1="440" y1="70" x2="440" y2="92"/><polygon class="dg-arrow" points="440,100 436,90 444,90"/>
+    <text class="dg-txt-s" x="440" y="120" text-anchor="middle">caller returns it to minidb_free_buf</text>
+  </svg>
+  <figcaption>Two directions, two ownership rules. Inputs are borrowed for the call; outputs are owned by
+  the caller until returned for freeing.</figcaption>
+  </figure>
+
+  <h2>A representative surface</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Function</th><th>Shape</th></tr></thead>
+    <tbody>
+      <tr><td><code>minidb_open</code></td><td><code>(*const c_char path, *mut *mut Db out) -&gt; i32</code></td></tr>
+      <tr><td><code>minidb_close</code></td><td><code>(*mut Db) -&gt; void</code></td></tr>
+      <tr><td><code>minidb_insert</code></td><td><code>(*mut Db, *const u8 doc, usize len, *mut i64 out_id) -&gt; i32</code></td></tr>
+      <tr><td><code>minidb_find</code></td><td><code>(*mut Db, *const u8 filter, usize len, *mut *mut u8 out, *mut usize out_len) -&gt; i32</code></td></tr>
+      <tr><td><code>minidb_free_buf</code></td><td><code>(*mut u8, usize) -&gt; void</code></td></tr>
+    </tbody>
+  </table></div>
+  <p>Documents and filters are serialized bytes (your Phase 6 codec). Adding a query operator or document
+  field changes the <em>bytes</em>, not the ABI — exactly the stability win from 8.1.</p>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ A null check is not a validity check</div>
+    <p>Checking <code>ptr.is_null()</code> catches exactly one mistake. It cannot detect a dangling,
+    misaligned, undersized, read-only, or incorrectly aliased pointer: "Checking for null cannot detect
+    dangling, misaligned, undersized, read-only, or incorrectly aliased memory."
+    <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span> So the safety of every buffer rests on the
+    documented contract (length is correct, memory is valid for that length, not aliased during the call),
+    which the caller must uphold — your job is to state it precisely next to each function and reject the
+    one case you <em>can</em> detect.</p>
+  </div>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. Why are documents passed as byte buffers instead of C structs?</p>
+      <details><summary>Show answer</summary><div class="answer">Documents are variable-length and schemaless;
+      a (ptr,len) byte pair keeps the schema out of the ABI, so changing document shape changes the bytes,
+      not the binary interface.</div></details>
+      <p class="q">2. How must <code>(NULL, 0)</code> and <code>(NULL, nonzero)</code> be handled for an input?</p>
+      <details><summary>Show answer</summary><div class="answer"><code>(NULL,0)</code> maps to an empty slice
+      <code>&amp;[]</code> (because <code>from_raw_parts</code> needs non-null even at len 0);
+      <code>(NULL,nonzero)</code> is a caller bug and must be rejected.</div></details>
+      <p class="q">3. Why must an output buffer be freed with the exact same (ptr, len) it was issued with?</p>
+      <details><summary>Show answer</summary><div class="answer">The free reconstructs a
+      <code>Box&lt;[u8]&gt;</code> from that pointer and length; a different length (or a foreign
+      <code>free</code>) is undefined behavior.</div></details>
+      <p class="q">4. What does a successful null check fail to guarantee?</p>
+      <details><summary>Show answer</summary><div class="answer">Everything else: the pointer could be dangling,
+      misaligned, too short, read-only, or aliased. Validity rests on the documented contract, not on the
+      null check.</div></details>
+    </div>
+  </div>
+
+  <div class="box rust">
+    <div class="box-title">🦀 Rust just-in-time</div>
+    <ul>
+      <li><code>Vec::into_boxed_slice</code> drops spare capacity so the (ptr,len) round-trips exactly;
+      pairing it with <code>Box::into_raw</code>/<code>Box::from_raw</code> is the curriculum's standard
+      output-buffer idiom.</li>
+      <li><code>slice_from_raw_parts_mut(ptr, len)</code> builds the <code>*mut [u8]</code> fat pointer
+      <code>Box::from_raw</code> needs to reclaim the allocation.</li>
+      <li>Mark FFI bodies that dereference raw pointers <code>unsafe</code> and document the contract above
+      each — see <a href="https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html">Rust Book ch. 20</a>.</li>
+    </ul>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Std:</strong> <a href="https://doc.rust-lang.org/std/slice/fn.from_raw_parts.html">slice::from_raw_parts</a>, <a href="https://doc.rust-lang.org/std/boxed/struct.Box.html#method.into_raw">Box::into_raw</a>.</li>
+      <li><strong>Repo standard:</strong> AGENTS.md output-buffer and null-handling rules.</li>
+      <li><strong>Forward link:</strong> 8.3 extends this to multi-document results via a cursor.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

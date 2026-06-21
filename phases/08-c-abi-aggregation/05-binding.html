@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>8.5 cbindgen header + Dart binding</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<script>window.PAGE = { id: "p8:8.5", root: "../../" };</script>
+</head>
+<body>
+<main>
+  <div class="crumbs"><a href="../../index.html">Home</a> › <a href="index.html">Phase 8</a> › 8.5</div>
+  <h1>8.5 — cbindgen header + Dart binding</h1>
+  <div class="goal"><b>Goal:</b> Generate a C header from your Rust ABI with cbindgen — correctly, in C
+  (not C++) — verify it, then bind those functions from Dart with <code>dart:ffi</code>, so the engine is
+  actually callable from the consumer side.</div>
+
+  <div class="box source">
+    <div class="box-title">📂 Where to read</div>
+    <p>cbindgen's behavior is documented in its repo docs; the Dart side in <code>dart:ffi</code>.
+    <span class="src">[src: <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">cbindgen docs</a>; <a href="https://dart.dev/interop/c-interop">dart.dev — C interop</a>]</span></p>
+  </div>
+
+  <h2>Why this matters to your DB</h2>
+  <p>You designed an ABI (8.1–8.4); now two artifacts make it usable: a <strong>C header</strong> declaring
+  the functions (so C/Dart know the signatures) and a <strong>Dart binding</strong> that loads the library
+  and looks up the symbols. Generating the header from the Rust source keeps the two in sync — but only if
+  you configure and check the generator carefully, because it transcribes declarations without verifying any
+  of the safety contracts you wrote.</p>
+
+  <h2>cbindgen: generate the header</h2>
+  <p>cbindgen "generates C/C++11 headers from Rust libraries that expose a public C API," scanning for
+  <code>#[no_mangle] pub extern fn</code>, exported statics, and <code>pub const</code> items.
+  <span class="src">[src: <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">cbindgen docs</a>]</span>
+  Two configuration facts are critical:</p>
+  <ul>
+    <li><strong>The default output is C++.</strong> You must ask for C explicitly: "Default output is C++;
+    use <code>--lang c</code> flag or <code>language = "C"</code> in cbindgen.toml for C output."
+    <span class="src">[src: <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">cbindgen docs</a>; AGENTS.md]</span>
+    A C++ header consumed as C is a subtle source of breakage.</li>
+    <li><strong>It can run via CLI, a <code>build.rs</code> script, or a <code>cbindgen.toml</code>.</strong>
+    Pin the cbindgen version so the generated header is reproducible.</li>
+  </ul>
+  <pre><code><span class="tok-c"># cbindgen.toml</span>
+language = <span class="tok-s">"C"</span>
+<span class="tok-c"># run it (pinned version), then read the output before trusting it:</span>
+<span class="tok-c"># cargo install cbindgen --version X.Y.Z</span>
+<span class="tok-c"># cbindgen --config cbindgen.toml --crate minidb --output minidb.h --lang c</span></code></pre>
+
+  <div class="box warn">
+    <div class="box-title">⚠️ cbindgen transcribes; it does not verify</div>
+    <p>"cbindgen transcribes declarations; it does not prove ownership, pointer, threading, or panic safety."
+    <span class="src">[src: AGENTS.md — Rust/FFI baseline]</span> It also "does not understand Rust's module
+    system or namespacing," so identically named types in different modules can clash.
+    <span class="src">[src: <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">cbindgen docs</a>]</span>
+    So treat the generated header as a draft to <strong>inspect</strong>, not gospel: confirm the opaque
+    handles are forward-declared, the buffer pointers/lengths match your contracts, and the error codes are
+    present. Then <strong>compile a tiny C smoke test</strong> against the header and the built library to
+    prove they actually link and run. AGENTS requires exactly this: "inspect generated output, and compile
+    a C smoke test."</p>
+  </div>
+
+  <h2>The Dart binding</h2>
+  <p><code>dart:ffi</code> lets Dart "call native C APIs, and … read, write, allocate, and deallocate native
+  memory." You load the compiled library and look up each function:</p>
+  <pre><code><span class="tok-k">import</span> <span class="tok-s">'dart:ffi'</span> <span class="tok-k">as</span> ffi;
+<span class="tok-k">import</span> <span class="tok-s">'package:ffi/ffi.dart'</span>; <span class="tok-c">// malloc/free helpers</span>
+
+<span class="tok-c">// Library file name differs per platform (8.7).</span>
+<span class="tok-k">final</span> dylib = ffi.DynamicLibrary.<span class="tok-f">open</span>(<span class="tok-s">'libminidb.so'</span>);
+
+<span class="tok-c">// C: int32_t minidb_open(const char* path, Db** out);</span>
+<span class="tok-k">typedef</span> _OpenC = ffi.Int32 <span class="tok-f">Function</span>(ffi.Pointer&lt;ffi.Char&gt;, ffi.Pointer&lt;ffi.Pointer&lt;ffi.Void&gt;&gt;);
+<span class="tok-k">typedef</span> _OpenDart = <span class="tok-f">int</span> <span class="tok-f">Function</span>(ffi.Pointer&lt;ffi.Char&gt;, ffi.Pointer&lt;ffi.Pointer&lt;ffi.Void&gt;&gt;);
+<span class="tok-k">final</span> _open = dylib.<span class="tok-f">lookupFunction</span>&lt;_OpenC, _OpenDart&gt;(<span class="tok-s">'minidb_open'</span>);</code></pre>
+  <p>The binding restates each signature twice: once with native types (<code>Int32</code>,
+  <code>Pointer</code>) and once with Dart types (<code>int</code>), because <code>dart:ffi</code> marker
+  types like <code>Int32</code> "serve as markers in type signatures" and aren't Dart values.
+  <span class="src">[src: <a href="https://dart.dev/interop/c-interop">dart.dev — C interop</a>]</span></p>
+
+  <h2>Memory on the Dart side</h2>
+  <ul>
+    <li>Allocate native input buffers with <code>malloc</code> from <code>package:ffi</code>, copy your
+    bytes in, pass the pointer + length, then <code>free</code> them after the call returns (inputs are
+    borrowed only for the call, per 8.2).</li>
+    <li>For engine-allocated output buffers, copy the bytes into Dart memory, then call your
+    <code>minidb_free_buf</code> — never Dart's <code>free</code> on engine memory (8.1: matching
+    deallocator). Native memory is outside the Dart GC; nothing frees it for you.</li>
+  </ul>
+
+  <h2>Generating the Dart side too</h2>
+  <p>Just as cbindgen generates the C header from Rust, <strong>ffigen</strong> can generate the Dart
+  bindings from the C header — turning <code>minidb.h</code> into the <code>typedef</code>/lookup
+  boilerplate above. It is the symmetric tool and worth using once the header is stable; like cbindgen,
+  inspect its output and don't assume it encodes your ownership rules.
+  <span class="verify-tag">⚠️VERIFY</span> current ffigen configuration/options against
+  <a href="https://pub.dev/packages/ffigen">pub.dev/packages/ffigen</a> for the version you use.</p>
+
+  <figure>
+  <svg viewBox="0 0 560 150" role="img" aria-label="Rust source to cbindgen header to ffigen Dart bindings">
+    <rect class="dg-bg" x="0" y="0" width="560" height="150" rx="10"/>
+    <rect class="dg-box" x="20" y="55" width="130" height="40" rx="5"/><text class="dg-txt-s" x="85" y="79" text-anchor="middle">Rust extern "C"</text>
+    <line class="dg-edge-hot" x1="150" y1="75" x2="195" y2="75"/><polygon class="dg-arrow" points="197,75 189,71 189,79"/><text class="dg-txt-s" x="173" y="65" text-anchor="middle">cbindgen</text>
+    <rect class="dg-box" x="200" y="55" width="130" height="40" rx="5"/><text class="dg-txt-s" x="265" y="79" text-anchor="middle">minidb.h (C)</text>
+    <line class="dg-edge-hot" x1="330" y1="75" x2="375" y2="75"/><polygon class="dg-arrow" points="377,75 369,71 369,79"/><text class="dg-txt-s" x="353" y="65" text-anchor="middle">ffigen</text>
+    <rect class="dg-fill-2" x="380" y="55" width="160" height="40" rx="5"/><text class="dg-txt-s" x="460" y="79" text-anchor="middle">Dart bindings</text>
+    <text class="dg-txt-s" x="280" y="128" text-anchor="middle">inspect + smoke-test at each arrow — generators transcribe, they don't verify</text>
+  </svg>
+  <figcaption>Both hops are generated, but each must be inspected and tested; neither tool checks your
+  safety contracts.</figcaption>
+  </figure>
+
+  <div class="box check">
+    <div class="box-title">✅ Concept check</div>
+    <div class="checks">
+      <p class="q">1. What must you configure for cbindgen, and why?</p>
+      <details><summary>Show answer</summary><div class="answer">Set the output language to C
+      (<code>--lang c</code> / <code>language = "C"</code>), because cbindgen defaults to C++ and a C++ header
+      used as C breaks subtly. Also pin the version for reproducibility.</div></details>
+      <p class="q">2. cbindgen produced a header with no errors — what have you proven, and not proven?</p>
+      <details><summary>Show answer</summary><div class="answer">You've proven the declarations were transcribed.
+      You have not proven ownership, pointer, threading, or panic safety — those are your contracts. Inspect
+      the header and compile a C smoke test to prove it links and runs.</div></details>
+      <p class="q">3. Why does each Dart binding restate a function's types twice?</p>
+      <details><summary>Show answer</summary><div class="answer">Once in native marker types (<code>Int32</code>,
+      <code>Pointer</code>) for the C signature and once in Dart types (<code>int</code>) for the Dart-callable
+      form; the native markers aren't instantiable Dart values.</div></details>
+      <p class="q">4. Who frees an engine-allocated output buffer on the Dart side?</p>
+      <details><summary>Show answer</summary><div class="answer">The engine's own <code>minidb_free_buf</code>,
+      not Dart's <code>free</code> — the allocating library must provide the matching deallocator, and native
+      memory is outside the Dart GC.</div></details>
+    </div>
+  </div>
+
+  <div class="box deeper">
+    <div class="box-title">📚 Go deeper / verify</div>
+    <ul>
+      <li><strong>Tools:</strong> <a href="https://github.com/mozilla/cbindgen/blob/master/docs.md">cbindgen docs</a>, <a href="https://pub.dev/packages/ffigen">ffigen</a>, <a href="https://pub.dev/packages/ffi">package:ffi</a>.</li>
+      <li><strong>Docs:</strong> <a href="https://dart.dev/interop/c-interop">dart.dev — C interop</a>, <a href="https://api.dart.dev/dart-ffi/dart-ffi-library.html">dart:ffi API</a>.</li>
+      <li><strong>Forward link:</strong> 8.7 builds and bundles the actual library files these bindings load.</li>
+    </ul>
+  </div>
+
+  <div class="pager" id="pager"></div>
+</main>
+<script src="../../assets/app.js"></script>
+</body>
+</html>
